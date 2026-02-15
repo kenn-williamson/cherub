@@ -1,0 +1,49 @@
+# Cherub default policy
+# Deny by default — only explicitly listed actions are permitted.
+
+[tools.bash]
+enabled = true
+
+[tools.bash.actions.read]
+tier = "observe"
+patterns = [
+    "^ls ",
+    "^cat ",
+    "^find ",
+    "^grep ",
+    "^rg ",
+    "^head ",
+    "^tail ",
+    "^wc ",
+    "^file ",
+    "^which ",
+    "^echo ",
+    "^pwd$",
+    "^env$",
+    "^whoami$",
+]
+
+[tools.bash.actions.write]
+tier = "act"
+patterns = [
+    "^mkdir ",
+    "^cp ",
+    "^mv ",
+    "^touch ",
+    "^tee ",
+    "^git ",
+]
+
+[tools.bash.actions.destructive]
+tier = "commit"
+patterns = [
+    "^rm ",
+    "^chmod ",
+    "^chown ",
+    "^kill ",
+    "^pkill ",
+    "^sudo ",
+    "^apt ",
+    "^pip install",
+    "^cargo install",
+]

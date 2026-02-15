@@ -1,0 +1,10 @@
+error[E0624]: associated function `new` is private
+ --> tests/ui/capability_token_private.rs:9:35
+  |
+9 |     let _token = CapabilityToken::new(Tier::Observe);
+  |                                   ^^^ private associated function
+  |
+ ::: src/enforcement/capability.rs
+  |
+  |     pub(super) fn new(tier: Tier) -> Self {
+  |     ------------------------------------- private associated function defined here
