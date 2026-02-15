@@ -1,6 +1,6 @@
 # Secure Agent Runtime — Design Document
 
-**Status:** Draft — Pre-Implementation  
+**Status:** Draft — Milestone 0 Complete  
 **Author:** Kenn Williamson  
 **Date:** February 2026
 

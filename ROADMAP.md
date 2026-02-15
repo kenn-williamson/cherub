@@ -10,12 +10,12 @@ Everything else — connectors, credential brokering, audit logging, IPC plugins
 
 **Goal:** Cargo project compiles. Directory structure exists. You can `cargo build` and `cargo test` with no errors.
 
-- [ ] `cargo init` with workspace structure
-- [ ] Create module stubs: `runtime`, `enforcement`, `tools`, `providers`
-- [ ] Define core traits: `Tool`, `Provider`, `ToolProposal`, `CapabilityToken`
-- [ ] `CapabilityToken` with private constructor — verify it cannot be constructed outside `enforcement` module
-- [ ] Define `Tier` enum: `Observe`, `Act`, `Commit`
-- [ ] Compiles, tests pass (even if tests are trivial)
+- [x] `cargo init` with workspace structure
+- [x] Create module stubs: `runtime`, `enforcement`, `tools`, `providers`
+- [x] Define core traits: `Tool`, `Provider`, `ToolProposal`, `CapabilityToken`
+- [x] `CapabilityToken` with private constructor — verify it cannot be constructed outside `enforcement` module
+- [x] Define `Tier` enum: `Observe`, `Act`, `Commit`
+- [x] Compiles, tests pass (even if tests are trivial)
 
 **This milestone is about the type system.** The capability token's private constructor is the first load-bearing security guarantee. If this is wrong, everything built on top is theater.
 

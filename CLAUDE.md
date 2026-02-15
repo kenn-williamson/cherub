@@ -13,6 +13,8 @@ cherub/
 ├── Cargo.toml
 ├── src/
 │   ├── main.rs              # Entry point, CLI interface
+│   ├── lib.rs               # Library entry point
+│   ├── error.rs             # Error types
 │   ├── runtime/
 │   │   ├── mod.rs            # Agent loop
 │   │   └── session.rs        # Conversation state, message history
@@ -27,6 +29,11 @@ cherub/
 │   └── providers/
 │       ├── mod.rs            # Provider trait
 │       └── anthropic.rs      # Anthropic API provider
+├── tests/
+│   ├── compile_tests.rs      # Compile-time invariant tests (trybuild)
+│   └── ui/
+│       ├── capability_token_private.rs      # Proves CapabilityToken can't be constructed outside enforcement
+│       └── capability_token_private.stderr  # Expected compiler error output
 ├── config/
 │   └── default_policy.toml   # Example policy file
 ├── DESIGN.md
