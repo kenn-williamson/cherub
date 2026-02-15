@@ -1,3 +1,4 @@
+pub mod approval;
 pub mod prompt;
 pub mod session;
 
@@ -10,6 +11,7 @@ use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::{ContentBlock, Message, StopReason, ToolDefinition};
 use crate::tools::{Proposed, ToolInvocation, ToolRegistry};
 
+use approval::{ApprovalResult, CliApprovalGate, EscalationContext};
 use session::Session;
 
 const MAX_ITERATIONS: usize = 25;
@@ -22,6 +24,7 @@ pub struct AgentLoop {
     registry: ToolRegistry,
     system_prompt: String,
     tool_definitions: Vec<ToolDefinition>,
+    approval_gate: CliApprovalGate,
 }
 
 impl AgentLoop {
@@ -30,6 +33,7 @@ impl AgentLoop {
         provider: AnthropicProvider,
         registry: ToolRegistry,
         system_prompt: String,
+        approval_gate: CliApprovalGate,
     ) -> Self {
         let tool_definitions = registry.definitions();
         Self {
@@ -39,6 +43,7 @@ impl AgentLoop {
             registry,
             system_prompt,
             tool_definitions,
+            approval_gate,
         }
     }
 
@@ -130,15 +135,55 @@ impl AgentLoop {
                             is_error: true,
                         });
                     }
-                    Decision::Escalate => {
-                        // M2: Escalate treated as reject. Approval gates are M3.
+                    Decision::Escalate { tier } => {
                         info!(decision = "ESCALATED", tool = %name, command = %command_str);
-                        println!("[ESCALATED → REJECTED] {name}: {command_str}");
-                        self.session.push(Message::ToolResult {
-                            tool_use_id,
-                            content: "action not permitted".to_owned(),
-                            is_error: true,
-                        });
+
+                        let context = EscalationContext {
+                            tool: &name,
+                            command: command_str,
+                            params: &input,
+                        };
+                        match self.approval_gate.request_approval(&context).await {
+                            ApprovalResult::Approved => {
+                                let token = enforcement::approve_escalation(tier);
+                                let _exec_span = info_span!("tool_exec", tool = %name, command = %command_str).entered();
+                                info!(decision = "APPROVED", tool = %name, command = %command_str);
+                                println!("[APPROVED] {name}: {command_str}");
+
+                                match evaluated.execute(token, &self.registry).await {
+                                    Ok(result) => {
+                                        if !result.output.is_empty() {
+                                            println!("{}", result.output);
+                                        }
+                                        self.session.push(Message::ToolResult {
+                                            tool_use_id,
+                                            content: result.output,
+                                            is_error: false,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        let err_msg = e.to_string();
+                                        warn!(error = %err_msg, "tool execution failed");
+                                        println!("[ERROR] {err_msg}");
+                                        self.session.push(Message::ToolResult {
+                                            tool_use_id,
+                                            content: err_msg,
+                                            is_error: true,
+                                        });
+                                    }
+                                }
+                            }
+                            ApprovalResult::Denied => {
+                                info!(decision = "DENIED", tool = %name, command = %command_str);
+                                println!("[DENIED] {name}: {command_str}");
+                                // Policy opacity: identical message to Reject
+                                self.session.push(Message::ToolResult {
+                                    tool_use_id,
+                                    content: "action not permitted".to_owned(),
+                                    is_error: true,
+                                });
+                            }
+                        }
                     }
                 }
             }

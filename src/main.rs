@@ -10,6 +10,7 @@ use tracing_subscriber::EnvFilter;
 use cherub::enforcement::policy::Policy;
 use cherub::providers::anthropic::AnthropicProvider;
 use cherub::runtime::AgentLoop;
+use cherub::runtime::approval::CliApprovalGate;
 use cherub::runtime::prompt::build_system_prompt;
 use cherub::tools::ToolRegistry;
 
@@ -76,7 +77,8 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| ".".to_owned());
     let system_prompt = build_system_prompt(&cwd);
 
-    let mut agent = AgentLoop::new(policy, provider, registry, system_prompt);
+    let approval_gate = CliApprovalGate::new();
+    let mut agent = AgentLoop::new(policy, provider, registry, system_prompt, approval_gate);
 
     info!(model = %model, "cherub started");
     println!("cherub: secure agent runtime (model: {model})");

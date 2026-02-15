@@ -17,6 +17,7 @@ cherub/
 │   ├── error.rs             # Error types
 │   ├── runtime/
 │   │   ├── mod.rs            # AgentLoop + run_turn()
+│   │   ├── approval.rs       # Approval gates (CliApprovalGate, EscalationContext)
 │   │   ├── session.rs        # Conversation state, message history
 │   │   └── prompt.rs         # System prompt builder
 │   ├── enforcement/

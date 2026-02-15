@@ -4,6 +4,12 @@
 [tools.bash]
 enabled = true
 
+# Tool-level constraints apply to every action. Failure is always a hard reject.
+# Example (uncomment to restrict bash to a specific working directory):
+# constraints = [
+#     { field = "working_dir", op = "contains", value = "/home/user/project" },
+# ]
+
 [tools.bash.actions.read]
 tier = "observe"
 patterns = [
@@ -33,6 +39,13 @@ patterns = [
     "^tee ",
     "^git ",
 ]
+# Action-level constraints apply to this specific action.
+# on_constraint_failure = "reject" (default) or "escalate" (ask the human).
+# Example (uncomment to block path traversal, escalating instead of rejecting):
+# constraints = [
+#     { field = "command", op = "not_contains", value = ".." },
+# ]
+# on_constraint_failure = "escalate"
 
 [tools.bash.actions.destructive]
 tier = "commit"
@@ -47,3 +60,12 @@ patterns = [
     "^pip install",
     "^cargo install",
 ]
+
+# Constraint operators:
+#   eq          — exact match (string, number, bool)
+#   lt / gt     — numeric comparison (strict: equal values fail)
+#   contains    — substring in string, or element in array
+#   not_contains — inverse of contains
+#   one_of      — value must be one of the array elements
+#   contains_all — all specified elements must be present (in string or array)
+#   matches     — regex match against a string value

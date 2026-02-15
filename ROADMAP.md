@@ -73,19 +73,19 @@ Everything else — connectors, credential brokering, audit logging, IPC plugins
 **Goal:** Commit-tier actions pause and ask the human for approval. Parameterized constraints enable fine-grained policy rules beyond pattern matching.
 
 ### Approval Gates
-- [ ] When enforcement returns `Escalate`, the CLI displays: what the model wants to do, why, and asks for y/n
-- [ ] Approval → enforcement issues `CapabilityToken` → tool executes
-- [ ] Denial → generic rejection sent to model
-- [ ] Timeout → denial (configurable, default 60s)
-- [ ] Model receives the same generic "action not permitted" for both denial and timeout — no information leakage
+- [x] When enforcement returns `Escalate`, the CLI displays: what the model wants to do, why, and asks for y/n
+- [x] Approval → enforcement issues `CapabilityToken` → tool executes
+- [x] Denial → generic rejection sent to model
+- [x] Timeout → denial (configurable, default 60s)
+- [x] Model receives the same generic "action not permitted" for both denial and timeout — no information leakage
 
 ### Stateless Constraints (per-tool and per-action)
-- [ ] Constraint predicates in policy TOML: field comparisons (`lt`, `gt`, `eq`), containment (`contains_all`, `one_of`), string matching
-- [ ] Per-tool constraints: apply to every action (sandbox boundary, always hard reject on failure)
-- [ ] Per-action constraints: apply to a specific operation, with `on_constraint_failure` = `"reject"` or `"escalate"`
-- [ ] Constraint evaluation in `policy.rs` alongside existing regex matching — predicates over `params` JSON
-- [ ] Constraint failure can override tier upward (Act → Escalate) but never downward (Commit always escalates)
-- [ ] Tests: numeric bounds, containment checks, failure escalation, failure rejection, tool-level vs action-level precedence
+- [x] Constraint predicates in policy TOML: field comparisons (`lt`, `gt`, `eq`), containment (`contains_all`, `one_of`), string matching
+- [x] Per-tool constraints: apply to every action (sandbox boundary, always hard reject on failure)
+- [x] Per-action constraints: apply to a specific operation, with `on_constraint_failure` = `"reject"` or `"escalate"`
+- [x] Constraint evaluation in `policy.rs` alongside existing regex matching — predicates over `params` JSON
+- [x] Constraint failure can override tier upward (Act → Escalate) but never downward (Commit always escalates)
+- [x] Tests: numeric bounds, containment checks, failure escalation, failure rejection, tool-level vs action-level precedence
 
 **Approval gates and constraints are coupled:** `on_constraint_failure = "escalate"` is only useful when there's a mechanism to ask the human. This is why they share a milestone.
 

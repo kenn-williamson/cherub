@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
 
-use regex::RegexSet;
+use regex::{Regex, RegexSet};
 use serde::Deserialize;
 
 use super::tier::Tier;
@@ -25,6 +25,8 @@ struct ToolConfig {
     enabled: bool,
     #[serde(default)]
     actions: HashMap<String, ActionConfig>,
+    #[serde(default)]
+    constraints: Vec<ConstraintConfig>,
 }
 
 #[derive(Deserialize)]
@@ -32,6 +34,38 @@ struct ToolConfig {
 struct ActionConfig {
     tier: TierValue,
     patterns: Vec<String>,
+    #[serde(default)]
+    constraints: Vec<ConstraintConfig>,
+    #[serde(default)]
+    on_constraint_failure: Option<OnConstraintFailureValue>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConstraintConfig {
+    field: String,
+    op: ConstraintOp,
+    value: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ConstraintOp {
+    Eq,
+    Lt,
+    Gt,
+    Contains,
+    NotContains,
+    OneOf,
+    ContainsAll,
+    Matches,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum OnConstraintFailureValue {
+    Reject,
+    Escalate,
 }
 
 #[derive(Deserialize)]
@@ -69,12 +103,39 @@ impl std::fmt::Debug for Policy {
 pub(super) struct CompiledTool {
     name: String,
     enabled: bool,
-    tiers: Vec<CompiledTier>, // Ordered: Commit, Act, Observe (highest first)
+    actions: Vec<CompiledAction>, // Ordered: Commit first, then Act, then Observe
+    constraints: Vec<CompiledConstraint>, // Tool-level: hard reject on failure
 }
 
-struct CompiledTier {
-    tier: Tier,
+pub(super) struct CompiledAction {
+    #[allow(dead_code)] // Used for diagnostics and future constraint error messages
+    pub(super) name: String,
+    pub(super) tier: Tier,
     patterns: RegexSet,
+    pub(super) constraints: Vec<CompiledConstraint>,
+    pub(super) on_constraint_failure: OnConstraintFailure,
+}
+
+pub(super) struct CompiledConstraint {
+    field: String,
+    predicate: Predicate,
+}
+
+enum Predicate {
+    Eq(serde_json::Value),
+    Lt(f64),
+    Gt(f64),
+    Contains(String),
+    NotContains(String),
+    OneOf(Vec<serde_json::Value>),
+    ContainsAll(Vec<String>),
+    Matches(Regex),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum OnConstraintFailure {
+    Reject,
+    Escalate,
 }
 
 impl FromStr for Policy {
@@ -118,74 +179,263 @@ impl Policy {
     }
 }
 
+impl CompiledConstraint {
+    /// Evaluate this constraint against the params JSON.
+    /// Missing field → false (deny by default).
+    fn evaluate(&self, params: &serde_json::Value) -> bool {
+        match params.get(&self.field) {
+            None => false,
+            Some(value) => self.predicate.evaluate(value),
+        }
+    }
+}
+
+impl Predicate {
+    fn evaluate(&self, value: &serde_json::Value) -> bool {
+        match self {
+            Predicate::Eq(expected) => value == expected,
+            Predicate::Lt(bound) => value.as_f64().is_some_and(|v| v < *bound),
+            Predicate::Gt(bound) => value.as_f64().is_some_and(|v| v > *bound),
+            Predicate::Contains(needle) => match value {
+                serde_json::Value::String(s) => s.contains(needle.as_str()),
+                serde_json::Value::Array(arr) => {
+                    arr.iter().any(|v| v.as_str().is_some_and(|s| s == needle))
+                }
+                _ => false,
+            },
+            Predicate::NotContains(needle) => match value {
+                serde_json::Value::String(s) => !s.contains(needle.as_str()),
+                serde_json::Value::Array(arr) => {
+                    !arr.iter().any(|v| v.as_str().is_some_and(|s| s == needle))
+                }
+                _ => false,
+            },
+            Predicate::OneOf(allowed) => allowed.contains(value),
+            Predicate::ContainsAll(required) => match value {
+                serde_json::Value::String(s) => {
+                    required.iter().all(|r| s.contains(r.as_str()))
+                }
+                serde_json::Value::Array(arr) => {
+                    required.iter().all(|r| {
+                        arr.iter().any(|v| v.as_str().is_some_and(|s| s == r))
+                    })
+                }
+                _ => false,
+            },
+            Predicate::Matches(regex) => {
+                value.as_str().is_some_and(|s| regex.is_match(s))
+            }
+        }
+    }
+}
+
 impl CompiledTool {
     pub(super) fn enabled(&self) -> bool {
         self.enabled
     }
 
-    /// Find the highest-privilege tier whose patterns match the command.
-    /// Tiers are stored in descending privilege order (Commit, Act, Observe).
-    pub(super) fn match_tier(&self, command: &str) -> Option<Tier> {
-        self.tiers
+    /// Check tool-level constraints against params.
+    /// All must pass (conjunction). Returns false if any fail.
+    pub(super) fn check_constraints(&self, params: &serde_json::Value) -> bool {
+        self.constraints.iter().all(|c| c.evaluate(params))
+    }
+
+    /// Find the first matching action for a command.
+    /// Actions are stored in descending privilege order (Commit first),
+    /// so the highest-privilege match always wins.
+    pub(super) fn match_action(&self, command: &str) -> Option<&CompiledAction> {
+        self.actions
             .iter()
-            .find(|ct| ct.patterns.is_match(command))
-            .map(|ct| ct.tier)
+            .find(|a| a.patterns.is_match(command))
+    }
+
+    /// Find the highest-privilege tier whose patterns match the command.
+    /// Convenience wrapper around `match_action()`.
+    #[cfg(test)]
+    pub(super) fn match_tier(&self, command: &str) -> Option<Tier> {
+        self.match_action(command).map(|a| a.tier)
     }
 }
 
-fn compile_tool(name: String, config: ToolConfig) -> Result<CompiledTool, CherubError> {
-    // Group actions by tier, merging patterns for same-tier actions.
-    let mut by_tier: HashMap<Tier, Vec<String>> = HashMap::new();
-
-    for (action_name, action) in &config.actions {
-        if action.patterns.is_empty() {
-            return Err(CherubError::PolicyValidation(format!(
-                "tool '{name}', action '{action_name}': patterns must not be empty"
-            )));
-        }
-        let tier: Tier = match action.tier {
-            TierValue::Observe => Tier::Observe,
-            TierValue::Act => Tier::Act,
-            TierValue::Commit => Tier::Commit,
-        };
-        by_tier
-            .entry(tier)
-            .or_default()
-            .extend(action.patterns.iter().cloned());
+impl CompiledAction {
+    /// Check action-level constraints against params.
+    pub(super) fn check_constraints(&self, params: &serde_json::Value) -> bool {
+        self.constraints.iter().all(|c| c.evaluate(params))
     }
+}
 
-    // Compile each tier's patterns into a RegexSet.
-    // Order: Commit first, then Act, then Observe (highest privilege first).
-    let mut tiers = Vec::new();
-    for tier in [Tier::Commit, Tier::Act, Tier::Observe] {
-        if let Some(patterns) = by_tier.remove(&tier) {
-            let regex_set = regex::RegexSetBuilder::new(&patterns)
+/// Compile a single constraint config into a validated predicate.
+fn compile_constraint(
+    context: &str,
+    config: ConstraintConfig,
+) -> Result<CompiledConstraint, CherubError> {
+    let predicate = match config.op {
+        ConstraintOp::Eq => Predicate::Eq(config.value),
+        ConstraintOp::Lt => {
+            let n = config.value.as_f64().ok_or_else(|| {
+                CherubError::PolicyValidation(format!(
+                    "{context}, constraint on '{}': 'lt' requires a numeric value",
+                    config.field
+                ))
+            })?;
+            Predicate::Lt(n)
+        }
+        ConstraintOp::Gt => {
+            let n = config.value.as_f64().ok_or_else(|| {
+                CherubError::PolicyValidation(format!(
+                    "{context}, constraint on '{}': 'gt' requires a numeric value",
+                    config.field
+                ))
+            })?;
+            Predicate::Gt(n)
+        }
+        ConstraintOp::Contains => {
+            let s = config.value.as_str().ok_or_else(|| {
+                CherubError::PolicyValidation(format!(
+                    "{context}, constraint on '{}': 'contains' requires a string value",
+                    config.field
+                ))
+            })?;
+            Predicate::Contains(s.to_owned())
+        }
+        ConstraintOp::NotContains => {
+            let s = config.value.as_str().ok_or_else(|| {
+                CherubError::PolicyValidation(format!(
+                    "{context}, constraint on '{}': 'not_contains' requires a string value",
+                    config.field
+                ))
+            })?;
+            Predicate::NotContains(s.to_owned())
+        }
+        ConstraintOp::OneOf => {
+            let arr = config.value.as_array().ok_or_else(|| {
+                CherubError::PolicyValidation(format!(
+                    "{context}, constraint on '{}': 'one_of' requires an array value",
+                    config.field
+                ))
+            })?;
+            Predicate::OneOf(arr.clone())
+        }
+        ConstraintOp::ContainsAll => {
+            let arr = config.value.as_array().ok_or_else(|| {
+                CherubError::PolicyValidation(format!(
+                    "{context}, constraint on '{}': 'contains_all' requires an array value",
+                    config.field
+                ))
+            })?;
+            let strings: Vec<String> = arr
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(|s| s.to_owned())
+                        .ok_or_else(|| {
+                            CherubError::PolicyValidation(format!(
+                                "{context}, constraint on '{}': 'contains_all' requires an array of strings",
+                                config.field
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Predicate::ContainsAll(strings)
+        }
+        ConstraintOp::Matches => {
+            let pattern = config.value.as_str().ok_or_else(|| {
+                CherubError::PolicyValidation(format!(
+                    "{context}, constraint on '{}': 'matches' requires a string value",
+                    config.field
+                ))
+            })?;
+            let regex = regex::RegexBuilder::new(pattern)
                 .size_limit(1 << 20)
                 .nest_limit(50)
                 .unicode(false)
                 .build()
                 .map_err(|e| {
                     CherubError::PolicyValidation(format!(
-                        "tool '{name}', tier '{tier:?}': {e}"
+                        "{context}, constraint on '{}': invalid regex: {e}",
+                        config.field
                     ))
                 })?;
-            tiers.push(CompiledTier {
-                tier,
-                patterns: regex_set,
-            });
+            Predicate::Matches(regex)
         }
-    }
+    };
+
+    Ok(CompiledConstraint {
+        field: config.field,
+        predicate,
+    })
+}
+
+fn compile_tool(name: String, config: ToolConfig) -> Result<CompiledTool, CherubError> {
+    let tool_context = format!("tool '{name}'");
+
+    // Compile tool-level constraints.
+    let tool_constraints = config
+        .constraints
+        .into_iter()
+        .map(|c| compile_constraint(&tool_context, c))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut actions: Vec<CompiledAction> = config
+        .actions
+        .into_iter()
+        .map(|(action_name, action)| {
+            if action.patterns.is_empty() {
+                return Err(CherubError::PolicyValidation(format!(
+                    "tool '{name}', action '{action_name}': patterns must not be empty"
+                )));
+            }
+
+            let tier: Tier = action.tier.into();
+            let action_context = format!("tool '{name}', action '{action_name}'");
+
+            let patterns = regex::RegexSetBuilder::new(&action.patterns)
+                .size_limit(1 << 20)
+                .nest_limit(50)
+                .unicode(false)
+                .build()
+                .map_err(|e| {
+                    CherubError::PolicyValidation(format!(
+                        "{action_context}: {e}"
+                    ))
+                })?;
+
+            let constraints = action
+                .constraints
+                .into_iter()
+                .map(|c| compile_constraint(&action_context, c))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let on_constraint_failure = match action.on_constraint_failure {
+                Some(OnConstraintFailureValue::Reject) | None => OnConstraintFailure::Reject,
+                Some(OnConstraintFailureValue::Escalate) => OnConstraintFailure::Escalate,
+            };
+
+            Ok(CompiledAction {
+                name: action_name,
+                tier,
+                patterns,
+                constraints,
+                on_constraint_failure,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Sort: highest privilege first (Commit > Act > Observe) so first match wins.
+    actions.sort_by(|a, b| b.tier.cmp(&a.tier));
 
     Ok(CompiledTool {
         name,
         enabled: config.enabled,
-        tiers,
+        actions,
+        constraints: tool_constraints,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     const DEFAULT_POLICY: &str = r#"
 [tools.bash]
@@ -215,7 +465,7 @@ patterns = [
         let policy = Policy::from_str(DEFAULT_POLICY).expect("default policy should parse");
         let tool = policy.find_tool("bash").expect("bash tool should exist");
         assert!(tool.enabled());
-        assert_eq!(tool.tiers.len(), 3);
+        assert_eq!(tool.actions.len(), 3);
     }
 
     #[test]
@@ -307,5 +557,298 @@ patterns = []
         let tool = policy.find_tool("bash").expect("bash should exist");
 
         assert_eq!(tool.match_tier("sudo ls /tmp"), Some(Tier::Commit));
+    }
+
+    // --- Predicate evaluation tests ---
+
+    fn make_constraint(field: &str, predicate: Predicate) -> CompiledConstraint {
+        CompiledConstraint {
+            field: field.to_owned(),
+            predicate,
+        }
+    }
+
+    #[test]
+    fn predicate_eq_string() {
+        let c = make_constraint("mode", Predicate::Eq(json!("read")));
+        assert!(c.evaluate(&json!({"mode": "read"})));
+        assert!(!c.evaluate(&json!({"mode": "write"})));
+    }
+
+    #[test]
+    fn predicate_eq_number() {
+        let c = make_constraint("count", Predicate::Eq(json!(5)));
+        assert!(c.evaluate(&json!({"count": 5})));
+        assert!(!c.evaluate(&json!({"count": 6})));
+    }
+
+    #[test]
+    fn predicate_eq_bool() {
+        let c = make_constraint("dry_run", Predicate::Eq(json!(true)));
+        assert!(c.evaluate(&json!({"dry_run": true})));
+        assert!(!c.evaluate(&json!({"dry_run": false})));
+    }
+
+    #[test]
+    fn predicate_lt() {
+        let c = make_constraint("size", Predicate::Lt(100.0));
+        assert!(c.evaluate(&json!({"size": 50})));
+        assert!(!c.evaluate(&json!({"size": 100}))); // equal → false
+        assert!(!c.evaluate(&json!({"size": 150})));
+    }
+
+    #[test]
+    fn predicate_gt() {
+        let c = make_constraint("size", Predicate::Gt(100.0));
+        assert!(c.evaluate(&json!({"size": 150})));
+        assert!(!c.evaluate(&json!({"size": 100}))); // equal → false
+        assert!(!c.evaluate(&json!({"size": 50})));
+    }
+
+    #[test]
+    fn predicate_lt_non_numeric() {
+        let c = make_constraint("name", Predicate::Lt(100.0));
+        assert!(!c.evaluate(&json!({"name": "hello"})));
+    }
+
+    #[test]
+    fn predicate_gt_non_numeric() {
+        let c = make_constraint("name", Predicate::Gt(100.0));
+        assert!(!c.evaluate(&json!({"name": "hello"})));
+    }
+
+    #[test]
+    fn predicate_contains_string() {
+        let c = make_constraint("path", Predicate::Contains("/tmp".to_owned()));
+        assert!(c.evaluate(&json!({"path": "/tmp/foo"})));
+        assert!(!c.evaluate(&json!({"path": "/home/user"})));
+    }
+
+    #[test]
+    fn predicate_contains_array() {
+        let c = make_constraint("tags", Predicate::Contains("safe".to_owned()));
+        assert!(c.evaluate(&json!({"tags": ["safe", "tested"]})));
+        assert!(!c.evaluate(&json!({"tags": ["untested"]})));
+    }
+
+    #[test]
+    fn predicate_not_contains_string() {
+        let c = make_constraint("path", Predicate::NotContains("..".to_owned()));
+        assert!(c.evaluate(&json!({"path": "/tmp/foo"})));
+        assert!(!c.evaluate(&json!({"path": "/tmp/../etc/passwd"})));
+    }
+
+    #[test]
+    fn predicate_not_contains_array() {
+        let c = make_constraint("tags", Predicate::NotContains("dangerous".to_owned()));
+        assert!(c.evaluate(&json!({"tags": ["safe"]})));
+        assert!(!c.evaluate(&json!({"tags": ["dangerous", "safe"]})));
+    }
+
+    #[test]
+    fn predicate_one_of() {
+        let c = make_constraint(
+            "env",
+            Predicate::OneOf(vec![json!("dev"), json!("staging")]),
+        );
+        assert!(c.evaluate(&json!({"env": "dev"})));
+        assert!(c.evaluate(&json!({"env": "staging"})));
+        assert!(!c.evaluate(&json!({"env": "production"})));
+    }
+
+    #[test]
+    fn predicate_contains_all_array() {
+        let c = make_constraint(
+            "flags",
+            Predicate::ContainsAll(vec!["--dry-run".to_owned(), "--verbose".to_owned()]),
+        );
+        assert!(c.evaluate(&json!({"flags": ["--dry-run", "--verbose", "--color"]})));
+        assert!(!c.evaluate(&json!({"flags": ["--dry-run"]})));
+    }
+
+    #[test]
+    fn predicate_contains_all_string() {
+        let c = make_constraint(
+            "command",
+            Predicate::ContainsAll(vec!["--safe".to_owned(), "--log".to_owned()]),
+        );
+        assert!(c.evaluate(&json!({"command": "run --safe --log output"})));
+        assert!(!c.evaluate(&json!({"command": "run --safe"})));
+    }
+
+    #[test]
+    fn predicate_matches() {
+        let regex = regex::RegexBuilder::new(r"^/tmp/")
+            .unicode(false)
+            .build()
+            .unwrap();
+        let c = make_constraint("path", Predicate::Matches(regex));
+        assert!(c.evaluate(&json!({"path": "/tmp/foo"})));
+        assert!(!c.evaluate(&json!({"path": "/home/user"})));
+    }
+
+    #[test]
+    fn missing_field_is_false() {
+        let c = make_constraint("missing", Predicate::Eq(json!("anything")));
+        assert!(!c.evaluate(&json!({"other": "value"})));
+    }
+
+    // --- Constraint parsing tests ---
+
+    #[test]
+    fn parse_tool_level_constraints() {
+        let toml = r#"
+[tools.bash]
+enabled = true
+constraints = [
+    { field = "working_dir", op = "contains", value = "/tmp" },
+]
+
+[tools.bash.actions.read]
+tier = "observe"
+patterns = ["^ls "]
+"#;
+        let policy = Policy::from_str(toml).expect("should parse");
+        let tool = policy.find_tool("bash").expect("bash should exist");
+        assert_eq!(tool.constraints.len(), 1);
+    }
+
+    #[test]
+    fn parse_action_level_constraints() {
+        let toml = r#"
+[tools.bash]
+enabled = true
+
+[tools.bash.actions.write]
+tier = "act"
+patterns = ["^mkdir "]
+constraints = [
+    { field = "working_dir", op = "contains", value = "/tmp" },
+]
+on_constraint_failure = "escalate"
+"#;
+        let policy = Policy::from_str(toml).expect("should parse");
+        let tool = policy.find_tool("bash").expect("bash should exist");
+        let action = tool.match_action("mkdir /tmp/test").expect("should match");
+        assert_eq!(action.constraints.len(), 1);
+        assert_eq!(action.on_constraint_failure, OnConstraintFailure::Escalate);
+    }
+
+    #[test]
+    fn on_constraint_failure_default_is_reject() {
+        let toml = r#"
+[tools.bash]
+enabled = true
+
+[tools.bash.actions.write]
+tier = "act"
+patterns = ["^mkdir "]
+constraints = [
+    { field = "x", op = "eq", value = 1 },
+]
+"#;
+        let policy = Policy::from_str(toml).expect("should parse");
+        let tool = policy.find_tool("bash").expect("bash should exist");
+        let action = tool.match_action("mkdir /tmp").expect("should match");
+        assert_eq!(action.on_constraint_failure, OnConstraintFailure::Reject);
+    }
+
+    #[test]
+    fn constraint_lt_with_string_value_rejected() {
+        let toml = r#"
+[tools.bash]
+enabled = true
+
+[tools.bash.actions.read]
+tier = "observe"
+patterns = ["^ls "]
+constraints = [
+    { field = "count", op = "lt", value = "not_a_number" },
+]
+"#;
+        let err = Policy::from_str(toml).unwrap_err();
+        assert!(matches!(err, CherubError::PolicyValidation(_)));
+    }
+
+    #[test]
+    fn constraint_one_of_with_non_array_rejected() {
+        let toml = r#"
+[tools.bash]
+enabled = true
+
+[tools.bash.actions.read]
+tier = "observe"
+patterns = ["^ls "]
+constraints = [
+    { field = "env", op = "one_of", value = "not_an_array" },
+]
+"#;
+        let err = Policy::from_str(toml).unwrap_err();
+        assert!(matches!(err, CherubError::PolicyValidation(_)));
+    }
+
+    #[test]
+    fn constraint_invalid_matches_regex_rejected() {
+        let toml = r#"
+[tools.bash]
+enabled = true
+
+[tools.bash.actions.read]
+tier = "observe"
+patterns = ["^ls "]
+constraints = [
+    { field = "path", op = "matches", value = "[invalid" },
+]
+"#;
+        let err = Policy::from_str(toml).unwrap_err();
+        assert!(matches!(err, CherubError::PolicyValidation(_)));
+    }
+
+    #[test]
+    fn constraint_unknown_field_in_constraint_rejected() {
+        let toml = r#"
+[tools.bash]
+enabled = true
+constraints = [
+    { field = "x", op = "eq", value = 1, extra = "bad" },
+]
+
+[tools.bash.actions.read]
+tier = "observe"
+patterns = ["^ls "]
+"#;
+        let err = Policy::from_str(toml).unwrap_err();
+        assert!(matches!(err, CherubError::PolicyLoad(_)));
+    }
+
+    #[test]
+    fn backward_compat_no_constraints() {
+        // Existing TOML without constraints still parses.
+        let policy = Policy::from_str(DEFAULT_POLICY).expect("should parse");
+        let tool = policy.find_tool("bash").expect("bash should exist");
+        assert!(tool.constraints.is_empty());
+        for action in &tool.actions {
+            assert!(action.constraints.is_empty());
+            assert_eq!(action.on_constraint_failure, OnConstraintFailure::Reject);
+        }
+    }
+
+    #[test]
+    fn tool_constraints_check() {
+        let toml = r#"
+[tools.bash]
+enabled = true
+constraints = [
+    { field = "working_dir", op = "contains", value = "/tmp" },
+]
+
+[tools.bash.actions.read]
+tier = "observe"
+patterns = ["^ls "]
+"#;
+        let policy = Policy::from_str(toml).expect("should parse");
+        let tool = policy.find_tool("bash").unwrap();
+        assert!(tool.check_constraints(&json!({"command": "ls /tmp", "working_dir": "/tmp/foo"})));
+        assert!(!tool.check_constraints(&json!({"command": "ls /tmp", "working_dir": "/home"})));
     }
 }
