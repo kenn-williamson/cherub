@@ -13,4 +13,10 @@ pub enum CherubError {
 
     #[error("invalid tool invocation: {0}")]
     InvalidInvocation(String),
+
+    #[error("policy error: {0}")]
+    PolicyLoad(String),
+
+    #[error("invalid policy: {0}")]
+    PolicyValidation(String),
 }

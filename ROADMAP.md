@@ -25,13 +25,13 @@ Everything else — connectors, credential brokering, audit logging, IPC plugins
 
 **Goal:** The enforcement layer can evaluate a tool proposal against a TOML policy and return allow/reject/escalate. No model involved yet — pure unit tests.
 
-- [ ] Policy file parser (TOML → internal policy struct)
-- [ ] Default policy: deny everything not explicitly permitted
-- [ ] Pattern matching engine for bash commands against policy rules
-- [ ] `evaluate(proposal, policy) → Decision` function (the core of the project)
-- [ ] Decision types: `Allow(CapabilityToken)`, `Reject`, `Escalate`
-- [ ] `Allow` returns a `CapabilityToken` — the only way to obtain one
-- [ ] Tests:
+- [x] Policy file parser (TOML → internal policy struct)
+- [x] Default policy: deny everything not explicitly permitted
+- [x] Pattern matching engine for bash commands against policy rules
+- [x] `evaluate(proposal, policy) → Decision` function (the core of the project)
+- [x] Decision types: `Allow(CapabilityToken)`, `Reject`, `Escalate`
+- [x] `Allow` returns a `CapabilityToken` — the only way to obtain one
+- [x] Tests:
   - Permitted observe command → Allow
   - Permitted act command → Allow
   - Commit-tier command → Escalate
