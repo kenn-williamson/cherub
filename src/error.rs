@@ -19,4 +19,7 @@ pub enum CherubError {
 
     #[error("invalid policy: {0}")]
     PolicyValidation(String),
+
+    #[error("configuration error: {0}")]
+    Config(String),
 }

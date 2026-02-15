@@ -49,14 +49,16 @@ Everything else — connectors, credential brokering, audit logging, IPC plugins
 
 **Goal:** You can type a message in the terminal, the Anthropic API generates a response, and if the model proposes a bash command, the enforcement layer evaluates it before execution.
 
-- [ ] Anthropic API provider: send messages, receive tool-use responses
-- [ ] Streaming support (print tokens as they arrive)
-- [ ] System prompt defining the agent's tool-calling interface
-- [ ] Agent loop: message → model → parse tool proposals → enforce → execute or reject → feed result back to model
-- [ ] CLI interface: readline-style input, formatted output
-- [ ] Bash tool: receives `CapabilityToken` + command, executes, returns output
+- [x] Anthropic API provider: non-streaming `complete()` via reqwest (streaming deferred)
+- [x] System prompt defining the agent's tool-calling interface
+- [x] Agent loop: message → model → parse tool proposals → enforce → execute or reject → feed result back to model
+- [x] CLI interface: rustyline REPL with history
+- [x] Bash tool: `tokio::process::Command` with `kill_on_drop(true)`, 120s timeout, 256 KiB output truncation
   - Bash tool function signature requires `CapabilityToken` parameter — cannot be called without one
-- [ ] Wire it together: user types "list files in /tmp" → model proposes `ls /tmp` → enforcement checks policy → observe tier → allowed → executes → model sees result → responds
+- [x] Wire types: serde structs for Anthropic API JSON, consecutive ToolResult merging
+- [x] ToolRegistry with enum dispatch (`ToolImpl::Bash`), `ToolDefinition` schemas
+- [x] Escalate treated as reject for M2 (approval gates are M3)
+- [x] 37 unit tests + compile-fail test passing
 
 **This milestone is the thesis proven.** A human can sit at the terminal, interact with the agent, and observe that:
 1. Read-only commands execute freely
@@ -66,15 +68,26 @@ Everything else — connectors, credential brokering, audit logging, IPC plugins
 
 ---
 
-## Milestone 3: Approval Gates
+## Milestone 3: Approval Gates + Stateless Constraints
 
-**Goal:** Commit-tier actions pause and ask the human for approval via the CLI.
+**Goal:** Commit-tier actions pause and ask the human for approval. Parameterized constraints enable fine-grained policy rules beyond pattern matching.
 
+### Approval Gates
 - [ ] When enforcement returns `Escalate`, the CLI displays: what the model wants to do, why, and asks for y/n
 - [ ] Approval → enforcement issues `CapabilityToken` → tool executes
 - [ ] Denial → generic rejection sent to model
 - [ ] Timeout → denial (configurable, default 60s)
 - [ ] Model receives the same generic "action not permitted" for both denial and timeout — no information leakage
+
+### Stateless Constraints (per-tool and per-action)
+- [ ] Constraint predicates in policy TOML: field comparisons (`lt`, `gt`, `eq`), containment (`contains_all`, `one_of`), string matching
+- [ ] Per-tool constraints: apply to every action (sandbox boundary, always hard reject on failure)
+- [ ] Per-action constraints: apply to a specific operation, with `on_constraint_failure` = `"reject"` or `"escalate"`
+- [ ] Constraint evaluation in `policy.rs` alongside existing regex matching — predicates over `params` JSON
+- [ ] Constraint failure can override tier upward (Act → Escalate) but never downward (Commit always escalates)
+- [ ] Tests: numeric bounds, containment checks, failure escalation, failure rejection, tool-level vs action-level precedence
+
+**Approval gates and constraints are coupled:** `on_constraint_failure = "escalate"` is only useful when there's a mechanism to ask the human. This is why they share a milestone.
 
 ---
 
@@ -140,7 +153,8 @@ These are real goals but not blocking the thesis proof:
 - Session persistence (JSONL)
 - Wasm plugin support via Wasmtime (alternative to process isolation)
 - Multi-agent routing (different policies per channel)
-- Parameter-level policy rules (Stripe payment > $100 = Commit)
+- Per-task dynamic constraints (session-scoped, user-confirmed via approval gate — see DESIGN.md Section 3.5)
+- Stateful constraints (cumulative tracking: daily spend limits, action rate limits, time-windowed budgets)
 - Policy generation tooling (analyze a tool's actions, suggest tier classifications)
 
 ---

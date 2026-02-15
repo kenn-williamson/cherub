@@ -16,19 +16,21 @@ cherub/
 │   ├── lib.rs               # Library entry point
 │   ├── error.rs             # Error types
 │   ├── runtime/
-│   │   ├── mod.rs            # Agent loop
-│   │   └── session.rs        # Conversation state, message history
+│   │   ├── mod.rs            # AgentLoop + run_turn()
+│   │   ├── session.rs        # Conversation state, message history
+│   │   └── prompt.rs         # System prompt builder
 │   ├── enforcement/
 │   │   ├── mod.rs            # Enforcement layer entry point
 │   │   ├── capability.rs     # Capability tokens (private constructors)
 │   │   ├── policy.rs         # Policy loading and evaluation
 │   │   └── tier.rs           # Observe/Act/Commit tier definitions
 │   ├── tools/
-│   │   ├── mod.rs            # Tool trait, tool registry
-│   │   └── bash.rs           # Bash execution tool
+│   │   ├── mod.rs            # Tool trait, ToolRegistry, ToolImpl enum dispatch
+│   │   └── bash.rs           # Bash execution tool (tokio::process::Command)
 │   └── providers/
-│       ├── mod.rs            # Provider trait
-│       └── anthropic.rs      # Anthropic API provider
+│       ├── mod.rs            # Message/ContentBlock/StopReason/ToolDefinition types
+│       ├── anthropic.rs      # Anthropic API provider (non-streaming)
+│       └── wire.rs           # Serde structs for Anthropic API JSON (private)
 ├── tests/
 │   ├── compile_tests.rs      # Compile-time invariant tests (trybuild)
 │   └── ui/
@@ -38,6 +40,7 @@ cherub/
 │   └── default_policy.toml   # Example policy file
 ├── DESIGN.md
 ├── ROADMAP.md
+├── ROADMAP_DEFERRED.md
 └── LICENSE
 ```
 

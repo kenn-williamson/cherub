@@ -2,8 +2,13 @@ pub mod bash;
 
 use std::marker::PhantomData;
 
+use serde_json::json;
+
 use crate::enforcement::capability::CapabilityToken;
 use crate::error::CherubError;
+use crate::providers::ToolDefinition;
+
+use bash::BashTool;
 
 /// Typestate: tool invocation parsed from model output, not yet evaluated.
 pub struct Proposed;
@@ -45,24 +50,91 @@ impl ToolInvocation<Proposed> {
 }
 
 impl ToolInvocation<Evaluated> {
-    /// Execute the tool invocation. Requires a `CapabilityToken` (consumed on use).
-    pub fn execute(
+    /// Execute the tool invocation via the registry. Requires a `CapabilityToken` (consumed on use).
+    pub async fn execute(
         self,
-        _token: CapabilityToken,
+        token: CapabilityToken,
+        registry: &ToolRegistry,
     ) -> Result<ToolResult, CherubError> {
-        // Stub: Milestone 2 adds tool dispatch.
-        Ok(ToolResult {
-            output: String::new(),
-        })
+        let tool = registry
+            .find(&self.tool)
+            .ok_or_else(|| CherubError::InvalidInvocation(format!("unknown tool: {}", self.tool)))?;
+        tool.execute(&self.params, token).await
     }
 }
 
+#[derive(Debug)]
 pub struct ToolResult {
     pub output: String,
 }
 
-/// Extension point for tool implementations. One of only two `dyn Trait`
-/// boundaries in the project (with `Provider`).
+/// Enum dispatch for tool implementations. Known variants at compile time.
+/// `dyn Tool` deferred to M7 plugin IPC.
+pub(crate) enum ToolImpl {
+    Bash(BashTool),
+}
+
+impl ToolImpl {
+    fn name(&self) -> &str {
+        match self {
+            Self::Bash(_) => "bash",
+        }
+    }
+
+    async fn execute(
+        &self,
+        params: &serde_json::Value,
+        token: CapabilityToken,
+    ) -> Result<ToolResult, CherubError> {
+        match self {
+            Self::Bash(tool) => tool.execute(params, token).await,
+        }
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        match self {
+            Self::Bash(_) => ToolDefinition {
+                name: "bash".to_owned(),
+                description: "Execute a bash command. The command is passed to `bash -c`.".to_owned(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The bash command to execute"
+                        }
+                    },
+                    "required": ["command"]
+                }),
+            },
+        }
+    }
+}
+
+/// Registry of available tools. Provides lookup and schema definitions.
+pub struct ToolRegistry {
+    tools: Vec<ToolImpl>,
+}
+
+impl ToolRegistry {
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        Self {
+            tools: vec![ToolImpl::Bash(BashTool)],
+        }
+    }
+
+    pub(crate) fn find(&self, name: &str) -> Option<&ToolImpl> {
+        self.tools.iter().find(|t| t.name() == name)
+    }
+
+    pub fn definitions(&self) -> Vec<ToolDefinition> {
+        self.tools.iter().map(|t| t.definition()).collect()
+    }
+}
+
+/// Extension point for tool implementations. Retained for future M7 plugin use.
+/// Not used in M2 — enum dispatch via `ToolImpl` is preferred for known variants.
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
 

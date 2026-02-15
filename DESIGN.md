@@ -1,6 +1,6 @@
 # Secure Agent Runtime — Design Document
 
-**Status:** Draft — Milestone 1 Complete  
+**Status:** Draft — Milestone 2 Complete
 **Author:** Kenn Williamson  
 **Date:** February 2026
 
@@ -134,19 +134,96 @@ The tiering is defined per-action within each tool's capability declaration. Whe
 
 **The critical default: new tools and new actions default to Observe only.** An agent that installs a new capability or a plugin that adds new actions cannot grant itself Act or Commit permissions. Only the human operator can promote actions above Observe.
 
-### 3.5 Approval Gates
+### 3.5 Parameterized Constraints
+
+Tiers alone answer "can this agent use this tool?" — which is equivalent to OAuth scopes. The differentiating question is: "should this agent take *this specific action* with *these specific parameters* given *what it has already done*?" That requires constraints.
+
+#### Three Levels of Constraints
+
+Constraints apply at three levels, each with a different lifetime and trust model:
+
+**Per-tool constraints** — Static rules in the policy file that apply to every action the tool takes. Set by the operator. These define the sandbox boundary.
+
+```toml
+[tools.brokerage]
+constraints = [
+    { field = "account", op = "eq", value = "paper_trading_account" }
+]
+```
+
+"This agent can only touch the paper trading account, regardless of what action it's performing."
+
+**Per-action constraints** — Static rules in the policy file that apply to a specific operation within a tool. Set by the operator. These define fine-grained guardrails within the sandbox.
+
+```toml
+[tools.brokerage.actions.buy]
+tier = "act"
+on_constraint_failure = "escalate"
+constraints = [
+    { field = "amount", op = "lt", value = 500.00 }
+]
+```
+
+"Buy orders under $500 are autonomous. Over $500 — ask the human."
+
+**Per-task constraints** — Dynamic rules negotiated between the user and agent at the start of a task. These are session-scoped and ephemeral. They define the specific boundaries of a particular task.
+
+User says: "Order groceries from Walmart. Stay under $200. Make sure to get milk, eggs, and bread."
+
+The agent extracts structured constraints and presents them for confirmation:
+
+```
+Task constraints for your Walmart order:
+- Total must be under $200.00
+- Order must include: milk, eggs, bread
+Confirm? (reply OK or tell me what to change)
+```
+
+The user confirms. The constraints are registered with the enforcement layer for this session. The agent cannot modify or remove them after confirmation.
+
+The presentation is connector-dependent — Telegram formats as a message, Discord as an embed, CLI as a table — but the structured representation underneath is the same.
+
+#### Constraint Evaluation
+
+The enforcement layer evaluates constraints as predicates over the `params` JSON of a tool invocation. Evaluation order:
+
+1. **Tool constraints** — checked first. Failure is always a hard reject. These are the sandbox boundary.
+2. **Action constraints** — checked second. Failure behavior is determined by `on_constraint_failure`: either `"reject"` (hard no, agent cannot even ask) or `"escalate"` (ask the human).
+3. **Task constraints** — checked last. Same failure behavior as action constraints.
+
+If all constraints pass, the normal tier behavior applies (Observe/Act auto-allowed, Commit escalates). If any constraint fails, it can override upward — an Act-tier action with a failing constraint can be escalated to the human — but constraints can never override downward. A Commit-tier action always escalates regardless of constraints.
+
+#### The Trust Problem with Task Constraints
+
+Tool and action constraints come from the policy file, written by the operator offline. They are trusted by definition.
+
+Task constraints come from a conversation. The agent interprets the user's natural language and proposes structured constraints. This creates a trust gap: the agent could misinterpret or subtly weaken the constraints, undermining enforcement.
+
+The solution is a **confirmation gate**: the agent proposes structured constraints, the user sees them in structured form (not the agent's natural language paraphrase), and the user explicitly confirms before they are registered with the enforcement layer. Once confirmed, task constraints are locked in — the agent cannot modify or remove them. They are enforced with the same determinism as policy-file constraints.
+
+This confirmation step is itself an approval gate — applied to the task setup rather than to a specific action. The same mechanism serves both purposes.
+
+#### Why This Is Not OAuth Scopes
+
+OAuth answers "can this app call this endpoint?" — a static, binary, per-endpoint gate with no parameter awareness, no state tracking, and no contextual judgment.
+
+Parameterized constraints answer "should this agent take this action right now, with these parameters, given what it has already done?" — a dynamic, contextual, per-invocation evaluation that considers the values being passed, the accumulated state of the session, and the specific task the agent was given.
+
+A limited API key for a brokerage might say "can trade but can't withdraw." It cannot say "can trade but not more than $100/day from checking." That is a policy on behavior, not a permission on an endpoint. This is the layer where Cherub provides value that existing access control systems cannot.
+
+### 3.6 Approval Gates
 
 Any action classified at the Commit tier (or any action the operator has explicitly flagged for approval) pauses execution and sends a confirmation request to the operator through their preferred channel. The agent's message to the operator includes what it wants to do and why. The operator responds with approval or denial. The enforcement layer holds the action in a pending state until the human signal arrives or a configurable timeout expires (default: deny on timeout).
 
 This is the IA framework made literal. The agent proposes. The human validates. The runtime enforces the decision.
 
-### 3.6 The Credential Broker
+### 3.7 The Credential Broker
 
 The agent never sees credential values. API keys, tokens, passwords, and secrets are stored in a credential vault (system keychain, encrypted file, or external secret manager). The agent knows credentials exist by reference name only — e.g., it knows there is a credential called "stripe_api" with capabilities ["payments"]. When the agent proposes an API call that requires authentication, it references the credential by name. The enforcement layer validates that the proposed action is within the credential's declared capability scope. The credential broker then injects the actual credential value into the outgoing request, outside the agent's context. The agent receives the API response. The credential value never appears in the agent's context window, session history, or any log the agent can access.
 
 This eliminates credential exfiltration as a threat vector. The agent cannot leak what it has never seen.
 
-### 3.7 The Audit Log
+### 3.8 The Audit Log
 
 Every interaction in the system is logged with full context:
 
@@ -222,9 +299,9 @@ Future considerations: WebAssembly plugins loaded via Wasmtime could provide tig
 
 ### 5.3 Policy Questions
 
-- **Policy language.** What format does the operator's capability policy use? TOML/YAML for simplicity? A dedicated DSL for expressiveness? How complex can policy rules get? Can rules reference context (time of day, message source, recent action history) or are they purely static?
+- **Policy language.** What format does the operator's capability policy use? TOML/YAML for simplicity? A dedicated DSL for expressiveness? How complex can policy rules get? Can rules reference context (time of day, message source, recent action history) or are they purely static? *Partially resolved: TOML for static policy (tool/action constraints). Task constraints are dynamic and session-scoped. Stateful constraints (cumulative tracking, time windows) are deferred — see ROADMAP_DEFERRED.md.*
 
-- **Tier override granularity.** Can the operator override tiers at the tool level (all Stripe actions are Commit), the action level (Stripe create_payment is Commit but Stripe get_balance is Observe), or the parameter level (Stripe create_payment over $100 is Commit but under $100 is Act)?
+- **Tier override granularity.** Can the operator override tiers at the tool level (all Stripe actions are Commit), the action level (Stripe create_payment is Commit but Stripe get_balance is Observe), or the parameter level (Stripe create_payment over $100 is Commit but under $100 is Act)? *Resolved: Yes, all three. The parameterized constraint model (Section 3.5) supports per-tool, per-action, and per-task constraints with `on_constraint_failure` controlling whether violations escalate or hard-reject.*
 
 - **Policy hot-reload.** Can the operator modify the policy while the runtime is running? If so, how are in-flight actions handled? Does a policy change affect currently pending approval gates?
 
