@@ -18,6 +18,7 @@ secrecy = "0.10.3"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 rustyline = "17.0"
+dotenvy = "0.15"
 
 [dev-dependencies]
 trybuild = "1.0"
