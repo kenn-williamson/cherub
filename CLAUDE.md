@@ -16,8 +16,8 @@ cherub/
 │   ├── lib.rs               # Library entry point
 │   ├── error.rs             # Error types
 │   ├── runtime/
-│   │   ├── mod.rs            # AgentLoop + run_turn()
-│   │   ├── approval.rs       # Approval gates (CliApprovalGate, EscalationContext)
+│   │   ├── mod.rs            # AgentLoop<P, A> + run_turn() (generic over Provider/ApprovalGate)
+│   │   ├── approval.rs       # ApprovalGate trait, CliApprovalGate, EscalationContext
 │   │   ├── session.rs        # Conversation state, message history
 │   │   └── prompt.rs         # System prompt builder
 │   ├── enforcement/
@@ -30,11 +30,13 @@ cherub/
 │   │   ├── mod.rs            # Tool trait, ToolRegistry, ToolImpl enum dispatch
 │   │   └── bash.rs           # Bash execution tool (tokio::process::Command)
 │   └── providers/
-│       ├── mod.rs            # Message/ContentBlock/StopReason/ToolDefinition types
+│       ├── mod.rs            # Provider trait, Message/ContentBlock/StopReason/ToolDefinition types
 │       ├── anthropic.rs      # Anthropic API provider (non-streaming)
 │       └── wire.rs           # Serde structs for Anthropic API JSON (private)
 ├── tests/
+│   ├── adversarial.rs        # Mock-provider adversarial integration tests (16 tests)
 │   ├── compile_tests.rs      # Compile-time invariant tests (trybuild)
+│   ├── redteam.rs            # Live model adversarial tests (#[ignore], requires API key)
 │   └── ui/
 │       ├── capability_token_private.rs      # Proves CapabilityToken can't be constructed outside enforcement
 │       └── capability_token_private.stderr  # Expected compiler error output

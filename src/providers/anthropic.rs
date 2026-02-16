@@ -2,10 +2,10 @@ use std::time::Duration;
 
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
-use tracing::{info, info_span, warn};
+use tracing::{Instrument, info, info_span, warn};
 
 use super::wire::{self, RequestBody};
-use super::{Message, ToolDefinition};
+use super::{Message, Provider, ToolDefinition};
 use crate::error::CherubError;
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -34,55 +34,61 @@ impl AnthropicProvider {
             max_tokens,
         })
     }
+}
 
+impl Provider for AnthropicProvider {
     /// Send a non-streaming completion request to the Anthropic API.
-    pub async fn complete(
+    async fn complete(
         &self,
         system: &str,
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<Message, CherubError> {
-        let _span = info_span!("api_call", model = %self.model).entered();
+        // Use Instrument instead of entered() — EnteredSpan is !Send, which
+        // prevents the future from being Send across await points.
+        async {
+            let wire_messages = wire::messages_to_wire(messages);
+            let wire_tools: Vec<_> = tools.iter().map(wire::WireTool::from).collect();
 
-        let wire_messages = wire::messages_to_wire(messages);
-        let wire_tools: Vec<_> = tools.iter().map(wire::WireTool::from).collect();
+            let body = RequestBody {
+                model: &self.model,
+                max_tokens: self.max_tokens,
+                system,
+                messages: wire_messages,
+                tools: wire_tools,
+                stream: false,
+            };
 
-        let body = RequestBody {
-            model: &self.model,
-            max_tokens: self.max_tokens,
-            system,
-            messages: wire_messages,
-            tools: wire_tools,
-            stream: false,
-        };
+            // NEVER log the API key — SecretString redacts on Debug, but we never format it either.
+            let response = self
+                .client
+                .post(API_URL)
+                .header("x-api-key", self.api_key.expose_secret())
+                .header("anthropic-version", API_VERSION)
+                .header("content-type", "application/json")
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| CherubError::Provider(e.to_string()))?;
 
-        // NEVER log the API key — SecretString redacts on Debug, but we never format it either.
-        let response = self
-            .client
-            .post(API_URL)
-            .header("x-api-key", self.api_key.expose_secret())
-            .header("anthropic-version", API_VERSION)
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| CherubError::Provider(e.to_string()))?;
+            let status = response.status();
+            info!(status = %status);
 
-        let status = response.status();
-        info!(status = %status);
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                warn!(status = %status, "API error response");
+                return Err(CherubError::Provider(format!("API error {status}: {body}")));
+            }
 
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            warn!(status = %status, "API error response");
-            return Err(CherubError::Provider(format!("API error {status}: {body}")));
+            let resp: wire::ResponseBody = response
+                .json()
+                .await
+                .map_err(|e| CherubError::Provider(format!("JSON parse error: {e}")))?;
+
+            Ok(wire::response_to_message(resp))
         }
-
-        let resp: wire::ResponseBody = response
-            .json()
-            .await
-            .map_err(|e| CherubError::Provider(format!("JSON parse error: {e}")))?;
-
-        Ok(wire::response_to_message(resp))
+        .instrument(info_span!("api_call", model = %self.model))
+        .await
     }
 }
 

@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::time::Duration;
 
 use tokio::io::AsyncBufReadExt;
@@ -15,6 +16,14 @@ pub enum ApprovalResult {
     Denied,
 }
 
+/// Abstraction over approval gates. Allows mock gates for testing.
+pub trait ApprovalGate: Send + Sync {
+    fn request_approval(
+        &self,
+        context: &EscalationContext<'_>,
+    ) -> impl Future<Output = ApprovalResult> + Send;
+}
+
 pub struct CliApprovalGate {
     pub(crate) timeout: Duration,
 }
@@ -30,13 +39,15 @@ impl CliApprovalGate {
     pub fn with_timeout(timeout: Duration) -> Self {
         Self { timeout }
     }
+}
 
+impl ApprovalGate for CliApprovalGate {
     /// Prompt the user for approval of an escalated action.
     ///
     /// Prints to stderr (not stdout — stdout is for tool output).
     /// Only `y` or `yes` (case-insensitive) → Approved.
     /// Everything else (empty, `n`, garbage, timeout, EOF) → Denied.
-    pub async fn request_approval(&self, context: &EscalationContext<'_>) -> ApprovalResult {
+    async fn request_approval(&self, context: &EscalationContext<'_>) -> ApprovalResult {
         eprintln!(
             "\n[ESCALATION] {} wants to execute: {}",
             context.tool, context.command

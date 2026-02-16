@@ -1,6 +1,21 @@
 pub mod anthropic;
 pub(crate) mod wire;
 
+use std::future::Future;
+
+use crate::error::CherubError;
+
+/// Abstraction over LLM providers. `dyn Provider` is a legitimate extension boundary
+/// per project convention — multiple LLM backends will implement this trait.
+pub trait Provider: Send + Sync {
+    fn complete(
+        &self,
+        system: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> impl Future<Output = Result<Message, CherubError>> + Send;
+}
+
 /// Content blocks within an assistant message.
 pub enum ContentBlock {
     Text {

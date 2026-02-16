@@ -9,33 +9,33 @@ use tracing::{info, info_span, warn};
 use crate::enforcement::policy::Policy;
 use crate::enforcement::{self, Decision};
 use crate::error::CherubError;
-use crate::providers::anthropic::AnthropicProvider;
-use crate::providers::{ContentBlock, Message, StopReason, ToolDefinition};
+use crate::providers::{ContentBlock, Message, Provider, StopReason, ToolDefinition};
 use crate::tools::{Proposed, ToolInvocation, ToolRegistry};
 
-use approval::{ApprovalResult, CliApprovalGate, EscalationContext};
+use approval::{ApprovalGate, ApprovalResult, EscalationContext};
 use session::Session;
 
 const MAX_ITERATIONS: usize = 25;
 
 /// The agent loop. Owns session state and orchestrates model ↔ tool interaction.
-pub struct AgentLoop {
+/// Generic over provider and approval gate for testability.
+pub struct AgentLoop<P: Provider, A: ApprovalGate> {
     session: Session,
     policy: Policy,
-    provider: AnthropicProvider,
+    provider: P,
     registry: ToolRegistry,
     system_prompt: String,
     tool_definitions: Vec<ToolDefinition>,
-    approval_gate: CliApprovalGate,
+    approval_gate: A,
 }
 
-impl AgentLoop {
+impl<P: Provider, A: ApprovalGate> AgentLoop<P, A> {
     pub fn new(
         policy: Policy,
-        provider: AnthropicProvider,
+        provider: P,
         registry: ToolRegistry,
         system_prompt: String,
-        approval_gate: CliApprovalGate,
+        approval_gate: A,
     ) -> Self {
         let tool_definitions = registry.definitions();
         Self {
@@ -47,6 +47,11 @@ impl AgentLoop {
             tool_definitions,
             approval_gate,
         }
+    }
+
+    /// Read-only view of the conversation history.
+    pub fn session_messages(&self) -> &[Message] {
+        self.session.messages()
     }
 
     /// Run one user turn: push user message, call model, handle tool calls in a loop.
