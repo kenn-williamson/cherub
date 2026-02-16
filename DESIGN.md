@@ -1,6 +1,6 @@
 # Secure Agent Runtime — Design Document
 
-**Status:** Draft — Milestone 3 Complete
+**Status:** Draft — Milestone 4 Complete (MVP)
 **Author:** Kenn Williamson  
 **Date:** February 2026
 

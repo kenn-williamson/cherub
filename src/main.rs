@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
 use secrecy::SecretString;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -63,8 +63,9 @@ async fn main() -> Result<()> {
     let api_key = SecretString::from(api_key_raw);
 
     // Load policy
-    let policy = Policy::load(&policy_path)
-        .map_err(|e| anyhow::anyhow!("failed to load policy from {}: {e}", policy_path.display()))?;
+    let policy = Policy::load(&policy_path).map_err(|e| {
+        anyhow::anyhow!("failed to load policy from {}: {e}", policy_path.display())
+    })?;
     info!(policy = %policy_path.display(), "policy loaded");
 
     // Build components

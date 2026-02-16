@@ -4,6 +4,7 @@ use std::str::FromStr;
 
 use regex::{Regex, RegexSet};
 use serde::Deserialize;
+use tracing::{info, info_span};
 
 use super::tier::Tier;
 use crate::error::CherubError;
@@ -159,6 +160,8 @@ impl FromStr for Policy {
 impl Policy {
     /// Load a policy from a TOML file. Checks file size before reading.
     pub fn load(path: &Path) -> Result<Self, CherubError> {
+        let _span = info_span!("policy_load", path = %path.display()).entered();
+
         let metadata = std::fs::metadata(path)
             .map_err(|e| CherubError::PolicyLoad(format!("cannot read {}: {e}", path.display())))?;
 
@@ -171,7 +174,9 @@ impl Policy {
         let content = std::fs::read_to_string(path)
             .map_err(|e| CherubError::PolicyLoad(format!("cannot read {}: {e}", path.display())))?;
 
-        content.parse()
+        let policy: Self = content.parse()?;
+        info!(tool_count = policy.tools.len(), "policy compiled");
+        Ok(policy)
     }
 
     pub(super) fn find_tool(&self, name: &str) -> Option<&CompiledTool> {
@@ -212,19 +217,13 @@ impl Predicate {
             },
             Predicate::OneOf(allowed) => allowed.contains(value),
             Predicate::ContainsAll(required) => match value {
-                serde_json::Value::String(s) => {
-                    required.iter().all(|r| s.contains(r.as_str()))
-                }
-                serde_json::Value::Array(arr) => {
-                    required.iter().all(|r| {
-                        arr.iter().any(|v| v.as_str().is_some_and(|s| s == r))
-                    })
-                }
+                serde_json::Value::String(s) => required.iter().all(|r| s.contains(r.as_str())),
+                serde_json::Value::Array(arr) => required
+                    .iter()
+                    .all(|r| arr.iter().any(|v| v.as_str().is_some_and(|s| s == r))),
                 _ => false,
             },
-            Predicate::Matches(regex) => {
-                value.as_str().is_some_and(|s| regex.is_match(s))
-            }
+            Predicate::Matches(regex) => value.as_str().is_some_and(|s| regex.is_match(s)),
         }
     }
 }
@@ -244,9 +243,7 @@ impl CompiledTool {
     /// Actions are stored in descending privilege order (Commit first),
     /// so the highest-privilege match always wins.
     pub(super) fn match_action(&self, command: &str) -> Option<&CompiledAction> {
-        self.actions
-            .iter()
-            .find(|a| a.patterns.is_match(command))
+        self.actions.iter().find(|a| a.patterns.is_match(command))
     }
 
     /// Find the highest-privilege tier whose patterns match the command.
@@ -394,11 +391,7 @@ fn compile_tool(name: String, config: ToolConfig) -> Result<CompiledTool, Cherub
                 .nest_limit(50)
                 .unicode(false)
                 .build()
-                .map_err(|e| {
-                    CherubError::PolicyValidation(format!(
-                        "{action_context}: {e}"
-                    ))
-                })?;
+                .map_err(|e| CherubError::PolicyValidation(format!("{action_context}: {e}")))?;
 
             let constraints = action
                 .constraints
@@ -850,5 +843,24 @@ patterns = ["^ls "]
         let tool = policy.find_tool("bash").unwrap();
         assert!(tool.check_constraints(&json!({"command": "ls /tmp", "working_dir": "/tmp/foo"})));
         assert!(!tool.check_constraints(&json!({"command": "ls /tmp", "working_dir": "/home"})));
+    }
+
+    // --- Step 6: Policy loading error handling ---
+
+    #[test]
+    fn truncated_toml_fails() {
+        let incomplete = "[tools.bash]\nenabled = tr"; // truncated boolean
+        assert!(Policy::from_str(incomplete).is_err());
+    }
+
+    #[test]
+    fn binary_content_fails() {
+        let binary = "\x00\x01\x02\x03";
+        assert!(Policy::from_str(binary).is_err());
+    }
+
+    #[test]
+    fn policy_file_size_limit_constant() {
+        assert_eq!(MAX_POLICY_FILE_SIZE, 64 * 1024);
     }
 }

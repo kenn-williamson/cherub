@@ -2,10 +2,12 @@ pub mod approval;
 pub mod prompt;
 pub mod session;
 
+use std::time::Instant;
+
 use tracing::{info, info_span, warn};
 
-use crate::enforcement::{self, Decision};
 use crate::enforcement::policy::Policy;
+use crate::enforcement::{self, Decision};
 use crate::error::CherubError;
 use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::{ContentBlock, Message, StopReason, ToolDefinition};
@@ -56,13 +58,22 @@ impl AgentLoop {
         });
 
         for iteration in 0..MAX_ITERATIONS {
+            let _iter_span = info_span!("iteration", n = iteration).entered();
+
             let assistant_msg = self
                 .provider
-                .complete(&self.system_prompt, self.session.messages(), &self.tool_definitions)
+                .complete(
+                    &self.system_prompt,
+                    self.session.messages(),
+                    &self.tool_definitions,
+                )
                 .await?;
 
             let (content, stop_reason) = match assistant_msg {
-                Message::Assistant { content, stop_reason } => (content, stop_reason),
+                Message::Assistant {
+                    content,
+                    stop_reason,
+                } => (content, stop_reason),
                 _ => return Err(CherubError::Provider("unexpected message type".to_owned())),
             };
 
@@ -81,7 +92,10 @@ impl AgentLoop {
                 }
             }
 
-            self.session.push(Message::Assistant { content, stop_reason });
+            self.session.push(Message::Assistant {
+                content,
+                stop_reason,
+            });
 
             if stop_reason != StopReason::ToolUse || tool_uses.is_empty() {
                 return Ok(());
@@ -99,12 +113,15 @@ impl AgentLoop {
 
                 match decision {
                     Decision::Allow(token) => {
-                        let _exec_span = info_span!("tool_exec", tool = %name, command = %command_str).entered();
+                        let _exec_span =
+                            info_span!("tool_exec", tool = %name, command = %command_str).entered();
                         info!(decision = "ALLOWED", tool = %name, command = %command_str);
                         println!("[ALLOWED] {name}: {command_str}");
 
+                        let exec_start = Instant::now();
                         match evaluated.execute(token, &self.registry).await {
                             Ok(result) => {
+                                info!(duration_ms = %exec_start.elapsed().as_millis(), "tool execution complete");
                                 if !result.output.is_empty() {
                                     println!("{}", result.output);
                                 }
@@ -116,7 +133,7 @@ impl AgentLoop {
                             }
                             Err(e) => {
                                 let err_msg = e.to_string();
-                                warn!(error = %err_msg, "tool execution failed");
+                                warn!(duration_ms = %exec_start.elapsed().as_millis(), error = %err_msg, "tool execution failed");
                                 println!("[ERROR] {err_msg}");
                                 self.session.push(Message::ToolResult {
                                     tool_use_id,
@@ -146,12 +163,16 @@ impl AgentLoop {
                         match self.approval_gate.request_approval(&context).await {
                             ApprovalResult::Approved => {
                                 let token = enforcement::approve_escalation(tier);
-                                let _exec_span = info_span!("tool_exec", tool = %name, command = %command_str).entered();
+                                let _exec_span =
+                                    info_span!("tool_exec", tool = %name, command = %command_str)
+                                        .entered();
                                 info!(decision = "APPROVED", tool = %name, command = %command_str);
                                 println!("[APPROVED] {name}: {command_str}");
 
+                                let exec_start = Instant::now();
                                 match evaluated.execute(token, &self.registry).await {
                                     Ok(result) => {
+                                        info!(duration_ms = %exec_start.elapsed().as_millis(), "tool execution complete");
                                         if !result.output.is_empty() {
                                             println!("{}", result.output);
                                         }
@@ -163,7 +184,7 @@ impl AgentLoop {
                                     }
                                     Err(e) => {
                                         let err_msg = e.to_string();
-                                        warn!(error = %err_msg, "tool execution failed");
+                                        warn!(duration_ms = %exec_start.elapsed().as_millis(), error = %err_msg, "tool execution failed");
                                         println!("[ERROR] {err_msg}");
                                         self.session.push(Message::ToolResult {
                                             tool_use_id,

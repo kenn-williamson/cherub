@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
+use tracing::{info, info_span, warn};
 
 use super::wire::{self, RequestBody};
 use super::{Message, ToolDefinition};
@@ -41,6 +42,8 @@ impl AnthropicProvider {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<Message, CherubError> {
+        let _span = info_span!("api_call", model = %self.model).entered();
+
         let wire_messages = wire::messages_to_wire(messages);
         let wire_tools: Vec<_> = tools.iter().map(wire::WireTool::from).collect();
 
@@ -53,6 +56,7 @@ impl AnthropicProvider {
             stream: false,
         };
 
+        // NEVER log the API key — SecretString redacts on Debug, but we never format it either.
         let response = self
             .client
             .post(API_URL)
@@ -65,11 +69,12 @@ impl AnthropicProvider {
             .map_err(|e| CherubError::Provider(e.to_string()))?;
 
         let status = response.status();
+        info!(status = %status);
+
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(CherubError::Provider(format!(
-                "API error {status}: {body}"
-            )));
+            warn!(status = %status, "API error response");
+            return Err(CherubError::Provider(format!("API error {status}: {body}")));
         }
 
         let resp: wire::ResponseBody = response

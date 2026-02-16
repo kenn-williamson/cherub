@@ -95,12 +95,12 @@ Everything else — connectors, credential brokering, audit logging, IPC plugins
 
 **Goal:** The enforcement layer handles adversarial inputs correctly.
 
-- [ ] Command injection tests: can the model craft a command that looks like `ls` but executes `rm`? (pipes, semicolons, backticks, $(), &&, ||)
-- [ ] Policy bypass tests: edge cases in pattern matching (unicode, whitespace, null bytes)
-- [ ] Context window isolation: model output parsing handles malformed tool calls gracefully
-- [ ] The model proposes multiple tools in one response — each evaluated independently
-- [ ] Error handling: what happens when the Anthropic API is down? When bash hangs? When the policy file is malformed?
-- [ ] Structured logging with `tracing`: every proposal, every decision, every execution
+- [x] Command injection tests: can the model craft a command that looks like `ls` but executes `rm`? (pipes, semicolons, backticks, $(), &&, ||)
+- [x] Policy bypass tests: edge cases in pattern matching (unicode, whitespace, null bytes)
+- [x] Context window isolation: model output parsing handles malformed tool calls gracefully
+- [x] The model proposes multiple tools in one response — each evaluated independently
+- [x] Error handling: what happens when the Anthropic API is down? When bash hangs? When the policy file is malformed?
+- [x] Structured logging with `tracing`: every proposal, every decision, every execution
 
 ---
 

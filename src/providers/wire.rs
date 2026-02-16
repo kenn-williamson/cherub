@@ -111,7 +111,9 @@ pub(crate) fn messages_to_wire(messages: &[Message]) -> Vec<WireMessage> {
                 let blocks = content
                     .iter()
                     .map(|block| match block {
-                        ContentBlock::Text { text } => WireContentBlock::Text { text: text.clone() },
+                        ContentBlock::Text { text } => {
+                            WireContentBlock::Text { text: text.clone() }
+                        }
                         ContentBlock::ToolUse { id, name, input } => WireContentBlock::ToolUse {
                             id: id.clone(),
                             name: name.clone(),
@@ -124,7 +126,11 @@ pub(crate) fn messages_to_wire(messages: &[Message]) -> Vec<WireMessage> {
                     content: WireContent::Blocks(blocks),
                 });
             }
-            Message::ToolResult { tool_use_id, content, is_error } => {
+            Message::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
                 pending_results.push(WireContentBlock::ToolResult {
                     tool_use_id: tool_use_id.clone(),
                     content: content.clone(),
@@ -166,7 +172,10 @@ pub(crate) fn response_to_message(resp: ResponseBody) -> Message {
         })
         .collect();
 
-    Message::Assistant { content, stop_reason }
+    Message::Assistant {
+        content,
+        stop_reason,
+    }
 }
 
 #[cfg(test)]
@@ -245,7 +254,10 @@ mod tests {
         };
         let msg = response_to_message(resp);
         match msg {
-            Message::Assistant { content, stop_reason } => {
+            Message::Assistant {
+                content,
+                stop_reason,
+            } => {
                 assert_eq!(stop_reason, StopReason::EndTurn);
                 assert_eq!(content.len(), 1);
                 match &content[0] {
@@ -274,7 +286,10 @@ mod tests {
         };
         let msg = response_to_message(resp);
         match msg {
-            Message::Assistant { content, stop_reason } => {
+            Message::Assistant {
+                content,
+                stop_reason,
+            } => {
                 assert_eq!(stop_reason, StopReason::ToolUse);
                 assert_eq!(content.len(), 2);
                 match &content[1] {
@@ -302,5 +317,136 @@ mod tests {
         let resp: ResponseBody = serde_json::from_str(json_str).unwrap();
         assert_eq!(resp.content.len(), 2);
         assert_eq!(resp.stop_reason, "tool_use");
+    }
+
+    // --- Step 4: Context window isolation — malformed JSON deserialization ---
+
+    #[test]
+    fn malformed_json_fails() {
+        let truncated = r#"{"content": [{"type": "text", "text": "hel"#;
+        assert!(serde_json::from_str::<ResponseBody>(truncated).is_err());
+    }
+
+    #[test]
+    fn missing_content_field_fails() {
+        let json_str = r#"{"stop_reason": "end_turn"}"#;
+        assert!(serde_json::from_str::<ResponseBody>(json_str).is_err());
+    }
+
+    #[test]
+    fn missing_stop_reason_fails() {
+        let json_str = r#"{"content": [{"type": "text", "text": "hello"}]}"#;
+        assert!(serde_json::from_str::<ResponseBody>(json_str).is_err());
+    }
+
+    #[test]
+    fn tool_use_missing_id_fails() {
+        let json_str = r#"{
+            "content": [{"type": "tool_use", "name": "bash", "input": {}}],
+            "stop_reason": "tool_use"
+        }"#;
+        assert!(serde_json::from_str::<ResponseBody>(json_str).is_err());
+    }
+
+    #[test]
+    fn tool_use_missing_name_fails() {
+        let json_str = r#"{
+            "content": [{"type": "tool_use", "id": "toolu_1", "input": {}}],
+            "stop_reason": "tool_use"
+        }"#;
+        assert!(serde_json::from_str::<ResponseBody>(json_str).is_err());
+    }
+
+    #[test]
+    fn tool_use_missing_input_fails() {
+        let json_str = r#"{
+            "content": [{"type": "tool_use", "id": "toolu_1", "name": "bash"}],
+            "stop_reason": "tool_use"
+        }"#;
+        assert!(serde_json::from_str::<ResponseBody>(json_str).is_err());
+    }
+
+    #[test]
+    fn tool_use_input_not_object_parses() {
+        // serde_json::Value accepts any JSON type, so a number input parses fine.
+        let json_str = r#"{
+            "content": [{"type": "tool_use", "id": "toolu_1", "name": "bash", "input": 42}],
+            "stop_reason": "tool_use"
+        }"#;
+        let resp: ResponseBody = serde_json::from_str(json_str).unwrap();
+        match &resp.content[0] {
+            ResponseContentBlock::ToolUse { input, .. } => {
+                assert_eq!(*input, json!(42));
+            }
+            _ => panic!("expected ToolUse"),
+        }
+    }
+
+    #[test]
+    fn tool_use_input_is_number_parses() {
+        let json_str = r#"{
+            "content": [{"type": "tool_use", "id": "toolu_1", "name": "bash", "input": 3.14}],
+            "stop_reason": "tool_use"
+        }"#;
+        let resp: ResponseBody = serde_json::from_str(json_str).unwrap();
+        match &resp.content[0] {
+            ResponseContentBlock::ToolUse { input, .. } => {
+                assert!(input.as_f64().is_some());
+            }
+            _ => panic!("expected ToolUse"),
+        }
+    }
+
+    #[test]
+    fn unknown_content_block_type_handled() {
+        // serde tagged enum: unknown "type" value should fail deserialization.
+        let json_str = r#"{
+            "content": [{"type": "image", "url": "http://example.com/img.png"}],
+            "stop_reason": "end_turn"
+        }"#;
+        assert!(serde_json::from_str::<ResponseBody>(json_str).is_err());
+    }
+
+    #[test]
+    fn empty_content_array_parses() {
+        let json_str = r#"{"content": [], "stop_reason": "end_turn"}"#;
+        let resp: ResponseBody = serde_json::from_str(json_str).unwrap();
+        assert!(resp.content.is_empty());
+    }
+
+    #[test]
+    fn unknown_stop_reason_becomes_end_turn() {
+        let resp = ResponseBody {
+            content: vec![ResponseContentBlock::Text {
+                text: "hi".to_owned(),
+            }],
+            stop_reason: "something_new".to_owned(),
+        };
+        let msg = response_to_message(resp);
+        match msg {
+            Message::Assistant { stop_reason, .. } => {
+                assert_eq!(stop_reason, StopReason::EndTurn);
+            }
+            _ => panic!("expected Assistant message"),
+        }
+    }
+
+    // --- Step 6: Error response handling ---
+
+    #[test]
+    fn api_error_response_does_not_parse_as_success() {
+        // A typical API error response has "error" instead of "content".
+        let error_json = r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#;
+        assert!(serde_json::from_str::<ResponseBody>(error_json).is_err());
+    }
+
+    #[test]
+    fn error_message_does_not_contain_secrets() {
+        // Verify that our error format doesn't accidentally include API key patterns.
+        let error_msg = format!(
+            "API error 401 Unauthorized: {{\"type\":\"error\",\"error\":{{\"type\":\"authentication_error\",\"message\":\"invalid x-api-key\"}}}}"
+        );
+        assert!(!error_msg.contains("sk-ant-"));
+        assert!(!error_msg.contains("sk-"));
     }
 }

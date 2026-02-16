@@ -3,15 +3,30 @@ pub(crate) mod wire;
 
 /// Content blocks within an assistant message.
 pub enum ContentBlock {
-    Text { text: String },
-    ToolUse { id: String, name: String, input: serde_json::Value },
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
 }
 
 /// Messages exchanged between the runtime and LLM providers.
 pub enum Message {
-    User { content: String },
-    Assistant { content: Vec<ContentBlock>, stop_reason: StopReason },
-    ToolResult { tool_use_id: String, content: String, is_error: bool },
+    User {
+        content: String,
+    },
+    Assistant {
+        content: Vec<ContentBlock>,
+        stop_reason: StopReason,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        is_error: bool,
+    },
 }
 
 /// Why the model stopped generating.

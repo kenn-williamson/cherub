@@ -24,6 +24,7 @@ cherub/
 │   │   ├── mod.rs            # Enforcement layer entry point
 │   │   ├── capability.rs     # Capability tokens (private constructors)
 │   │   ├── policy.rs         # Policy loading and evaluation
+│   │   ├── shell.rs          # Shell command parser (quote-aware splitting)
 │   │   └── tier.rs           # Observe/Act/Commit tier definitions
 │   ├── tools/
 │   │   ├── mod.rs            # Tool trait, ToolRegistry, ToolImpl enum dispatch

@@ -56,9 +56,9 @@ impl ToolInvocation<Evaluated> {
         token: CapabilityToken,
         registry: &ToolRegistry,
     ) -> Result<ToolResult, CherubError> {
-        let tool = registry
-            .find(&self.tool)
-            .ok_or_else(|| CherubError::InvalidInvocation(format!("unknown tool: {}", self.tool)))?;
+        let tool = registry.find(&self.tool).ok_or_else(|| {
+            CherubError::InvalidInvocation(format!("unknown tool: {}", self.tool))
+        })?;
         tool.execute(&self.params, token).await
     }
 }
@@ -95,7 +95,8 @@ impl ToolImpl {
         match self {
             Self::Bash(_) => ToolDefinition {
                 name: "bash".to_owned(),
-                description: "Execute a bash command. The command is passed to `bash -c`.".to_owned(),
+                description: "Execute a bash command. The command is passed to `bash -c`."
+                    .to_owned(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -120,7 +121,7 @@ impl ToolRegistry {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
-            tools: vec![ToolImpl::Bash(BashTool)],
+            tools: vec![ToolImpl::Bash(BashTool::new())],
         }
     }
 
