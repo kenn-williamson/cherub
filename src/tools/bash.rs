@@ -54,7 +54,7 @@ impl BashTool {
                 CherubError::InvalidInvocation("missing 'command' parameter".to_owned())
             })?;
 
-        let _span = info_span!("bash_exec", command = %command).entered();
+        let _span = info_span!("bash_exec", command = %command);
         let start = Instant::now();
 
         let result = tokio::time::timeout(self.timeout, async {

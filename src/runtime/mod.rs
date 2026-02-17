@@ -1,4 +1,5 @@
 pub mod approval;
+pub mod output;
 pub mod prompt;
 pub mod session;
 
@@ -9,17 +10,18 @@ use tracing::{info, info_span, warn};
 use crate::enforcement::policy::Policy;
 use crate::enforcement::{self, Decision};
 use crate::error::CherubError;
-use crate::providers::{ContentBlock, Message, Provider, StopReason, ToolDefinition};
+use crate::providers::{ContentBlock, Message, Provider, StopReason, ToolDefinition, UserContent};
 use crate::tools::{Proposed, ToolInvocation, ToolRegistry};
 
 use approval::{ApprovalGate, ApprovalResult, EscalationContext};
+use output::{OutputEvent, OutputSink};
 use session::Session;
 
 const MAX_ITERATIONS: usize = 25;
 
-/// The agent loop. Owns session state and orchestrates model ↔ tool interaction.
-/// Generic over provider and approval gate for testability.
-pub struct AgentLoop<P: Provider, A: ApprovalGate> {
+/// The agent loop. Owns session state and orchestrates model <-> tool interaction.
+/// Generic over provider, approval gate, and output sink for testability.
+pub struct AgentLoop<P: Provider, A: ApprovalGate, O: OutputSink> {
     session: Session,
     policy: Policy,
     provider: P,
@@ -27,15 +29,17 @@ pub struct AgentLoop<P: Provider, A: ApprovalGate> {
     system_prompt: String,
     tool_definitions: Vec<ToolDefinition>,
     approval_gate: A,
+    output: O,
 }
 
-impl<P: Provider, A: ApprovalGate> AgentLoop<P, A> {
+impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
     pub fn new(
         policy: Policy,
         provider: P,
         registry: ToolRegistry,
         system_prompt: String,
         approval_gate: A,
+        output: O,
     ) -> Self {
         let tool_definitions = registry.definitions();
         Self {
@@ -46,6 +50,7 @@ impl<P: Provider, A: ApprovalGate> AgentLoop<P, A> {
             system_prompt,
             tool_definitions,
             approval_gate,
+            output,
         }
     }
 
@@ -54,16 +59,23 @@ impl<P: Provider, A: ApprovalGate> AgentLoop<P, A> {
         self.session.messages()
     }
 
-    /// Run one user turn: push user message, call model, handle tool calls in a loop.
-    pub async fn run_turn(&mut self, user_input: &str) -> Result<(), CherubError> {
-        let _span = info_span!("turn").entered();
+    /// Convenience wrapper: run a text-only user turn.
+    pub async fn run_turn_text(&mut self, text: &str) -> Result<(), CherubError> {
+        self.run_turn(vec![UserContent::Text(text.to_owned())])
+            .await
+    }
 
-        self.session.push(Message::User {
-            content: user_input.to_owned(),
-        });
+    /// Run one user turn: push user message, call model, handle tool calls in a loop.
+    pub async fn run_turn(&mut self, content: Vec<UserContent>) -> Result<(), CherubError> {
+        // Note: we don't use entered() spans because EnteredSpan is !Send,
+        // which prevents this future from being spawned on tokio. Structured
+        // fields on info!() calls carry the same context.
+        let _span = info_span!("turn");
+
+        self.session.push(Message::User { content });
 
         for iteration in 0..MAX_ITERATIONS {
-            let _iter_span = info_span!("iteration", n = iteration).entered();
+            let _iter_span = info_span!("iteration", n = iteration);
 
             let assistant_msg = self
                 .provider
@@ -82,13 +94,13 @@ impl<P: Provider, A: ApprovalGate> AgentLoop<P, A> {
                 _ => return Err(CherubError::Provider("unexpected message type".to_owned())),
             };
 
-            // Print text blocks and collect tool_use blocks
+            // Emit text blocks and collect tool_use blocks
             let mut tool_uses = Vec::new();
             for block in &content {
                 match block {
                     ContentBlock::Text { text } => {
                         if !text.is_empty() {
-                            println!("{text}");
+                            self.output.emit(OutputEvent::Text(text)).await;
                         }
                     }
                     ContentBlock::ToolUse { id, name, input } => {
@@ -118,17 +130,22 @@ impl<P: Provider, A: ApprovalGate> AgentLoop<P, A> {
 
                 match decision {
                     Decision::Allow(token) => {
-                        let _exec_span =
-                            info_span!("tool_exec", tool = %name, command = %command_str).entered();
                         info!(decision = "ALLOWED", tool = %name, command = %command_str);
-                        println!("[ALLOWED] {name}: {command_str}");
+                        self.output
+                            .emit(OutputEvent::ToolAllowed {
+                                tool: &name,
+                                command: command_str,
+                            })
+                            .await;
 
                         let exec_start = Instant::now();
                         match evaluated.execute(token, &self.registry).await {
                             Ok(result) => {
                                 info!(duration_ms = %exec_start.elapsed().as_millis(), "tool execution complete");
                                 if !result.output.is_empty() {
-                                    println!("{}", result.output);
+                                    self.output
+                                        .emit(OutputEvent::ToolOutput(&result.output))
+                                        .await;
                                 }
                                 self.session.push(Message::ToolResult {
                                     tool_use_id,
@@ -139,7 +156,7 @@ impl<P: Provider, A: ApprovalGate> AgentLoop<P, A> {
                             Err(e) => {
                                 let err_msg = e.to_string();
                                 warn!(duration_ms = %exec_start.elapsed().as_millis(), error = %err_msg, "tool execution failed");
-                                println!("[ERROR] {err_msg}");
+                                self.output.emit(OutputEvent::ToolError(&err_msg)).await;
                                 self.session.push(Message::ToolResult {
                                     tool_use_id,
                                     content: err_msg,
@@ -150,7 +167,12 @@ impl<P: Provider, A: ApprovalGate> AgentLoop<P, A> {
                     }
                     Decision::Reject => {
                         info!(decision = "REJECTED", tool = %name, command = %command_str);
-                        println!("[REJECTED] {name}: {command_str}");
+                        self.output
+                            .emit(OutputEvent::ToolRejected {
+                                tool: &name,
+                                command: command_str,
+                            })
+                            .await;
                         self.session.push(Message::ToolResult {
                             tool_use_id,
                             content: "action not permitted".to_owned(),
@@ -168,18 +190,22 @@ impl<P: Provider, A: ApprovalGate> AgentLoop<P, A> {
                         match self.approval_gate.request_approval(&context).await {
                             ApprovalResult::Approved => {
                                 let token = enforcement::approve_escalation(tier);
-                                let _exec_span =
-                                    info_span!("tool_exec", tool = %name, command = %command_str)
-                                        .entered();
                                 info!(decision = "APPROVED", tool = %name, command = %command_str);
-                                println!("[APPROVED] {name}: {command_str}");
+                                self.output
+                                    .emit(OutputEvent::ToolApproved {
+                                        tool: &name,
+                                        command: command_str,
+                                    })
+                                    .await;
 
                                 let exec_start = Instant::now();
                                 match evaluated.execute(token, &self.registry).await {
                                     Ok(result) => {
                                         info!(duration_ms = %exec_start.elapsed().as_millis(), "tool execution complete");
                                         if !result.output.is_empty() {
-                                            println!("{}", result.output);
+                                            self.output
+                                                .emit(OutputEvent::ToolOutput(&result.output))
+                                                .await;
                                         }
                                         self.session.push(Message::ToolResult {
                                             tool_use_id,
@@ -190,7 +216,7 @@ impl<P: Provider, A: ApprovalGate> AgentLoop<P, A> {
                                     Err(e) => {
                                         let err_msg = e.to_string();
                                         warn!(duration_ms = %exec_start.elapsed().as_millis(), error = %err_msg, "tool execution failed");
-                                        println!("[ERROR] {err_msg}");
+                                        self.output.emit(OutputEvent::ToolError(&err_msg)).await;
                                         self.session.push(Message::ToolResult {
                                             tool_use_id,
                                             content: err_msg,
@@ -201,7 +227,12 @@ impl<P: Provider, A: ApprovalGate> AgentLoop<P, A> {
                             }
                             ApprovalResult::Denied => {
                                 info!(decision = "DENIED", tool = %name, command = %command_str);
-                                println!("[DENIED] {name}: {command_str}");
+                                self.output
+                                    .emit(OutputEvent::ToolDenied {
+                                        tool: &name,
+                                        command: command_str,
+                                    })
+                                    .await;
                                 // Policy opacity: identical message to Reject
                                 self.session.push(Message::ToolResult {
                                     tool_use_id,
@@ -215,8 +246,12 @@ impl<P: Provider, A: ApprovalGate> AgentLoop<P, A> {
             }
 
             if iteration == MAX_ITERATIONS - 1 {
-                warn!("reached max iterations ({MAX_ITERATIONS}), stopping turn");
-                println!("[WARNING] Reached maximum iterations, stopping.");
+                warn!(max_iterations = MAX_ITERATIONS, "reached max iterations, stopping turn");
+                self.output
+                    .emit(OutputEvent::Warning(
+                        "Reached maximum iterations, stopping.",
+                    ))
+                    .await;
             }
         }
 

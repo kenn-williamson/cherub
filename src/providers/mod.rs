@@ -16,6 +16,12 @@ pub trait Provider: Send + Sync {
     ) -> impl Future<Output = Result<Message, CherubError>> + Send;
 }
 
+/// Content within a user message. Supports text and images for multimodal input.
+pub enum UserContent {
+    Text(String),
+    Image { media_type: String, data: String },
+}
+
 /// Content blocks within an assistant message.
 pub enum ContentBlock {
     Text {
@@ -31,7 +37,7 @@ pub enum ContentBlock {
 /// Messages exchanged between the runtime and LLM providers.
 pub enum Message {
     User {
-        content: String,
+        content: Vec<UserContent>,
     },
     Assistant {
         content: Vec<ContentBlock>,
@@ -42,6 +48,15 @@ pub enum Message {
         content: String,
         is_error: bool,
     },
+}
+
+impl Message {
+    /// Convenience constructor for text-only user messages.
+    pub fn user_text(s: &str) -> Self {
+        Message::User {
+            content: vec![UserContent::Text(s.to_owned())],
+        }
+    }
 }
 
 /// Why the model stopped generating.

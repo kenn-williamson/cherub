@@ -1,6 +1,6 @@
 # Secure Agent Runtime — Design Document
 
-**Status:** Draft — Milestone 4 Complete (MVP)
+**Status:** Draft — Milestone 5 Complete (Telegram Connector)
 **Author:** Kenn Williamson  
 **Date:** February 2026
 

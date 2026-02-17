@@ -11,6 +11,7 @@ use cherub::enforcement::policy::Policy;
 use cherub::providers::anthropic::AnthropicProvider;
 use cherub::runtime::AgentLoop;
 use cherub::runtime::approval::CliApprovalGate;
+use cherub::runtime::output::StdoutSink;
 use cherub::runtime::prompt::build_system_prompt;
 use cherub::tools::ToolRegistry;
 
@@ -81,7 +82,15 @@ async fn main() -> Result<()> {
     let system_prompt = build_system_prompt(&cwd);
 
     let approval_gate = CliApprovalGate::new();
-    let mut agent = AgentLoop::new(policy, provider, registry, system_prompt, approval_gate);
+    let output = StdoutSink;
+    let mut agent = AgentLoop::new(
+        policy,
+        provider,
+        registry,
+        system_prompt,
+        approval_gate,
+        output,
+    );
 
     info!(model = %model, "cherub started");
     println!("cherub: secure agent runtime (model: {model})");
@@ -99,7 +108,7 @@ async fn main() -> Result<()> {
                 }
                 let _ = rl.add_history_entry(line);
 
-                if let Err(e) = agent.run_turn(line).await {
+                if let Err(e) = agent.run_turn_text(line).await {
                     eprintln!("[error] {e}");
                 }
                 println!();

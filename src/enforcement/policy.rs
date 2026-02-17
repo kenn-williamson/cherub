@@ -89,6 +89,7 @@ impl From<TierValue> for Tier {
 
 // --- Compiled policy structs (internal representation) ---
 
+#[derive(Clone)]
 pub struct Policy {
     tools: Vec<CompiledTool>,
 }
@@ -101,6 +102,7 @@ impl std::fmt::Debug for Policy {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct CompiledTool {
     name: String,
     enabled: bool,
@@ -108,6 +110,7 @@ pub(super) struct CompiledTool {
     constraints: Vec<CompiledConstraint>, // Tool-level: hard reject on failure
 }
 
+#[derive(Clone)]
 pub(super) struct CompiledAction {
     #[allow(dead_code)] // Used for diagnostics and future constraint error messages
     pub(super) name: String,
@@ -117,11 +120,13 @@ pub(super) struct CompiledAction {
     pub(super) on_constraint_failure: OnConstraintFailure,
 }
 
+#[derive(Clone)]
 pub(super) struct CompiledConstraint {
     field: String,
     predicate: Predicate,
 }
 
+#[derive(Clone)]
 enum Predicate {
     Eq(serde_json::Value),
     Lt(f64),

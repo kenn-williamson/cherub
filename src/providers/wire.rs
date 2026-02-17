@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{ContentBlock, Message, StopReason, ToolDefinition};
+use super::{ContentBlock, Message, StopReason, ToolDefinition, UserContent};
 
 // --- Request types ---
 
@@ -48,6 +48,16 @@ pub(crate) enum WireContentBlock {
         content: String,
         is_error: bool,
     },
+    #[serde(rename = "image")]
+    Image { source: WireImageSource },
+}
+
+#[derive(Serialize)]
+pub(crate) struct WireImageSource {
+    #[serde(rename = "type")]
+    pub source_type: &'static str,
+    pub media_type: String,
+    pub data: String,
 }
 
 #[derive(Serialize)]
@@ -90,6 +100,34 @@ impl From<&ToolDefinition> for WireTool {
     }
 }
 
+/// Convert `UserContent` items to wire format.
+/// Single text-only → `WireContent::Text` (compact).
+/// Image-only, mixed, or multi-item → `WireContent::Blocks`.
+fn user_content_to_wire(content: &[UserContent]) -> WireContent {
+    // Single text → compact format
+    if content.len() == 1
+        && let UserContent::Text(text) = &content[0]
+    {
+        return WireContent::Text(text.clone());
+    }
+
+    let blocks = content
+        .iter()
+        .map(|c| match c {
+            UserContent::Text(text) => WireContentBlock::Text { text: text.clone() },
+            UserContent::Image { media_type, data } => WireContentBlock::Image {
+                source: WireImageSource {
+                    source_type: "base64",
+                    media_type: media_type.clone(),
+                    data: data.clone(),
+                },
+            },
+        })
+        .collect();
+
+    WireContent::Blocks(blocks)
+}
+
 /// Convert internal messages to wire format.
 /// Consecutive ToolResult messages are merged into a single `user` message
 /// with multiple `tool_result` content blocks (Anthropic API requirement).
@@ -103,7 +141,7 @@ pub(crate) fn messages_to_wire(messages: &[Message]) -> Vec<WireMessage> {
                 flush_results(&mut wire, &mut pending_results);
                 wire.push(WireMessage {
                     role: "user",
-                    content: WireContent::Text(content.clone()),
+                    content: user_content_to_wire(content),
                 });
             }
             Message::Assistant { content, .. } => {
@@ -184,14 +222,52 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn user_message_serializes() {
-        let wire = messages_to_wire(&[Message::User {
-            content: "hello".to_owned(),
-        }]);
+    fn user_text_message_serializes() {
+        let wire = messages_to_wire(&[Message::user_text("hello")]);
         assert_eq!(wire.len(), 1);
         assert_eq!(wire[0].role, "user");
         let json = serde_json::to_value(&wire[0]).unwrap();
         assert_eq!(json["content"], "hello");
+    }
+
+    #[test]
+    fn user_image_message_serializes() {
+        let wire = messages_to_wire(&[Message::User {
+            content: vec![UserContent::Image {
+                media_type: "image/png".to_owned(),
+                data: "iVBOR...".to_owned(),
+            }],
+        }]);
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0].role, "user");
+        let json = serde_json::to_value(&wire[0]).unwrap();
+        let blocks = json["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "image");
+        assert_eq!(blocks[0]["source"]["type"], "base64");
+        assert_eq!(blocks[0]["source"]["media_type"], "image/png");
+        assert_eq!(blocks[0]["source"]["data"], "iVBOR...");
+    }
+
+    #[test]
+    fn user_mixed_content_serializes() {
+        let wire = messages_to_wire(&[Message::User {
+            content: vec![
+                UserContent::Text("What is in this image?".to_owned()),
+                UserContent::Image {
+                    media_type: "image/jpeg".to_owned(),
+                    data: "/9j/4AAQ...".to_owned(),
+                },
+            ],
+        }]);
+        assert_eq!(wire.len(), 1);
+        let json = serde_json::to_value(&wire[0]).unwrap();
+        let blocks = json["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "What is in this image?");
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["source"]["media_type"], "image/jpeg");
     }
 
     #[test]

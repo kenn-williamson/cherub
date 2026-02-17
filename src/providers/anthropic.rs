@@ -23,6 +23,7 @@ impl AnthropicProvider {
     pub fn new(api_key: SecretString, model: &str, max_tokens: u32) -> Result<Self, CherubError> {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(120))
             .build()
             .map_err(|e| CherubError::Provider(e.to_string()))?;
@@ -99,9 +100,7 @@ mod tests {
 
     #[test]
     fn request_body_structure() {
-        let messages = vec![Message::User {
-            content: "hello".to_owned(),
-        }];
+        let messages = vec![Message::user_text("hello")];
         let tools = vec![ToolDefinition {
             name: "bash".to_owned(),
             description: "Execute bash commands".to_owned(),

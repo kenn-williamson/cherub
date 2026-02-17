@@ -29,9 +29,7 @@ mod tests {
     #[test]
     fn push_and_retrieve() {
         let mut session = Session::new();
-        session.push(Message::User {
-            content: "hello".to_owned(),
-        });
+        session.push(Message::user_text("hello"));
         assert_eq!(session.messages().len(), 1);
     }
 }

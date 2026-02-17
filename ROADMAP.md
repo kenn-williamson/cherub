@@ -108,11 +108,11 @@ Everything else — connectors, credential brokering, audit logging, IPC plugins
 
 **Goal:** The agent is reachable via Telegram. First real connector, first IPC boundary.
 
-- [ ] Telegram bot using `teloxide` crate
-- [ ] Connector runs as a separate process (or tokio task initially, extracted to process later)
-- [ ] Messages flow: Telegram → connector → runtime → enforcement → tool → runtime → connector → Telegram
-- [ ] Approval gates work via Telegram: bot sends "Agent wants to run `rm -rf /tmp/old`. Allow? (reply Y/N)"
-- [ ] Media handling: images, files (basic — forward to model as base64 or file reference)
+- [x] Telegram bot using `teloxide` crate
+- [x] Connector runs as a separate process (or tokio task initially, extracted to process later)
+- [x] Messages flow: Telegram → connector → runtime → enforcement → tool → runtime → connector → Telegram
+- [x] Approval gates work via Telegram: bot sends "Agent wants to run `rm -rf /tmp/old`. Allow? (reply Y/N)"
+- [x] Media handling: images, files (basic — forward to model as base64 or file reference)
 
 ---
 

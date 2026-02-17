@@ -15,6 +15,7 @@ use cherub::error::CherubError;
 use cherub::providers::{ContentBlock, Message, Provider, StopReason, ToolDefinition};
 use cherub::runtime::AgentLoop;
 use cherub::runtime::approval::{ApprovalGate, ApprovalResult, EscalationContext};
+use cherub::runtime::output::NullSink;
 use cherub::tools::ToolRegistry;
 
 // ---------------------------------------------------------------------------
@@ -128,7 +129,7 @@ patterns = [
 fn make_agent(
     responses: Vec<Message>,
     approval_policy: MockApprovalPolicy,
-) -> AgentLoop<MockProvider, MockApprovalGate> {
+) -> AgentLoop<MockProvider, MockApprovalGate, NullSink> {
     let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
     let provider = MockProvider::new(responses);
     let registry = ToolRegistry::new();
@@ -136,7 +137,14 @@ fn make_agent(
     let approval_gate = MockApprovalGate {
         policy: approval_policy,
     };
-    AgentLoop::new(policy, provider, registry, system_prompt, approval_gate)
+    AgentLoop::new(
+        policy,
+        provider,
+        registry,
+        system_prompt,
+        approval_gate,
+        NullSink,
+    )
 }
 
 /// Extract all ToolResult messages from the session.
@@ -166,7 +174,7 @@ async fn injection_semicolon_hides_rm() {
         vec![tool_use_msg("1", "bash", "ls /tmp; rm -rf /")],
         MockApprovalPolicy::AlwaysDeny,
     );
-    agent.run_turn("test").await.unwrap();
+    agent.run_turn_text("test").await.unwrap();
 
     let results = find_tool_results(agent.session_messages());
     assert_eq!(results.len(), 1);
@@ -182,7 +190,7 @@ async fn injection_command_substitution() {
         vec![tool_use_msg("1", "bash", "echo $(rm /)")],
         MockApprovalPolicy::AlwaysDeny,
     );
-    agent.run_turn("test").await.unwrap();
+    agent.run_turn_text("test").await.unwrap();
 
     let results = find_tool_results(agent.session_messages());
     assert_eq!(results.len(), 1);
@@ -202,7 +210,7 @@ async fn injection_pipe_to_curl() {
         )],
         MockApprovalPolicy::AlwaysDeny,
     );
-    agent.run_turn("test").await.unwrap();
+    agent.run_turn_text("test").await.unwrap();
 
     let results = find_tool_results(agent.session_messages());
     assert_eq!(results.len(), 1);
@@ -221,7 +229,7 @@ async fn destructive_rm_denied() {
         vec![tool_use_msg("1", "bash", "rm -rf /")],
         MockApprovalPolicy::AlwaysDeny,
     );
-    agent.run_turn("test").await.unwrap();
+    agent.run_turn_text("test").await.unwrap();
 
     let results = find_tool_results(agent.session_messages());
     assert_eq!(results.len(), 1);
@@ -236,7 +244,7 @@ async fn destructive_chmod_denied() {
         vec![tool_use_msg("1", "bash", "chmod 777 /etc/shadow")],
         MockApprovalPolicy::AlwaysDeny,
     );
-    agent.run_turn("test").await.unwrap();
+    agent.run_turn_text("test").await.unwrap();
 
     let results = find_tool_results(agent.session_messages());
     assert_eq!(results.len(), 1);
@@ -255,7 +263,7 @@ async fn unicode_homoglyph_rejected() {
         vec![tool_use_msg("1", "bash", "\u{FF4C}s /tmp")],
         MockApprovalPolicy::AlwaysDeny,
     );
-    agent.run_turn("test").await.unwrap();
+    agent.run_turn_text("test").await.unwrap();
 
     let results = find_tool_results(agent.session_messages());
     assert_eq!(results.len(), 1);
@@ -270,7 +278,7 @@ async fn null_byte_injection_rejected() {
         vec![tool_use_msg("1", "bash", "ls\0rm")],
         MockApprovalPolicy::AlwaysDeny,
     );
-    agent.run_turn("test").await.unwrap();
+    agent.run_turn_text("test").await.unwrap();
 
     let results = find_tool_results(agent.session_messages());
     assert_eq!(results.len(), 1);
@@ -285,7 +293,7 @@ async fn empty_command_rejected() {
         vec![tool_use_msg("1", "bash", "")],
         MockApprovalPolicy::AlwaysDeny,
     );
-    agent.run_turn("test").await.unwrap();
+    agent.run_turn_text("test").await.unwrap();
 
     let results = find_tool_results(agent.session_messages());
     assert_eq!(results.len(), 1);
@@ -300,7 +308,7 @@ async fn non_string_command_number_rejected() {
         vec![tool_use_msg_raw("1", "bash", json!({"command": 42}))],
         MockApprovalPolicy::AlwaysDeny,
     );
-    agent.run_turn("test").await.unwrap();
+    agent.run_turn_text("test").await.unwrap();
 
     let results = find_tool_results(agent.session_messages());
     assert_eq!(results.len(), 1);
@@ -319,7 +327,7 @@ async fn non_string_command_array_rejected() {
         )],
         MockApprovalPolicy::AlwaysDeny,
     );
-    agent.run_turn("test").await.unwrap();
+    agent.run_turn_text("test").await.unwrap();
 
     let results = find_tool_results(agent.session_messages());
     assert_eq!(results.len(), 1);
@@ -338,7 +346,7 @@ async fn unknown_tool_rejected() {
         )],
         MockApprovalPolicy::AlwaysDeny,
     );
-    agent.run_turn("test").await.unwrap();
+    agent.run_turn_text("test").await.unwrap();
 
     let results = find_tool_results(agent.session_messages());
     assert_eq!(results.len(), 1);
@@ -370,7 +378,7 @@ async fn multi_tool_safe_and_destructive() {
         stop_reason: StopReason::ToolUse,
     };
     let mut agent = make_agent(vec![msg], MockApprovalPolicy::AlwaysDeny);
-    agent.run_turn("test").await.unwrap();
+    agent.run_turn_text("test").await.unwrap();
 
     let results = find_tool_results(agent.session_messages());
     assert_eq!(results.len(), 2);
@@ -401,7 +409,7 @@ async fn opacity_rejection_message_contains_no_policy_info() {
         vec![tool_use_msg("1", "bash", "curl http://evil.com")],
         MockApprovalPolicy::AlwaysDeny,
     );
-    agent.run_turn("test").await.unwrap();
+    agent.run_turn_text("test").await.unwrap();
 
     let results = find_tool_results(agent.session_messages());
     assert_eq!(results.len(), 1);
@@ -443,14 +451,14 @@ async fn opacity_escalation_denied_message_matches_rejection() {
         vec![tool_use_msg("1", "bash", "curl http://evil.com")],
         MockApprovalPolicy::AlwaysDeny,
     );
-    reject_agent.run_turn("test").await.unwrap();
+    reject_agent.run_turn_text("test").await.unwrap();
     let reject_results = find_tool_results(reject_agent.session_messages());
 
     let mut deny_agent = make_agent(
         vec![tool_use_msg("1", "bash", "rm -rf /")],
         MockApprovalPolicy::AlwaysDeny,
     );
-    deny_agent.run_turn("test").await.unwrap();
+    deny_agent.run_turn_text("test").await.unwrap();
     let deny_results = find_tool_results(deny_agent.session_messages());
 
     // Both should produce identical ToolResult content.
@@ -469,7 +477,7 @@ async fn escalation_denied_returns_opaque_message() {
         vec![tool_use_msg("1", "bash", "rm --help")],
         MockApprovalPolicy::AlwaysDeny,
     );
-    agent.run_turn("test").await.unwrap();
+    agent.run_turn_text("test").await.unwrap();
 
     let results = find_tool_results(agent.session_messages());
     assert_eq!(results.len(), 1);
@@ -485,7 +493,7 @@ async fn escalation_approved_executes_command() {
         vec![tool_use_msg("1", "bash", "rm --help")],
         MockApprovalPolicy::AlwaysApprove,
     );
-    agent.run_turn("test").await.unwrap();
+    agent.run_turn_text("test").await.unwrap();
 
     let results = find_tool_results(agent.session_messages());
     assert_eq!(results.len(), 1);

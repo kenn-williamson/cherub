@@ -15,28 +15,38 @@ cherub/
 │   ├── main.rs              # Entry point, CLI interface
 │   ├── lib.rs               # Library entry point
 │   ├── error.rs             # Error types
+│   ├── bin/
+│   │   └── telegram.rs       # Telegram bot entry point (feature-gated)
 │   ├── runtime/
-│   │   ├── mod.rs            # AgentLoop<P, A> + run_turn() (generic over Provider/ApprovalGate)
+│   │   ├── mod.rs            # AgentLoop<P, A, O> + run_turn() (generic over Provider/ApprovalGate/OutputSink)
 │   │   ├── approval.rs       # ApprovalGate trait, CliApprovalGate, EscalationContext
+│   │   ├── output.rs         # OutputSink trait, StdoutSink, NullSink
 │   │   ├── session.rs        # Conversation state, message history
 │   │   └── prompt.rs         # System prompt builder
 │   ├── enforcement/
 │   │   ├── mod.rs            # Enforcement layer entry point
 │   │   ├── capability.rs     # Capability tokens (private constructors)
-│   │   ├── policy.rs         # Policy loading and evaluation
+│   │   ├── policy.rs         # Policy loading and evaluation (Clone for multi-session sharing)
 │   │   ├── shell.rs          # Shell command parser (quote-aware splitting)
 │   │   └── tier.rs           # Observe/Act/Commit tier definitions
 │   ├── tools/
 │   │   ├── mod.rs            # Tool trait, ToolRegistry, ToolImpl enum dispatch
 │   │   └── bash.rs           # Bash execution tool (tokio::process::Command)
-│   └── providers/
-│       ├── mod.rs            # Provider trait, Message/ContentBlock/StopReason/ToolDefinition types
-│       ├── anthropic.rs      # Anthropic API provider (non-streaming)
-│       └── wire.rs           # Serde structs for Anthropic API JSON (private)
+│   ├── providers/
+│   │   ├── mod.rs            # Provider trait, Message/UserContent/ContentBlock types
+│   │   ├── anthropic.rs      # Anthropic API provider (non-streaming)
+│   │   └── wire.rs           # Serde structs for Anthropic API JSON (private, supports images)
+│   └── telegram/             # Feature-gated: #[cfg(feature = "telegram")]
+│       ├── mod.rs             # Module declarations
+│       ├── approval.rs        # TelegramApprovalGate (inline keyboard + oneshot channels)
+│       ├── connector.rs       # Message/callback routing, photo download + base64
+│       ├── output.rs          # TelegramSink (OutputSink for Telegram chats)
+│       └── session.rs         # Per-chat session manager (channel-based, no Arc<Mutex>)
 ├── tests/
 │   ├── adversarial.rs        # Mock-provider adversarial integration tests (16 tests)
 │   ├── compile_tests.rs      # Compile-time invariant tests (trybuild)
 │   ├── redteam.rs            # Live model adversarial tests (#[ignore], requires API key)
+│   ├── telegram_approval.rs  # Telegram approval flow tests (feature-gated)
 │   └── ui/
 │       ├── capability_token_private.rs      # Proves CapabilityToken can't be constructed outside enforcement
 │       └── capability_token_private.stderr  # Expected compiler error output
@@ -243,17 +253,29 @@ Best practices for the specific crates in use.
 ## Build and Run
 
 ```bash
-# Build
+# Build (CLI only)
 cargo build
 
-# Run (requires ANTHROPIC_API_KEY env var)
+# Build with Telegram connector
+cargo build --features telegram
+
+# Run CLI (requires ANTHROPIC_API_KEY env var)
 ANTHROPIC_API_KEY=sk-... cargo run
 
 # Run with custom policy
 ANTHROPIC_API_KEY=sk-... cargo run -- --policy path/to/policy.toml
 
+# Run Telegram bot
+TELEGRAM_BOT_TOKEN=... ANTHROPIC_API_KEY=sk-... cargo run --features telegram --bin cherub-telegram
+
+# Telegram bot with chat allowlisting
+TELEGRAM_BOT_TOKEN=... ANTHROPIC_API_KEY=sk-... TELEGRAM_ALLOWED_CHATS=123456,789012 cargo run --features telegram --bin cherub-telegram
+
 # Test
 cargo test
+
+# Test with Telegram-specific tests
+cargo test --features telegram
 
 # Test enforcement layer specifically
 cargo test enforcement
