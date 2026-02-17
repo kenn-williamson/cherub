@@ -49,25 +49,32 @@ async fn main() -> Result<()> {
     })?;
     info!(policy = %policy_path.display(), "policy loaded");
 
-    // Parse allowed chats
-    let allowed_chats: Option<Vec<i64>> =
-        std::env::var("TELEGRAM_ALLOWED_CHATS")
-            .ok()
-            .and_then(|val| {
-                if val.is_empty() {
-                    None
-                } else {
-                    let ids: Result<Vec<i64>, _> =
-                        val.split(',').map(|s| s.trim().parse::<i64>()).collect();
-                    match ids {
-                        Ok(ids) => Some(ids),
-                        Err(e) => {
-                            eprintln!("warning: failed to parse TELEGRAM_ALLOWED_CHATS: {e}");
-                            None
-                        }
-                    }
-                }
-            });
+    // Parse allowed chats (required for security — deny by default).
+    let allowed_chats_raw = std::env::var("TELEGRAM_ALLOWED_CHATS")
+        .context("TELEGRAM_ALLOWED_CHATS is required. Set to comma-separated chat IDs, or '*' to allow all (not recommended).")?;
+    if allowed_chats_raw.is_empty() {
+        bail!(
+            "TELEGRAM_ALLOWED_CHATS is empty. Set to comma-separated chat IDs, or '*' to allow all."
+        );
+    }
+    let allowed_chats: Option<Vec<i64>> = if allowed_chats_raw.trim() == "*" {
+        tracing::warn!("TELEGRAM_ALLOWED_CHATS=* — bot is open to ALL Telegram users");
+        None
+    } else {
+        let ids: Vec<i64> = allowed_chats_raw
+            .split(',')
+            .map(|s| {
+                s.trim()
+                    .parse::<i64>()
+                    .with_context(|| format!("invalid chat ID: {s:?}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if ids.is_empty() {
+            bail!("TELEGRAM_ALLOWED_CHATS parsed to zero chat IDs");
+        }
+        info!(count = ids.len(), "chat allowlist loaded");
+        Some(ids)
+    };
 
     let model = std::env::var("CHERUB_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_owned());
 

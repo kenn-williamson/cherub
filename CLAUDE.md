@@ -265,11 +265,11 @@ ANTHROPIC_API_KEY=sk-... cargo run
 # Run with custom policy
 ANTHROPIC_API_KEY=sk-... cargo run -- --policy path/to/policy.toml
 
-# Run Telegram bot
-TELEGRAM_BOT_TOKEN=... ANTHROPIC_API_KEY=sk-... cargo run --features telegram --bin cherub-telegram
-
-# Telegram bot with chat allowlisting
+# Run Telegram bot (TELEGRAM_ALLOWED_CHATS is required)
 TELEGRAM_BOT_TOKEN=... ANTHROPIC_API_KEY=sk-... TELEGRAM_ALLOWED_CHATS=123456,789012 cargo run --features telegram --bin cherub-telegram
+
+# Telegram bot open to all users (not recommended)
+TELEGRAM_BOT_TOKEN=... ANTHROPIC_API_KEY=sk-... TELEGRAM_ALLOWED_CHATS='*' cargo run --features telegram --bin cherub-telegram
 
 # Test
 cargo test

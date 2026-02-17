@@ -246,7 +246,10 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
             }
 
             if iteration == MAX_ITERATIONS - 1 {
-                warn!(max_iterations = MAX_ITERATIONS, "reached max iterations, stopping turn");
+                warn!(
+                    max_iterations = MAX_ITERATIONS,
+                    "reached max iterations, stopping turn"
+                );
                 self.output
                     .emit(OutputEvent::Warning(
                         "Reached maximum iterations, stopping.",
