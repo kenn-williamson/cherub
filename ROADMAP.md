@@ -116,28 +116,89 @@ Everything else — connectors, credential brokering, audit logging, IPC plugins
 
 ---
 
-## Milestone 6: Credential Broker
+## Milestone 6: Enforced Memory + Session Persistence
 
-**Goal:** The agent can reference credentials by name. Actual values are injected at execution time, outside the agent's context.
+**Goal:** The agent has persistent, structured memory protected by the enforcement layer. Sessions survive restarts. Memory writes are policy-gated tool invocations.
 
-- [ ] Credential vault: encrypted file or system keychain (start simple — encrypted TOML file)
-- [ ] Agent sees: `credential:stripe_api` (a name, not a value)
-- [ ] HTTP tool: makes API calls with credential injection
-- [ ] Enforcement layer validates credential scope: `stripe_api` with capability `["read"]` cannot be used for a POST to `/payments`
-- [ ] Credential values never appear in: session history, model context, logs
+### Database
+- [ ] PostgreSQL integration (deadpool-postgres connection pool)
+- [ ] Schema: memories table (content, structured JSONB, provenance, confidence, tier, embeddings, tsvector)
+- [ ] Schema: memory_chunks table (chunked documents for search)
+- [ ] Schema: sessions table, session_messages table
+- [ ] Migration framework (refinery)
+
+### Memory as an Enforced Tool
+- [ ] `memory` tool: read, search, write, delete operations
+- [ ] Memory writes pass through enforcement layer (same CapabilityToken requirement)
+- [ ] Policy controls: identity writes = Commit tier, preference writes = Act tier, reads = Observe
+- [ ] Memory tier system: explicit (1.0), confirmed (0.9), inferred (0.5-0.7)
+- [ ] Provenance tracking: source session, source turn, source type on every memory
+
+### Search
+- [ ] Hybrid search: pgvector cosine similarity + tsvector FTS
+- [ ] Reciprocal Rank Fusion for combining results
+- [ ] Embedding provider abstraction (OpenAI text-embedding-3-small initially)
+- [ ] Confidence-weighted result ranking
+
+### Proactive Memory Injection
+- [ ] Before each turn, runtime embeds user message and queries relevant memories
+- [ ] Top memories injected into system prompt with confidence labels
+- [ ] Agent cannot suppress injection — runtime controls context
+
+### Session Persistence
+- [ ] Sessions stored in PostgreSQL (messages, tool calls, results)
+- [ ] Session restore on restart
+- [ ] Context compaction: token estimation, LLM summarization of old turns
+- [ ] Pre-compaction memory flush: extract important information before discarding context
+
+### Contradiction Detection
+- [ ] On memory write, query semantically similar existing memories
+- [ ] Surface conflicts to user via existing escalation mechanism
+- [ ] `superseded_by` chain for memory history (no silent overwrites)
 
 ---
 
-## Milestone 7: Process-Isolated Plugins + IPC Protocol
+## Milestone 7: Credential Broker
 
-**Goal:** Tools run as separate OS processes. The enforcement layer is the only bridge.
+**Goal:** The agent can reference credentials by name. Actual values are injected at execution time, outside the agent's context.
+
+- [ ] Credential vault: encrypted store in PostgreSQL (AES-256-GCM, per-secret key derivation via HKDF)
+- [ ] Agent sees: `credential:stripe_api` (a name, not a value)
+- [ ] HTTP tool: makes API calls with credential injection
+- [ ] Enforcement layer validates credential scope: `stripe_api` with capability `["read"]` cannot be used for a POST to `/payments`
+- [ ] Credential values never appear in: session history, model context, logs, memory store
+
+---
+
+## Milestone 8: WASM Sandbox + Untrusted Tool Execution
+
+**Goal:** Untrusted tools run in WASM sandboxes with host-mediated I/O. The enforcement layer gates entry; the sandbox constrains execution.
+
+- [ ] Wasmtime integration: compile, instantiate, and execute WASM modules
+- [ ] Host functions: `workspace_read`, `http_request`, `secret_exists`, `log`, `now_millis`
+- [ ] Capability declaration: per-tool manifest (allowlisted endpoints, path prefixes, credential names)
+- [ ] Credential injection at host boundary (tool never sees secret values)
+- [ ] Resource limits: fuel metering (CPU), memory cap, execution timeout
+- [ ] Leak detection: scan HTTP responses and tool output for secret exfiltration
+- [ ] Fresh WASM instance per execution (no shared state between invocations)
+- [ ] Tool loader: discover WASM tools from a configured directory, validate with BLAKE3 hash
+- [ ] Write a WASM tool (HTTP/API tool) to validate the sandbox works end-to-end
+- [ ] Enforcement layer gates WASM tools identically to in-process tools (same CapabilityToken requirement)
+
+---
+
+## Milestone 9: Container Sandbox + IPC Protocol
+
+**Goal:** Heavy/polyglot tools run in Docker/Podman containers. Language-agnostic plugin ecosystem.
 
 - [ ] Define IPC protocol: length-prefixed JSON over Unix domain sockets
 - [ ] Plugin registration handshake: type, identity, capability declarations
-- [ ] Extract bash tool to a separate process
-- [ ] Runtime manages plugin lifecycle: spawn, connect, health check, restart
-- [ ] A crashing tool plugin does not affect the runtime
-- [ ] Write a second tool plugin (HTTP/API tool) to validate the protocol works for more than one tool
+- [ ] Container lifecycle management: spawn, connect, health check, restart, kill on timeout
+- [ ] Network isolation by default (no network access; IPC socket is the only channel)
+- [ ] Workspace mounting: read-only directory mounts for tools that need file access
+- [ ] Resource limits via cgroups (CPU, memory)
+- [ ] A crashing container tool does not affect the runtime
+- [ ] Write a container tool plugin (e.g., Python-based) to validate language-agnostic IPC works
 
 ---
 
@@ -151,7 +212,6 @@ These are real goals but not blocking the thesis proof:
 - Policy hot-reload (file watch + re-evaluate)
 - Multi-provider support (OpenAI, Ollama)
 - Session persistence (JSONL)
-- Wasm plugin support via Wasmtime (alternative to process isolation)
 - Multi-agent routing (different policies per channel)
 - Per-task dynamic constraints (session-scoped, user-confirmed via approval gate — see DESIGN.md Section 3.5)
 - Stateful constraints (cumulative tracking: daily spend limits, action rate limits, time-windowed budgets)

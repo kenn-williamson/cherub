@@ -1,6 +1,6 @@
 # Secure Agent Runtime — Design Document
 
-**Status:** Draft — Milestone 5 Complete (Telegram Connector)
+**Status:** Draft — Milestone 5 Complete (Telegram Connector), Plugin Architecture revised (tiered sandbox model)
 **Author:** Kenn Williamson  
 **Date:** February 2026
 
@@ -240,36 +240,110 @@ The audit log is append-only and written by the core runtime. Plugins cannot mod
 
 ## 4. Plugin Architecture
 
-### 4.1 Process Isolation
+### 4.1 Tiered Sandbox Model
 
-Every plugin (connector, tool, or provider) runs as a separate OS process. The core runtime never loads plugin code into its own address space. Plugins communicate with the runtime exclusively through IPC. This means:
+The enforcement layer decides *whether* a tool may run. The sandbox decides *what the tool can do while running.* These are separate concerns solved by different mechanisms. Not all tools have the same isolation needs, so Cherub uses a tiered sandbox model with three execution environments:
 
-- A crashing plugin cannot take down the runtime
-- A malicious plugin cannot corrupt the enforcement layer's memory
-- A buggy plugin cannot escalate its own privileges
-- Plugin processes can be monitored, restarted, and resource-limited independently
+```
+                    Model proposes tool call
+                            │
+                   Enforcement layer
+                  (policy eval, CapabilityToken)
+                            │
+              ┌─────────────┼──────────────┐
+              │             │              │
+         In-process     WASM sandbox    Container
+         (trusted)      (untrusted,     (untrusted,
+                         needs I/O)      heavy/polyglot)
+              │             │              │
+          bash, file    API tools,      Python ML,
+          ops, memory   browser,        custom binaries,
+                        filesystem      language runtimes
+                        plugins
+```
 
-### 4.2 IPC Protocol
+**In-process tools** are built-in to the runtime — bash, file operations, memory. These are our code, trusted by definition. The enforcement layer is their only guard. No sandbox overhead.
 
-Plugins communicate with the core runtime over a defined protocol. The transport is local IPC (Unix domain sockets for v1, with ZeroMQ or nng as potential upgrades if more sophisticated messaging patterns become necessary). The message format is length-prefixed JSON (simple, debuggable, universally supported across languages).
+**WASM-sandboxed tools** are untrusted code compiled to WebAssembly and run via Wasmtime. WASM provides memory isolation (the tool cannot address host memory), zero default capabilities (no filesystem, no network, no environment), deterministic resource limits (fuel metering for CPU, memory caps), and host-mediated I/O (every external operation goes through a host function the runtime controls). This is the right sandbox for tools that need fine-grained filesystem access or credential-protected API calls — the host function boundary is where credential injection, request allowlisting, and leak detection happen naturally.
+
+**Container-sandboxed tools** are untrusted binaries that run in Docker/Podman containers. The kernel enforces isolation — network namespaces, filesystem mounts, cgroups, seccomp. This is the right sandbox for heavy or polyglot tools (Python with numpy, Go CLI tools, anything that can't compile to WASM). Communication is IPC-only — the tool's entire world is a Unix socket to the runtime. Coarser than WASM but stronger for the cases where you need a full runtime environment.
+
+The choice of sandbox is per-tool, declared in the tool's manifest. The enforcement layer doesn't care which sandbox runs underneath — it evaluates the proposal, issues a CapabilityToken, and the dispatcher routes to the appropriate execution environment.
+
+#### Why both WASM and containers?
+
+Each model has a weakness the other covers:
+
+| Concern | WASM | Container |
+|---------|------|-----------|
+| Filesystem access | Natural (host function mediates per-path) | Awkward (mount config or IPC proxy) |
+| Credential-protected API calls | Native (host intercepts HTTP, injects credentials, tool never sees them) | Must proxy HTTP through runtime — same mediation complexity as WASM, but over IPC |
+| Language support | Limited (Rust/C/Go compile well, Python/JS need heavy runtimes) | Any language, any binary |
+| Portability | Runs identically on Linux/macOS/Windows | Linux namespaces are Linux-only; macOS/Windows need Docker |
+| Isolation boundary | Application-level (Wasmtime + host functions) | Kernel-level (battle-tested by every container deployment) |
+| Startup cost | Microseconds | Milliseconds (irrelevant for LLM-latency-dominated workloads) |
+
+WASM is better for tools that need precise I/O mediation (API clients, filesystem plugins). Containers are better for tools that need a full OS environment and no external I/O (compute, data processing, code execution).
+
+### 4.2 WASM Sandbox Architecture
+
+WASM tools run in Wasmtime with the following security model:
+
+**Default posture: zero capabilities.** A WASM module has no filesystem, no network, no environment variables, no clock. Every capability is explicitly granted by the host through host functions.
+
+**Host-mediated I/O.** When a WASM tool needs to make an HTTP request, read a workspace file, or check if a credential exists, it calls a host function. The host function:
+
+1. Checks the request against the tool's declared capability (allowlisted endpoints, path prefixes, credential names)
+2. Injects credentials at the host boundary (the tool never sees the actual secret value)
+3. Executes the operation
+4. Scans the response for leaked secrets (leak detection)
+5. Returns the sanitized result to the WASM module
+
+**Resource limits:**
+- CPU: Fuel metering — each WASM instruction consumes fuel. When fuel runs out, the module is terminated.
+- Memory: Hard cap enforced by Wasmtime's `ResourceLimiter` (e.g., 10MB per tool).
+- Time: Epoch interruption + tokio timeout as a backstop.
+- Logs: Capped entries and message size to prevent log flooding.
+
+**Capability declaration.** Each WASM tool ships with a capabilities manifest declaring what it needs:
+- HTTP: allowlisted endpoints, credential references, rate limits
+- Workspace: allowed path prefixes (read-only)
+- Tool invoke: aliases for calling other tools (subject to enforcement layer evaluation)
+- Secrets: allowed credential names (existence checks only — never read values)
+
+**Fresh instance per execution.** Each tool invocation gets a new WASM instance. No shared state between invocations. No side channels.
+
+### 4.3 Container Sandbox Architecture
+
+Container-sandboxed tools run as isolated OS processes inside Docker/Podman containers:
+
+**Network isolation.** By default, container tools have no network access. The only communication channel is IPC (Unix domain socket mounted into the container). Tools that need no external I/O communicate exclusively through this socket — input in, output out, nothing else.
+
+**Filesystem isolation.** The container gets a minimal filesystem. Workspace directories can be mounted read-only if the tool needs file access. Write access is to a temporary directory that is destroyed when the container exits.
+
+**Resource limits.** Cgroups enforce CPU and memory caps. The runtime manages container lifecycle — spawn, monitor, restart on crash, kill on timeout.
+
+**Language agnostic.** Any binary that can read from stdin/a socket and write JSON can be a container tool. Python, Go, Node, Rust, shell scripts — the container packages the runtime environment.
+
+### 4.4 IPC Protocol
+
+Both WASM and container tools communicate with the runtime through a defined protocol. For container tools, the transport is Unix domain sockets with length-prefixed JSON. For WASM tools, the transport is host function calls with the same JSON message format.
 
 The protocol is the plugin interface. Any process that can open a Unix socket and serialize JSON can be a plugin. This makes the ecosystem language-agnostic by design. The first plugins will be written in Rust because it's convenient, but a Python developer or a Go developer can write a connector or tool plugin without touching Rust. They implement the protocol, not a Rust trait.
 
-### 4.3 Plugin Lifecycle
+### 4.5 Plugin Lifecycle
 
-1. **Startup.** The core runtime starts and reads its configuration. For each configured plugin, it either spawns the plugin process or connects to an already-running plugin process at a known socket path.
+1. **Startup.** The core runtime starts and reads its configuration. For each configured plugin, it either instantiates a WASM module, spawns a container, or connects to an already-running plugin process at a known socket path.
 2. **Registration.** The plugin sends a registration message declaring its type (connector, tool, or provider), its identity, and its capability declarations (what actions it supports, with recommended tier classifications).
 3. **Validation.** The runtime validates the registration against the operator's policy. If the plugin declares actions that the operator has not authorized, those actions are masked — the plugin is loaded but the unauthorized actions are never routed to it.
 4. **Operation.** The plugin sends and receives messages according to its type. Connectors forward inbound messages from external platforms and receive outbound messages to send. Tools receive invocation requests and return results. Providers receive inference requests and stream responses.
-5. **Shutdown.** The runtime sends a shutdown signal. The plugin performs cleanup and exits. If a plugin crashes without clean shutdown, the runtime detects the broken connection and can optionally restart it according to the operator's restart policy.
+5. **Shutdown.** The runtime sends a shutdown signal. The plugin performs cleanup and exits. WASM modules are dropped. Container processes receive SIGTERM. If a plugin crashes, the runtime detects the failure and can optionally restart it according to the operator's restart policy.
 
-### 4.4 Language Interoperability
+### 4.6 Language Interoperability
 
 The protocol specification is the contract. It is documented as a JSON schema with behavioral expectations for each message type. A plugin implementor reads the spec, implements message handling in their language of choice, and connects.
 
 Reference implementations of the plugin SDK will be provided in Rust (because the core runtime is Rust and the first plugins will be Rust). Community SDKs in other languages are welcome but not a project responsibility for v1. The protocol is simple enough that an SDK is a convenience, not a necessity — raw socket + JSON is sufficient.
-
-Future considerations: WebAssembly plugins loaded via Wasmtime could provide tighter integration for plugins that want lower latency without sacrificing isolation. This would be a second plugin loading path alongside the process-based path. Wasm plugins would be subject to the same capability system and enforcement layer. This is not a v1 concern.
 
 ---
 
@@ -303,9 +377,9 @@ Future considerations: WebAssembly plugins loaded via Wasmtime could provide tig
 
 - **Tier override granularity.** Can the operator override tiers at the tool level (all Stripe actions are Commit), the action level (Stripe create_payment is Commit but Stripe get_balance is Observe), or the parameter level (Stripe create_payment over $100 is Commit but under $100 is Act)? *Resolved: Yes, all three. The parameterized constraint model (Section 3.5) supports per-tool, per-action, and per-task constraints with `on_constraint_failure` controlling whether violations escalate or hard-reject.*
 
-- **Policy hot-reload.** Can the operator modify the policy while the runtime is running? If so, how are in-flight actions handled? Does a policy change affect currently pending approval gates?
+- **Policy hot-reload.** Can the operator modify the policy while the runtime is running? If so, how are in-flight actions handled? Does a policy change affect currently pending approval gates? *Resolved: Yes, via `Arc<Policy>` atomic swap. In-flight decisions use the old policy; new decisions use the new policy. See Section 9.4.*
 
-- **Default policy generation.** When a new plugin registers with actions the policy doesn't mention, should the runtime auto-generate Observe-tier entries and notify the operator? Or should unknown actions be denied entirely until explicitly configured?
+- **Default policy generation.** When a new plugin registers with actions the policy doesn't mention, should the runtime auto-generate Observe-tier entries and notify the operator? Or should unknown actions be denied entirely until explicitly configured? *Partially resolved: Deny by default. Plugin authors can declare recommended tiers; the operator confirms or overrides. See Section 9.6.*
 
 ### 5.4 Operational Questions
 
@@ -417,8 +491,8 @@ The problem this project solves is increasingly recognized as critical:
 ### 8.1 Projects to Study
 
 **Direct Competitors and Adjacent Systems:**
-- **IronClaw** (github.com/nearai/ironclaw) — Rust OpenClaw rewrite with WASM sandboxing. Study connector architecture, capability grants, deployment model.
-- **Wassette** (github.com/microsoft/wassette) — Rust WASM tool runtime. Study the WASI capability model and policy.yaml format for potential future Wasm plugin support.
+- **IronClaw** (github.com/nearai/ironclaw) — Rust OpenClaw rewrite with WASM sandboxing. 89K lines, v0.5.0. Reference implementation for WASM host functions, credential injection, multi-provider failover, and web gateway. Their security model is runtime-checked (no compiler-enforced tokens, no policy opacity, no tiered enforcement). MIT/Apache-2.0. Study connector architecture, WASM sandbox implementation, and deployment model.
+- **Wassette** (github.com/microsoft/wassette) — Rust WASM tool runtime. Study the WASI capability model and policy.yaml format for Cherub's WASM sandbox (M7).
 - **FIDES** (github.com/microsoft/fides) — Information-flow control for agents. Study the IFC label system and how it achieves 100% attack prevention.
 - **Tenuo** (github.com/tenuo-ai/tenuo) — Cryptographic capability warrants. Study the attenuation model for sub-task permission narrowing.
 - **Leash** (github.com/strongdm/leash) — eBPF agent enforcement. Study Cedar policy language integration.
@@ -458,6 +532,291 @@ The problem this project solves is increasingly recognized as critical:
 - **"MiniScope: A Least Privilege Framework for Authorizing Tool Calling Agents"** (UC Berkeley, arXiv:2512.11147) — Automatic construction of permission hierarchies with 1-6% overhead.
 - **"Systems Security Foundations for Agentic Computing"** (ePrint 2025/2173) — Survey of 11 real attacks on agentic systems; argues system-level enforcement is necessary.
 - **"Zero-Cost Capabilities: Retrofitting Effect Safety in Rust"** (UC Davis) — Demonstrates compile-time capability enforcement in Rust's type system.
+
+---
+
+## 9. Policy Management
+
+### 9.1 The Problem
+
+The policy is the product. Without it, the agent is either autonomous (dangerous) or gated on every action (useless). The constraint system (Section 3.5) gives the operator fine-grained control: "buy groceries up to $200 autonomously, escalate above $200, hard reject above $1000." But this only works if the operator can actually write and maintain policies without friction.
+
+Hand-editing TOML and restarting the agent is acceptable for development. It is not acceptable for daily use. The goal is: a user on Telegram says "set my grocery budget to $300" and the policy updates live.
+
+### 9.2 Architecture
+
+Policy management is built on the same enforcement model as everything else. The agent helps the user edit policies, but cannot modify them directly.
+
+```
+User: "Set my grocery spending limit to $300/week"
+    │
+    Agent: translates to structured policy change proposal
+    │
+    Agent proposes: { tool: "policy_edit", action: "update_constraint",
+                      params: { tool: "walmart", action: "purchase",
+                                field: "params.total_price", op: "lt", value: 300 } }
+    │
+    Enforcement: "policy_edit" is always Commit → Escalate
+    │
+    User sees (via Telegram/CLI/web):
+      "Update constraint: tools.walmart.actions.purchase
+       field=params.total_price, op=lt, value=300
+       Allow? [YES] [NO]"
+    │
+    User approves → policy_edit tool writes validated TOML → Arc<Policy> hot-reloads
+```
+
+The agent is a UI proxy. It translates natural language into structured policy changes. But the change goes through enforcement like everything else — the agent proposes, the human approves, a trusted tool applies.
+
+### 9.3 Security Invariants
+
+**The agent cannot modify its own constraints.** This is enforced at three levels:
+
+1. **No policy tool without approval.** The `policy_edit` tool is hardcoded as Commit tier in the enforcement layer itself — not in the policy file. You cannot use the policy to weaken the policy. This is a load-bearing invariant on the same level as CapabilityToken's private constructor.
+
+2. **Policy opacity still holds.** The agent does not see the current policy. It proposes changes based on the user's natural language request. It does not know what the current limit is, what other constraints exist, or what the tier classifications are. It cannot reason about how to incrementally relax constraints because it has no visibility into the current state.
+
+3. **Structured confirmation.** The user sees the actual structured change (field, operator, value), not the agent's paraphrase. The trust anchor is the confirmation gate, not the agent's interpretation.
+
+### 9.4 Hot Reload
+
+The `Policy: Clone` and `Arc<Policy>` design (established in M5 for multi-session sharing) enables live policy updates:
+
+1. The `policy_edit` tool writes new TOML to the policy file.
+2. The runtime parses and validates the new file. If validation fails, the change is rejected and the user is notified.
+3. A new `Policy` is compiled from the validated TOML.
+4. The shared `Arc<Policy>` is swapped atomically (e.g., `ArcSwap` or equivalent).
+5. In-flight enforcement decisions complete against the old policy. New decisions use the new policy.
+6. No restart required. No downtime.
+
+### 9.5 Channel Considerations
+
+Policy editing should work from any channel, but the UX varies:
+
+- **CLI**: Direct TOML editing for power users, or guided prompts via the agent.
+- **Telegram/messaging**: Natural language → agent proposes structured change → user approves via inline keyboard. This works with the existing approval gate infrastructure.
+- **Web UI** (future): Form-based policy editor with constraint builder. The richest UX, but requires the web gateway milestone.
+
+For the initial implementation, manual TOML editing with agent restart is sufficient. The `policy_edit` tool and hot-reload are a later milestone — the architecture supports them, but they are not blocking.
+
+### 9.6 Policy Generation
+
+When a new tool plugin registers, the operator needs a policy for it. Writing one from scratch requires understanding every action the tool supports. Two approaches to reduce this friction:
+
+- **Plugin-authored defaults.** The plugin declares recommended tier classifications for its actions during registration (Section 4.5). The runtime presents these recommendations to the operator for confirmation. The operator can accept, modify, or reject each recommendation. Unconfirmed actions default to deny.
+
+- **Agent-assisted generation.** The agent reads the tool's schema and description, proposes a policy draft, and presents it to the user for approval. Same flow as policy editing — the agent proposes, the user confirms, the trusted tool applies. The agent's draft may be wrong, but the user sees the structured output before it takes effect.
+
+Both approaches converge on the same principle: the policy is always the operator's decision, never the agent's or the plugin author's unilateral choice.
+
+---
+
+## 10. Enforced Memory
+
+### 10.1 Memory as Sacred State
+
+Remembrance is identity. What an agent remembers determines how it acts, what context it brings to decisions, and how it represents its user. In every existing agent framework — OpenClaw, IronClaw, and others — the agent's memory is an unprotected scratchpad. The agent writes freely, deletes freely, and overwrites freely. Memory is treated as a convenience feature, not a security boundary.
+
+This is a fundamental error. If the enforcement layer protects tool execution but leaves memory unprotected, an attacker who achieves prompt injection can:
+
+- Plant false preferences: "user wants to spend $10,000 on electronics"
+- Alter the agent's identity to change its behavior across future sessions
+- Delete safety-relevant memories: dietary restrictions, financial boundaries, contact preferences
+- Inject latent instructions that activate in future sessions when relevant context surfaces
+
+Memory corruption is as dangerous as unauthorized tool execution. An agent that buys the wrong groceries because its memory was poisoned is functionally equivalent to an agent that executed an unauthorized purchase — the outcome is the same. The attack surface is different, but the blast radius is identical.
+
+Cherub treats memory writes as tool invocations. They pass through the enforcement layer. They are subject to policy evaluation, tier classification, and parameterized constraints. The agent cannot rewrite its own identity any more than it can bypass the policy. Both are walls, not guardrails.
+
+### 10.2 The Three Pillars
+
+The enforcement layer, sandboxing, and enforced memory form a unified security architecture:
+
+1. **Enforcement** controls what the agent can *do* — which tools it can invoke, with what parameters, requiring what approval.
+2. **Sandboxing** constrains what tools can *touch* — which APIs, files, and resources are accessible during execution.
+3. **Enforced memory** controls what the agent can *know* — what it remembers, what it can modify, and what is immutable.
+
+No other agent runtime treats all three as protected resources under a single policy system.
+
+### 10.3 Memory Architecture
+
+Cherub uses PostgreSQL as the memory backend. This is not a lightweight scratchpad — it is structured, provenanced, tiered, and searchable state.
+
+#### Schema
+
+```sql
+CREATE TABLE memories (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id TEXT NOT NULL,
+
+    -- What
+    category TEXT NOT NULL,           -- 'preference', 'fact', 'instruction', 'identity', 'observation'
+    path TEXT NOT NULL,               -- Workspace-style path: 'preferences/food', 'identity/values'
+    content TEXT NOT NULL,            -- Natural language, human-readable
+    structured JSONB,                 -- Machine-queryable: {"budget": 200, "currency": "USD", "period": "week"}
+
+    -- Provenance
+    source_session_id UUID,           -- Which session created this memory
+    source_turn_number INTEGER,       -- Which turn in that session
+    source_type TEXT NOT NULL,        -- 'explicit', 'confirmed', 'inferred'
+    confidence REAL NOT NULL DEFAULT 1.0,
+
+    -- Lifecycle
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_referenced_at TIMESTAMPTZ,   -- Updated when memory is used in context
+    expires_at TIMESTAMPTZ,           -- Optional TTL for ephemeral memories
+    superseded_by UUID REFERENCES memories(id),  -- Points to the replacement memory
+
+    -- Search
+    embedding VECTOR(1536),
+    tsv TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
+
+    -- Enforcement
+    tier TEXT NOT NULL DEFAULT 'act'  -- Minimum tier required to modify/delete this memory
+);
+```
+
+Key design choices:
+
+- **`source_type`** distinguishes how the memory was created. Explicit memories (user directly stated) have confidence 1.0. Inferred memories (agent concluded from behavior) have lower confidence and can be surfaced for confirmation.
+- **`superseded_by`** handles updates without deleting history. When a preference changes, the old memory points to the new one. The chain is auditable.
+- **`structured` JSONB** enables direct queries without LLM interpretation. "What's my grocery budget?" can be answered from the database, not by searching text chunks.
+- **`tier`** on the memory itself means some memories are harder to modify. Identity and core preferences can be Commit-tier, requiring human approval to change. Casual observations can be Act-tier.
+
+#### Chunking and Search
+
+For memories that are longer documents (daily logs, notes, context files), the same chunking and hybrid search applies:
+
+```sql
+CREATE TABLE memory_chunks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    memory_id UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    embedding VECTOR(1536),
+    tsv TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', content)) STORED
+);
+```
+
+Search uses Reciprocal Rank Fusion across FTS and vector results, same as OpenClaw and IronClaw. The difference is that search results carry provenance and confidence, so the runtime can prioritize explicit high-confidence memories over inferred low-confidence ones.
+
+### 10.4 Enforced Memory Writes
+
+Memory operations are tools. They pass through the enforcement layer like any other tool invocation.
+
+```toml
+[tools.memory]
+enabled = true
+
+[tools.memory.actions.write_preference]
+tier = "act"
+patterns = ["^preferences/"]
+
+[tools.memory.actions.write_observation]
+tier = "act"
+patterns = ["^observations/", "^daily/"]
+
+[tools.memory.actions.write_identity]
+tier = "commit"
+patterns = ["^identity/", "^values/"]
+
+[tools.memory.actions.delete]
+tier = "commit"
+patterns = [".*"]
+
+[tools.memory.actions.read]
+tier = "observe"
+patterns = [".*"]
+
+[tools.memory.actions.search]
+tier = "observe"
+patterns = [".*"]
+```
+
+The agent can write grocery preferences autonomously. It cannot alter its own identity, delete memories, or modify high-tier memories without human approval. This is the same constraint system used for every other tool — no special cases, no separate mechanism.
+
+### 10.5 Memory Tiers
+
+Not all memories are equal. The system distinguishes by source and importance:
+
+| Tier | Source | Confidence | Mutability | Example |
+|------|--------|-----------|------------|---------|
+| **Explicit** | User directly stated | 1.0 | Commit to modify | "I'm allergic to peanuts" |
+| **Confirmed** | Agent proposed, user approved | 0.9 | Act to modify | "You prefer organic produce — correct?" "Yes" |
+| **Inferred** | Agent concluded from behavior | 0.5–0.7 | Act to modify, can be auto-expired | "User usually orders groceries on Sundays" |
+| **Ephemeral** | Session context | — | Not persisted | "User is currently comparing TVs" |
+
+Inferred memories are candidates for confirmation. The agent can surface them: "I've noticed you usually shop on Sundays. Should I remember that?" Confirmation bumps the memory to the confirmed tier. Denial deletes it. This confirmation flow goes through the enforcement layer as a memory write — the user sees the structured change and approves it.
+
+### 10.6 Contradiction Detection
+
+When the agent writes a new memory, the runtime queries semantically similar existing memories:
+
+```sql
+SELECT id, content, source_type, confidence, created_at
+FROM memories
+WHERE user_id = $1
+  AND category = $2
+  AND superseded_by IS NULL
+  AND 1 - (embedding <=> $3) > 0.85
+ORDER BY confidence DESC, created_at DESC
+LIMIT 5;
+```
+
+If a highly similar memory exists with different content, the runtime does not silently overwrite it. Instead, it surfaces the conflict to the user through the existing escalation mechanism:
+
+> "You previously told me you're vegetarian (January 15). You just asked me to order steak. Should I update your dietary preference?"
+
+The user confirms or denies. The old memory gets `superseded_by` pointing to the new one (if confirmed), or the new memory is discarded (if denied). The history is preserved either way.
+
+### 10.7 Proactive Memory Injection
+
+The runtime — not the agent — decides what memories are relevant to the current conversation. Before each turn, the runtime:
+
+1. Embeds the current user message
+2. Queries the memory store for relevant memories (hybrid search)
+3. Injects top-ranked memories into the system prompt as context
+4. The agent sees relevant history without having to search for it
+
+This is important because it is **outside the agent's control**. The agent cannot choose to ignore its memories. The runtime injects them. If the user said "I'm allergic to peanuts" six months ago and the agent is now ordering groceries, that memory surfaces automatically.
+
+The injection is also subject to confidence weighting. Explicit memories (confidence 1.0) are injected with higher priority than inferred memories (confidence 0.5). The system prompt might include:
+
+```
+## Relevant memories (verified)
+- User is allergic to peanuts [explicit, 2025-08-12]
+- Grocery budget: $200/week [explicit, 2026-01-03]
+
+## Relevant memories (inferred, lower confidence)
+- User usually orders groceries on Sundays [inferred, confidence 0.6]
+```
+
+The agent sees the confidence level and can weigh it accordingly, but it cannot suppress or ignore the injection.
+
+### 10.8 Context Compaction with Memory Preservation
+
+When a conversation exceeds the context window, compaction is necessary. But compaction risks losing information. The memory system mitigates this:
+
+1. **Pre-compaction memory flush.** Before discarding old context, the runtime triggers a memory extraction turn. The agent reviews the conversation being compacted and writes any important information to the memory store as structured memories.
+2. **Compaction summary.** The runtime generates a summary of the compacted conversation and stores it as a memory with provenance pointing to the original session.
+3. **Searchable history.** Even after compaction, the original conversation content is preserved in the memory store as chunks. Future searches can surface information from conversations that have been compacted out of the active context.
+
+Nothing is truly forgotten. It moves from active context to searchable memory.
+
+### 10.9 Comparison with Existing Systems
+
+| Capability | OpenClaw | IronClaw | Cherub |
+|-----------|----------|----------|--------|
+| Memory writes | Unprotected | Unprotected | Enforced (policy-gated) |
+| Memory tiers | None | None | Explicit/Confirmed/Inferred/Ephemeral |
+| Provenance | None | None | Session + turn + source type + confidence |
+| Contradiction detection | None | None | Semantic similarity query + user confirmation |
+| Structured data | None (markdown only) | None (markdown only) | JSONB + natural language |
+| Identity protection | Agent can overwrite freely | Agent can overwrite freely | Commit-tier, requires human approval |
+| Proactive injection | Extension (auto-recall) | Not implemented | Core runtime behavior |
+| Search | Hybrid (FTS + vector) | Hybrid (FTS + vector) | Hybrid (FTS + vector) + confidence weighting |
+| Compaction preservation | Memory flush (LLM-driven) | Summarize + archive | Memory flush + structured extraction + searchable archive |
 
 ---
 
