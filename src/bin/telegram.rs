@@ -78,6 +78,29 @@ async fn main() -> Result<()> {
 
     let model = std::env::var("CHERUB_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_owned());
 
+    // Connect to PostgreSQL for session persistence if DATABASE_URL is set.
+    #[cfg(feature = "sessions")]
+    let db_pool = {
+        match std::env::var("DATABASE_URL") {
+            Ok(db_url_raw) => {
+                match cherub::storage::connect(secrecy::SecretString::from(db_url_raw)).await {
+                    Ok(pool) => {
+                        info!("session persistence enabled");
+                        Some(pool)
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "database connection failed, sessions will be ephemeral");
+                        None
+                    }
+                }
+            }
+            Err(_) => {
+                info!("DATABASE_URL not set, sessions will be ephemeral");
+                None
+            }
+        }
+    };
+
     let bot = Bot::new(&bot_token_raw);
     info!(model = %model, "cherub-telegram starting");
 
@@ -92,6 +115,8 @@ async fn main() -> Result<()> {
         model,
         max_tokens: DEFAULT_MAX_TOKENS,
         api_key,
+        #[cfg(feature = "sessions")]
+        db_pool,
     };
 
     // Spawn session manager and approval manager tasks.

@@ -1,6 +1,6 @@
 # Secure Agent Runtime — Design Document
 
-**Status:** Draft — Milestone 5 Complete (Telegram Connector), Plugin Architecture revised (tiered sandbox model)
+**Status:** Draft — Milestone 6a Complete (PostgreSQL Infrastructure + Session Persistence), Plugin Architecture revised (tiered sandbox model)
 **Author:** Kenn Williamson  
 **Date:** February 2026
 
@@ -284,6 +284,20 @@ Each model has a weakness the other covers:
 | Startup cost | Microseconds | Milliseconds (irrelevant for LLM-latency-dominated workloads) |
 
 WASM is better for tools that need precise I/O mediation (API clients, filesystem plugins). Containers are better for tools that need a full OS environment and no external I/O (compute, data processing, code execution).
+
+#### Known limitation: in-process tools share the runtime's environment
+
+Until M8/M9, the bash tool runs as a subprocess of the runtime — same OS user, same filesystem view, same environment variables. This means the agent can:
+
+- Read the policy file from disk (`cat config/default_policy.toml`), violating policy opacity
+- Read environment variables (`env`, `cat /proc/self/environ`), exposing the API key and bot token
+- Read any file the runtime user can read
+
+The enforcement layer controls *which commands* the agent can run, but it cannot prevent an allowed command (e.g., `cat`) from reading sensitive files. This is a fundamental limitation of running tools in the same OS context as the runtime.
+
+**Mitigation before M8/M9:** Run in Docker. Do not place the policy file in the agent's working directory. Accept that `env` and `/proc` expose environment variables. These are information leaks, not execution bypasses — the enforcement layer still gates tool execution.
+
+**Structural fix (M8/M9):** Bash runs in a separate container with only a workspace volume mounted. The runtime's policy, credentials, and environment are in a different filesystem namespace. The agent's bash commands cannot see them because they do not exist in bash's view of the world.
 
 ### 4.2 WASM Sandbox Architecture
 

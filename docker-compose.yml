@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    environment:
+      POSTGRES_DB: cherub
+      POSTGRES_USER: cherub
+      POSTGRES_PASSWORD: cherub_dev
+    ports:
+      - "5480:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cherub -d cherub"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:
+
+# DATABASE_URL=postgres://cherub:cherub_dev@localhost:5480/cherub

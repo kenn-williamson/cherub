@@ -26,6 +26,9 @@ pub struct SessionConfig {
     pub model: String,
     pub max_tokens: u32,
     pub api_key: secrecy::SecretString,
+    /// PostgreSQL connection pool for session persistence. `None` = ephemeral sessions.
+    #[cfg(feature = "sessions")]
+    pub db_pool: Option<deadpool_postgres::Pool>,
 }
 
 /// Message sent to the session manager from the connector.
@@ -57,13 +60,14 @@ pub async fn session_manager(
 
                     let (tx, rx) = mpsc::channel::<InboundMessage>(32);
 
-                    // Spawn a per-chat task.
                     let chat_config = SessionConfig {
                         bot: config.bot.clone(),
                         policy: config.policy.clone(),
                         model: config.model.clone(),
                         max_tokens: config.max_tokens,
                         api_key: config.api_key.clone(),
+                        #[cfg(feature = "sessions")]
+                        db_pool: config.db_pool.clone(),
                     };
                     let approval_tx = approval_tx.clone();
 
@@ -121,6 +125,31 @@ async fn chat_session(
         approval_gate,
         output,
     );
+
+    // Attach session persistence per chat if a pool is available.
+    #[cfg(feature = "sessions")]
+    if let Some(pool) = config.db_pool {
+        use crate::storage::pg_session_store::PgSessionStore;
+        let store = Box::new(PgSessionStore::new(pool));
+        let connector_id = chat_id.to_string();
+        match agent
+            .with_persistence(store, "telegram", &connector_id)
+            .await
+        {
+            Ok(()) => {
+                let msg_count = agent.session_messages().len();
+                info!(
+                    chat_id = %chat_id,
+                    session_id = %agent.session_id(),
+                    message_count = msg_count,
+                    "session persistence attached"
+                );
+            }
+            Err(e) => {
+                warn!(chat_id = %chat_id, error = %e, "session persistence unavailable, running ephemeral");
+            }
+        }
+    }
 
     while let Some(msg) = rx.recv().await {
         if let Err(e) = agent.run_turn(msg.content).await {

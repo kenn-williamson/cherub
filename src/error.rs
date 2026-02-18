@@ -22,4 +22,8 @@ pub enum CherubError {
 
     #[error("configuration error: {0}")]
     Config(String),
+
+    #[cfg(feature = "postgres")]
+    #[error("storage error: {0}")]
+    Storage(String),
 }

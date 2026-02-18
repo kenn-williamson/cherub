@@ -3,6 +3,8 @@ pub(crate) mod wire;
 
 use std::future::Future;
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::CherubError;
 
 /// Abstraction over LLM providers. `dyn Provider` is a legitimate extension boundary
@@ -17,12 +19,20 @@ pub trait Provider: Send + Sync {
 }
 
 /// Content within a user message. Supports text and images for multimodal input.
+///
+/// Uses adjacent tagging (`tag` + `content`) because `Text(String)` is a newtype
+/// variant — internal tagging can't serialize a newtype containing a scalar.
+/// JSON: `{"type":"text","content":"hello"}` / `{"type":"image","content":{...}}`
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum UserContent {
     Text(String),
     Image { media_type: String, data: String },
 }
 
 /// Content blocks within an assistant message.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Text {
         text: String,
@@ -35,6 +45,8 @@ pub enum ContentBlock {
 }
 
 /// Messages exchanged between the runtime and LLM providers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "role", rename_all = "snake_case")]
 pub enum Message {
     User {
         content: Vec<UserContent>,
@@ -60,7 +72,8 @@ impl Message {
 }
 
 /// Why the model stopped generating.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StopReason {
     EndTurn,
     ToolUse,

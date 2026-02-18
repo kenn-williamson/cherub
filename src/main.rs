@@ -92,6 +92,40 @@ async fn main() -> Result<()> {
         output,
     );
 
+    // Attach session persistence if DATABASE_URL is set and the `sessions` feature is compiled in.
+    #[cfg(feature = "sessions")]
+    {
+        if let Ok(db_url_raw) = std::env::var("DATABASE_URL") {
+            match cherub::storage::connect(SecretString::from(db_url_raw)).await {
+                Ok(pool) => {
+                    use cherub::storage::pg_session_store::PgSessionStore;
+                    let store = Box::new(PgSessionStore::new(pool));
+                    match agent.with_persistence(store, "cli", "default").await {
+                        Ok(()) => {
+                            let msg_count = agent.session_messages().len();
+                            if msg_count > 0 {
+                                println!(
+                                    "Resumed session {} ({msg_count} messages).",
+                                    agent.session_id()
+                                );
+                            } else {
+                                println!("New session {}.", agent.session_id());
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[warn] session persistence unavailable: {e}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[warn] database connection failed, running without persistence: {e}"
+                    );
+                }
+            }
+        }
+    }
+
     info!(model = %model, "cherub started");
     println!("cherub: secure agent runtime (model: {model})");
     println!("Type a message, Ctrl-D to exit, Ctrl-C to cancel input.\n");

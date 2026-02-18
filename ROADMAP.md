@@ -121,11 +121,11 @@ Everything else — connectors, credential brokering, audit logging, IPC plugins
 **Goal:** The agent has persistent, structured memory protected by the enforcement layer. Sessions survive restarts. Memory writes are policy-gated tool invocations.
 
 ### Database
-- [ ] PostgreSQL integration (deadpool-postgres connection pool)
-- [ ] Schema: memories table (content, structured JSONB, provenance, confidence, tier, embeddings, tsvector)
-- [ ] Schema: memory_chunks table (chunked documents for search)
-- [ ] Schema: sessions table, session_messages table
-- [ ] Migration framework (refinery)
+- [x] PostgreSQL integration (deadpool-postgres connection pool, `postgres` feature)
+- [x] Schema: memories table (content, structured JSONB, provenance, confidence, tier, embeddings, tsvector)
+- [x] Schema: memory_chunks table (chunked documents for search)
+- [x] Schema: sessions table, session_messages table
+- [x] Migration framework (refinery, embedded migrations)
 
 ### Memory as an Enforced Tool
 - [ ] `memory` tool: read, search, write, delete operations
@@ -146,8 +146,8 @@ Everything else — connectors, credential brokering, audit logging, IPC plugins
 - [ ] Agent cannot suppress injection — runtime controls context
 
 ### Session Persistence
-- [ ] Sessions stored in PostgreSQL (messages, tool calls, results)
-- [ ] Session restore on restart
+- [x] Sessions stored in PostgreSQL (messages, tool calls, results) — `sessions` feature
+- [x] Session restore on restart — CLI resumes last session, Telegram resumes per-chat
 - [ ] Context compaction: token estimation, LLM summarization of old turns
 - [ ] Pre-compaction memory flush: extract important information before discarding context
 

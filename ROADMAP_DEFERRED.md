@@ -56,6 +56,16 @@ Stateless constraints (field comparisons, containment checks) are planned for M3
 
 `evaluate()` signature changes from `(proposal, &policy) -> decision` to `(proposal, &policy, &mut state) -> decision`. The state struct needs persistence strategy (in-memory for single-session, serialized for multi-session).
 
+## Telegram Output Verbosity Modes
+
+The Telegram sink currently emits every `OutputEvent` as a separate message (tool allowed/rejected, tool output, errors, etc.), giving a play-by-play of agent execution. This is useful for debugging but noisy for end users. Add configurable verbosity modes:
+
+1. **Summary mode** (default for users) — Buffer all events during a turn, send only the final `Text` response. Tool calls are invisible to the user.
+2. **Progress mode** — Send a "typing..." indicator or single status message while the agent works, then replace/follow with the final answer.
+3. **Collapsible detail mode** — Send the final answer as the main message, with an inline keyboard "Show details" button that reveals tool calls, outputs, and enforcement decisions.
+
+Current behavior becomes **Debug mode** — preserved as-is for development and troubleshooting. Mode selection could be per-chat (via `/verbose`, `/quiet` commands) or per-policy config.
+
 ## Per-Task Dynamic Constraints
 
 Stateless per-tool and per-action constraints come from the policy file (static, operator-set). Per-task constraints are dynamic and session-scoped — they come from the conversation between the user and agent.

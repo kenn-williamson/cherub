@@ -7,6 +7,18 @@ license = "MIT OR Apache-2.0"
 
 [features]
 telegram = ["dep:teloxide", "dep:base64"]
+# postgres: database infrastructure — connection pool, migrations, SessionStore trait, PgSessionStore.
+# Use when you need postgres for any purpose (sessions, credentials M7, memory M6b).
+postgres = [
+    "dep:deadpool-postgres",
+    "dep:tokio-postgres",
+    "dep:refinery",
+    "dep:chrono",
+    "dep:async-trait",
+]
+# sessions: session persistence wiring — persist_last(), with_persistence(), CLI/Telegram hooks.
+# Implies postgres. Use to make conversations survive restarts.
+sessions = ["postgres"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -22,10 +34,19 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 rustyline = "17.0"
 dotenvy = "0.15"
+# Non-optional: tiny crate, v7 for time-sortable IDs (better B-tree indexing)
+uuid = { version = "1.21", features = ["v7", "serde"] }
 
 # Telegram feature dependencies
 teloxide = { version = "0.17", features = ["macros"], optional = true }
 base64 = { version = "0.22", optional = true }
+
+# PostgreSQL feature dependencies
+async-trait = { version = "0.1", optional = true }
+deadpool-postgres = { version = "0.14", optional = true }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-uuid-1", "with-chrono-0_4"], optional = true }
+refinery = { version = "0.9", features = ["tokio-postgres"], optional = true }
+chrono = { version = "0.4", features = ["serde"], optional = true }
 
 [[bin]]
 name = "cherub"

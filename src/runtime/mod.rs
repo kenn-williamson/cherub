@@ -54,9 +54,38 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
         }
     }
 
+    /// Attach a PostgreSQL session store. Resumes the previous session for the given
+    /// connector channel, or creates a new one.
+    ///
+    /// Call this once after `new()` and before the first `run_turn()`.
+    #[cfg(feature = "sessions")]
+    pub async fn with_persistence(
+        &mut self,
+        store: Box<dyn crate::storage::SessionStore>, // storage module gated by postgres
+        connector: &str,
+        connector_id: &str,
+    ) -> Result<(), CherubError> {
+        let (session_id, messages) = store.get_or_create_session(connector, connector_id).await?;
+        let msg_count = messages.len();
+        self.session = Session::from_persisted(session_id, messages, store);
+        tracing::info!(
+            session_id = %session_id,
+            message_count = msg_count,
+            connector,
+            connector_id,
+            "session attached"
+        );
+        Ok(())
+    }
+
     /// Read-only view of the conversation history.
     pub fn session_messages(&self) -> &[Message] {
-        self.session.messages()
+        &self.session.messages
+    }
+
+    /// The session ID (UUID v7, time-sortable).
+    pub fn session_id(&self) -> uuid::Uuid {
+        self.session.id
     }
 
     /// Convenience wrapper: run a text-only user turn.
@@ -73,6 +102,8 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
         let _span = info_span!("turn");
 
         self.session.push(Message::User { content });
+        #[cfg(feature = "sessions")]
+        self.session.persist_last().await;
 
         for iteration in 0..MAX_ITERATIONS {
             let _iter_span = info_span!("iteration", n = iteration);
@@ -81,7 +112,7 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                 .provider
                 .complete(
                     &self.system_prompt,
-                    self.session.messages(),
+                    &self.session.messages,
                     &self.tool_definitions,
                 )
                 .await?;
@@ -113,6 +144,8 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                 content,
                 stop_reason,
             });
+            #[cfg(feature = "sessions")]
+            self.session.persist_last().await;
 
             if stop_reason != StopReason::ToolUse || tool_uses.is_empty() {
                 return Ok(());
@@ -152,6 +185,8 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                                     content: result.output,
                                     is_error: false,
                                 });
+                                #[cfg(feature = "sessions")]
+                                self.session.persist_last().await;
                             }
                             Err(e) => {
                                 let err_msg = e.to_string();
@@ -162,6 +197,8 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                                     content: err_msg,
                                     is_error: true,
                                 });
+                                #[cfg(feature = "sessions")]
+                                self.session.persist_last().await;
                             }
                         }
                     }
@@ -178,6 +215,8 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                             content: "action not permitted".to_owned(),
                             is_error: true,
                         });
+                        #[cfg(feature = "sessions")]
+                        self.session.persist_last().await;
                     }
                     Decision::Escalate { tier } => {
                         info!(decision = "ESCALATED", tool = %name, command = %command_str);
@@ -212,6 +251,8 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                                             content: result.output,
                                             is_error: false,
                                         });
+                                        #[cfg(feature = "sessions")]
+                                        self.session.persist_last().await;
                                     }
                                     Err(e) => {
                                         let err_msg = e.to_string();
@@ -222,6 +263,8 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                                             content: err_msg,
                                             is_error: true,
                                         });
+                                        #[cfg(feature = "sessions")]
+                                        self.session.persist_last().await;
                                     }
                                 }
                             }
@@ -239,6 +282,8 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                                     content: "action not permitted".to_owned(),
                                     is_error: true,
                                 });
+                                #[cfg(feature = "sessions")]
+                                self.session.persist_last().await;
                             }
                         }
                     }

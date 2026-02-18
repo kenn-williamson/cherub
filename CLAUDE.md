@@ -11,6 +11,7 @@ A Rust binary that owns the entire execution path from user message to tool exec
 ```
 cherub/
 ├── Cargo.toml
+├── docker-compose.yml        # PostgreSQL + pgvector on port 5480 (dev)
 ├── src/
 │   ├── main.rs              # Entry point, CLI interface
 │   ├── lib.rs               # Library entry point
@@ -21,7 +22,7 @@ cherub/
 │   │   ├── mod.rs            # AgentLoop<P, A, O> + run_turn() (generic over Provider/ApprovalGate/OutputSink)
 │   │   ├── approval.rs       # ApprovalGate trait, CliApprovalGate, EscalationContext
 │   │   ├── output.rs         # OutputSink trait, StdoutSink, NullSink
-│   │   ├── session.rs        # Conversation state, message history
+│   │   ├── session.rs        # Conversation state, message history, optional persistence
 │   │   └── prompt.rs         # System prompt builder
 │   ├── enforcement/
 │   │   ├── mod.rs            # Enforcement layer entry point
@@ -33,9 +34,14 @@ cherub/
 │   │   ├── mod.rs            # Tool trait, ToolRegistry, ToolImpl enum dispatch
 │   │   └── bash.rs           # Bash execution tool (tokio::process::Command)
 │   ├── providers/
-│   │   ├── mod.rs            # Provider trait, Message/UserContent/ContentBlock types
+│   │   ├── mod.rs            # Provider trait, Message/UserContent/ContentBlock types (serde + Clone)
 │   │   ├── anthropic.rs      # Anthropic API provider (non-streaming)
 │   │   └── wire.rs           # Serde structs for Anthropic API JSON (private, supports images)
+│   ├── storage/              # Feature-gated: #[cfg(feature = "postgres")]
+│   │   ├── mod.rs            # SessionStore trait, connect(), migration runner
+│   │   ├── pg_session_store.rs  # PgSessionStore: PostgreSQL SessionStore impl
+│   │   └── migrations/
+│   │       └── V1__initial_schema.sql  # Sessions + messages + memory schema
 │   └── telegram/             # Feature-gated: #[cfg(feature = "telegram")]
 │       ├── mod.rs             # Module declarations
 │       ├── approval.rs        # TelegramApprovalGate (inline keyboard + oneshot channels)
@@ -46,6 +52,7 @@ cherub/
 │   ├── adversarial.rs        # Mock-provider adversarial integration tests (16 tests)
 │   ├── compile_tests.rs      # Compile-time invariant tests (trybuild)
 │   ├── redteam.rs            # Live model adversarial tests (#[ignore], requires API key)
+│   ├── session_persistence.rs  # Session persistence integration tests (feature-gated: sessions)
 │   ├── telegram_approval.rs  # Telegram approval flow tests (feature-gated)
 │   └── ui/
 │       ├── capability_token_private.rs      # Proves CapabilityToken can't be constructed outside enforcement
@@ -253,14 +260,24 @@ Best practices for the specific crates in use.
 ## Build and Run
 
 ```bash
-# Build (CLI only)
+# Build (CLI only, ephemeral sessions)
 cargo build
+
+# Build with session persistence (requires PostgreSQL)
+cargo build --features sessions
 
 # Build with Telegram connector
 cargo build --features telegram
 
+# Build with Telegram + session persistence
+cargo build --features telegram,sessions
+
 # Run CLI (requires ANTHROPIC_API_KEY env var)
 ANTHROPIC_API_KEY=sk-... cargo run
+
+# Run with session persistence (start PostgreSQL first: docker compose up -d)
+DATABASE_URL=postgres://cherub:cherub_dev@localhost:5480/cherub \
+  ANTHROPIC_API_KEY=sk-... cargo run --features sessions
 
 # Run with custom policy
 ANTHROPIC_API_KEY=sk-... cargo run -- --policy path/to/policy.toml
@@ -271,11 +288,18 @@ TELEGRAM_BOT_TOKEN=... ANTHROPIC_API_KEY=sk-... TELEGRAM_ALLOWED_CHATS=123456,78
 # Telegram bot open to all users (not recommended)
 TELEGRAM_BOT_TOKEN=... ANTHROPIC_API_KEY=sk-... TELEGRAM_ALLOWED_CHATS='*' cargo run --features telegram --bin cherub-telegram
 
-# Test
+# Start development database
+docker compose up -d
+
+# Test (no features — existing tests must pass unchanged)
 cargo test
 
 # Test with Telegram-specific tests
 cargo test --features telegram
+
+# Test with session persistence (requires DATABASE_URL)
+DATABASE_URL=postgres://cherub:cherub_dev@localhost:5480/cherub \
+  cargo test --features sessions session_persistence
 
 # Test enforcement layer specifically
 cargo test enforcement
