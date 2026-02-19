@@ -19,6 +19,31 @@ use session::Session;
 
 const MAX_ITERATIONS: usize = 25;
 
+/// Maximum number of memories injected into the system prompt per turn.
+#[cfg(feature = "memory")]
+const INJECTION_MAX_MEMORIES: i64 = 5;
+
+/// Minimum query length to trigger injection search. Skip for very short messages.
+#[cfg(feature = "memory")]
+const INJECTION_MIN_QUERY_LEN: usize = 3;
+
+/// Extract plain text from user content, joining multiple text blocks with a space.
+/// Image blocks are silently skipped — only text contributes to the injection query.
+#[cfg(feature = "memory")]
+fn extract_user_text(content: &[UserContent]) -> String {
+    content
+        .iter()
+        .filter_map(|c| {
+            if let UserContent::Text(text) = c {
+                Some(text.as_str())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The agent loop. Owns session state and orchestrates model <-> tool interaction.
 /// Generic over provider, approval gate, and output sink for testability.
 pub struct AgentLoop<P: Provider, A: ApprovalGate, O: OutputSink> {
@@ -30,6 +55,11 @@ pub struct AgentLoop<P: Provider, A: ApprovalGate, O: OutputSink> {
     tool_definitions: Vec<ToolDefinition>,
     approval_gate: A,
     output: O,
+    /// Optional shared memory store for proactive injection (M6d).
+    /// When set, the runtime queries memories before each turn and injects
+    /// the top results into the system prompt. The agent cannot suppress this.
+    #[cfg(feature = "memory")]
+    memory_store: Option<std::sync::Arc<dyn crate::storage::MemoryStore>>,
 }
 
 impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
@@ -52,7 +82,24 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
             tool_definitions,
             approval_gate,
             output,
+            #[cfg(feature = "memory")]
+            memory_store: None,
         }
+    }
+
+    /// Attach a memory store for proactive injection.
+    ///
+    /// When attached, the runtime embeds the user message and queries for relevant
+    /// memories before each turn, injecting results into the system prompt. The agent
+    /// cannot suppress injection — context is controlled entirely by the runtime.
+    ///
+    /// Call this once after `new()` and before the first `run_turn()`.
+    #[cfg(feature = "memory")]
+    pub fn with_memory_injection(
+        &mut self,
+        store: std::sync::Arc<dyn crate::storage::MemoryStore>,
+    ) {
+        self.memory_store = Some(store);
     }
 
     /// Attach a PostgreSQL session store. Resumes the previous session for the given
@@ -103,9 +150,64 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
         // fields on info!() calls carry the same context.
         let _span = info_span!("turn");
 
+        // Extract text for injection query BEFORE content is moved into the session.
+        #[cfg(feature = "memory")]
+        let user_query = extract_user_text(&content);
+
         self.session.push(Message::User { content });
         #[cfg(feature = "sessions")]
         self.session.persist_last().await;
+
+        // Build effective system prompt — may include injected memories (M6d).
+        // Computed once per turn, used for every provider.complete() call in this turn.
+        // The agent cannot suppress injection: this is runtime-controlled context.
+        #[cfg(feature = "memory")]
+        let effective_system: std::borrow::Cow<str> = {
+            if user_query.len() >= INJECTION_MIN_QUERY_LEN {
+                if let Some(ref store) = self.memory_store {
+                    match store
+                        .search(
+                            &user_query,
+                            None,
+                            Some(&self.session.user_id),
+                            INJECTION_MAX_MEMORIES,
+                        )
+                        .await
+                    {
+                        Ok(memories) if !memories.is_empty() => {
+                            // Touch each injected memory (fire-and-forget, non-fatal).
+                            for m in &memories {
+                                let id = m.id;
+                                let store_clone = std::sync::Arc::clone(store);
+                                tokio::spawn(async move {
+                                    let _ = store_clone.touch(id).await;
+                                });
+                            }
+                            let injection = prompt::format_memory_injection(&memories);
+                            info!(
+                                memory_count = memories.len(),
+                                "memory injection: surfaced relevant memories"
+                            );
+                            std::borrow::Cow::Owned(format!("{}{}", self.system_prompt, injection))
+                        }
+                        Ok(_) => std::borrow::Cow::Borrowed(&self.system_prompt),
+                        Err(e) => {
+                            warn!(
+                                error = %e,
+                                "memory injection search failed, proceeding without injection"
+                            );
+                            std::borrow::Cow::Borrowed(&self.system_prompt)
+                        }
+                    }
+                } else {
+                    std::borrow::Cow::Borrowed(&self.system_prompt)
+                }
+            } else {
+                std::borrow::Cow::Borrowed(&self.system_prompt)
+            }
+        };
+        #[cfg(not(feature = "memory"))]
+        let effective_system: &str = &self.system_prompt;
 
         for iteration in 0..MAX_ITERATIONS {
             let _iter_span = info_span!("iteration", n = iteration);
@@ -113,7 +215,7 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
             let assistant_msg = self
                 .provider
                 .complete(
-                    &self.system_prompt,
+                    &effective_system,
                     &self.session.messages,
                     &self.tool_definitions,
                 )
@@ -315,5 +417,51 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "memory"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_user_text_single_text() {
+        let content = vec![UserContent::Text("hello world".to_owned())];
+        assert_eq!(extract_user_text(&content), "hello world");
+    }
+
+    #[test]
+    fn extract_user_text_multiple_text_joined() {
+        let content = vec![
+            UserContent::Text("hello".to_owned()),
+            UserContent::Text("world".to_owned()),
+        ];
+        assert_eq!(extract_user_text(&content), "hello world");
+    }
+
+    #[test]
+    fn extract_user_text_skips_images() {
+        let content = vec![
+            UserContent::Text("describe this".to_owned()),
+            UserContent::Image {
+                media_type: "image/png".to_owned(),
+                data: "base64data".to_owned(),
+            },
+        ];
+        assert_eq!(extract_user_text(&content), "describe this");
+    }
+
+    #[test]
+    fn extract_user_text_empty_content() {
+        assert_eq!(extract_user_text(&[]), "");
+    }
+
+    #[test]
+    fn extract_user_text_image_only() {
+        let content = vec![UserContent::Image {
+            media_type: "image/jpeg".to_owned(),
+            data: "abc".to_owned(),
+        }];
+        assert_eq!(extract_user_text(&content), "");
     }
 }

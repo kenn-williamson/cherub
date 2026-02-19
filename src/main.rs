@@ -102,40 +102,42 @@ async fn main() -> Result<()> {
     };
 
     // Build ToolRegistry — attach memory store if the feature is enabled and DB is available.
+    // The store is Arc so it can be shared between the tool registry and injection.
     #[cfg(feature = "memory")]
-    let registry = {
+    let (registry, memory_store_for_injection) = {
         if let Some(ref pool) = db_pool {
             use cherub::storage::pg_memory_store::PgMemoryStore;
             use std::sync::Arc;
 
             // If OPENAI_API_KEY is set, enable hybrid search; otherwise FTS-only.
-            let store: Box<dyn cherub::storage::MemoryStore> = match std::env::var("OPENAI_API_KEY")
+            let store: Arc<dyn cherub::storage::MemoryStore> = match std::env::var("OPENAI_API_KEY")
             {
                 Ok(key_raw) if !key_raw.is_empty() => {
                     use cherub::storage::embedding::OpenAiEmbeddingProvider;
                     match OpenAiEmbeddingProvider::new(SecretString::from(key_raw)) {
                         Ok(embedder) => {
                             info!("embedding provider configured (hybrid search enabled)");
-                            Box::new(PgMemoryStore::with_embedder(
+                            Arc::new(PgMemoryStore::with_embedder(
                                 pool.clone(),
                                 Arc::new(embedder),
                             ))
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "failed to create embedding provider, using FTS-only search");
-                            Box::new(PgMemoryStore::new(pool.clone()))
+                            Arc::new(PgMemoryStore::new(pool.clone()))
                         }
                     }
                 }
                 _ => {
                     info!("OPENAI_API_KEY not set, using FTS-only memory search");
-                    Box::new(PgMemoryStore::new(pool.clone()))
+                    Arc::new(PgMemoryStore::new(pool.clone()))
                 }
             };
 
-            ToolRegistry::with_memory(store)
+            let registry = ToolRegistry::with_memory(Arc::clone(&store));
+            (registry, Some(store))
         } else {
-            ToolRegistry::new()
+            (ToolRegistry::new(), None)
         }
     };
     #[cfg(not(feature = "memory"))]
@@ -154,6 +156,13 @@ async fn main() -> Result<()> {
         output,
         &user_id,
     );
+
+    // Attach proactive memory injection if store is available (M6d).
+    #[cfg(feature = "memory")]
+    if let Some(store) = memory_store_for_injection {
+        agent.with_memory_injection(store);
+        info!("proactive memory injection enabled");
+    }
 
     // Attach session persistence if available.
     #[cfg(feature = "sessions")]

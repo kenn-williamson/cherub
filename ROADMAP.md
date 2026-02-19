@@ -144,10 +144,10 @@ Everything else — connectors, credential brokering, audit logging, IPC plugins
 - [x] Embedding provider abstraction (OpenAI text-embedding-3-small initially)
 - [x] Confidence-weighted result ranking
 
-### Proactive Memory Injection
-- [ ] Before each turn, runtime embeds user message and queries relevant memories
-- [ ] Top memories injected into system prompt with confidence labels
-- [ ] Agent cannot suppress injection — runtime controls context
+### Proactive Memory Injection (M6d complete)
+- [x] Before each turn, runtime embeds user message and queries relevant memories
+- [x] Top memories injected into system prompt with confidence labels
+- [x] Agent cannot suppress injection — runtime controls context
 
 ### Session Persistence
 - [x] Sessions stored in PostgreSQL (messages, tool calls, results) — `sessions` feature

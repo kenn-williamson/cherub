@@ -22,25 +22,30 @@ use testcontainers::{
     runners::AsyncRunner,
 };
 
-/// TRUNCATE all data tables between tests.
+/// TRUNCATE all data tables at the start of each test.
 ///
-/// Reusable containers persist data across test runs; this clears it.
+/// With nextest, each slot runs one test at a time, so the TRUNCATE is safe — no
+/// concurrent test is using the data. Use `cargo nextest run` (not `cargo test`)
+/// for DB integration tests, or tests in the same slot will interfere.
 /// CASCADE handles FK constraints (memory_chunks → memories, session_messages → sessions).
-const RESET_SQL: &str = "
-    TRUNCATE TABLE memory_chunks, memories, session_messages, sessions CASCADE;
-";
+const RESET_SQL: &str =
+    "TRUNCATE TABLE memory_chunks, memories, session_messages, sessions CASCADE;";
 
 /// Holds a running PostgreSQL container and a connected pool.
 ///
 /// Dropping this struct does NOT stop the container (ReuseDirective::Always) —
 /// it stays alive for subsequent tests in the same nextest slot.
+///
+/// Each nextest slot gets its own container (`cherub-test-pg-{slot}`). Tests
+/// within a slot are serialized by nextest, so the per-test TRUNCATE is race-free.
 pub struct TestContainer {
     _container: ContainerAsync<GenericImage>,
     pub pool: Pool,
 }
 
 impl TestContainer {
-    /// Start or reuse the test container, run migrations, and TRUNCATE all tables.
+    /// Start or reuse the slot-local test container, run migrations, and TRUNCATE
+    /// all data tables so each test begins with a clean slate.
     pub async fn new() -> Self {
         // Slot-based naming so each nextest parallel slot gets its own container.
         // Falls back to "0" for plain `cargo test` (single-threaded).
@@ -87,7 +92,8 @@ impl TestContainer {
             // connect() runs refinery migrations (idempotent on reused containers).
             match Self::connect_with_retry(&db_url).await {
                 Ok(pool) => {
-                    // TRUNCATE all data tables for clean test state.
+                    // TRUNCATE all data tables so each test starts with a clean slate.
+                    // Safe because nextest serializes tests within a slot.
                     let conn = pool.get().await.expect("get connection for truncate");
                     conn.batch_execute(RESET_SQL)
                         .await

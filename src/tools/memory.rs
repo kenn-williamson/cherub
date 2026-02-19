@@ -7,6 +7,8 @@
 //! Provenance (session_id, turn_number) is injected by the tool from `ToolContext` —
 //! the agent cannot forge it.
 
+use std::sync::Arc;
+
 use uuid::Uuid;
 
 use crate::enforcement::capability::CapabilityToken;
@@ -19,11 +21,11 @@ use crate::tools::ToolResult;
 use super::ToolContext;
 
 pub struct MemoryTool {
-    store: Box<dyn MemoryStore>,
+    store: Arc<dyn MemoryStore>,
 }
 
 impl MemoryTool {
-    pub fn new(store: Box<dyn MemoryStore>) -> Self {
+    pub fn new(store: Arc<dyn MemoryStore>) -> Self {
         Self { store }
     }
 

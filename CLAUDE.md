@@ -61,6 +61,7 @@ cherub/
 │   ├── fixtures/
 │   │   └── mod.rs            # Shared test fixtures: TestContainer + MockEmbeddingProvider (M6c)
 │   ├── memory_enforcement.rs # Memory tool enforcement tests, no DB needed (feature = "memory")
+│   ├── memory_injection.rs   # Proactive injection integration tests (M6d, no DB needed)
 │   ├── memory_store.rs       # PgMemoryStore integration tests (M6b + M6c hybrid search)
 │   ├── redteam.rs            # Live model adversarial tests (#[ignore], requires API key)
 │   ├── session_persistence.rs  # Session persistence integration tests (feature = "sessions", auto-starts DB)
@@ -68,6 +69,8 @@ cherub/
 │   └── ui/
 │       ├── capability_token_private.rs      # Proves CapabilityToken can't be constructed outside enforcement
 │       └── capability_token_private.stderr  # Expected compiler error output
+├── .config/
+│   └── nextest.toml          # cargo-nextest config: 4 slots, retries, slow-test detection
 ├── config/
 │   └── default_policy.toml   # Example policy file
 ├── DESIGN.md
@@ -321,23 +324,29 @@ cargo test
 # Test with Telegram-specific tests
 cargo test --features telegram
 
-# Test with session persistence (auto-starts PostgreSQL via testcontainers)
-cargo test --features sessions session_persistence
-
-# Test with memory feature (enforcement tests run without Docker)
-cargo test --features memory
-
-# Test PgMemoryStore (auto-starts PostgreSQL via testcontainers, includes M6c hybrid search tests)
-cargo test --features memory memory_store
-
-# Test RRF algorithm (pure unit tests, no DB)
-cargo test --features memory search
-
-# Live embedding test (requires OPENAI_API_KEY, ignored by default)
-OPENAI_API_KEY=sk-... cargo test --features memory embedding_live -- --ignored
-
 # Test enforcement layer specifically
 cargo test enforcement
+
+# ── cargo nextest — preferred test runner ─────────────────────────────────────
+# DB integration tests (memory_store, session_persistence) TRUNCATE tables before
+# each test. nextest serializes tests within a slot (one test per container at a
+# time). `cargo test` runs parallel threads sharing the same container, causing
+# TRUNCATE races — use nextest for all memory/sessions tests.
+
+# Full memory test suite (non-DB + DB, auto-starts PostgreSQL via testcontainers)
+cargo nextest run --features memory
+
+# Test PgMemoryStore only (M6b + M6c hybrid search)
+cargo nextest run --features memory --test memory_store
+
+# Test with session persistence only
+cargo nextest run --features sessions --test session_persistence
+
+# Non-DB memory tests (enforcement + injection + RRF) — also work with cargo test
+cargo nextest run --features memory --test memory_enforcement --test memory_injection
+
+# Live embedding test (requires OPENAI_API_KEY, skipped by default)
+OPENAI_API_KEY=sk-... cargo nextest run --features memory --test embedding_live -- --ignored
 ```
 
 ## Policy File Format (TOML)

@@ -1,0 +1,34 @@
+# cargo-nextest configuration for Cherub.
+# Documentation: https://nexte.st/docs/configuration/
+#
+# DB integration tests (memory_store, session_persistence) require nextest
+# because they TRUNCATE before each test — nextest serializes tests within a slot,
+# so each slot's container only sees one test at a time. Slot N gets container
+# "cherub-test-pg-N". With plain `cargo test` tests run in parallel threads and
+# share the same container, causing the TRUNCATEs to race.
+
+[profile.default]
+# 4 parallel slots → 4 containers → 4 tests running concurrently.
+# Adjust to match available Docker/CPU resources.
+test-threads = 4
+
+# Retry flaky tests (e.g. container startup races) up to twice before failing.
+retries = 2
+
+# Show failures immediately rather than buffering until the end.
+failure-output = "immediate"
+
+# Show output for passing tests only on the final retry (debugging flaky tests).
+success-output = "final"
+
+# Warn if a test takes longer than 60s; kill it after 2 minutes.
+slow-timeout = { period = "60s", terminate-after = 2 }
+
+[profile.ci]
+test-threads = 4
+retries = 2
+failure-output = "immediate"
+success-output = "final"
+slow-timeout = { period = "60s", terminate-after = 2 }
+fail-fast = false
+final-status-level = "fail"

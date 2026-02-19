@@ -120,19 +120,21 @@ async fn chat_session(
     let user_id = chat_id.to_string();
 
     // Build ToolRegistry — attach memory store if available.
+    // The store is Arc so it can be shared between the tool registry and injection.
     #[cfg(feature = "memory")]
-    let registry = {
+    let (registry, memory_store_for_injection) = {
         if let Some(ref pool) = config.db_pool {
             use crate::storage::MemoryStore;
             use crate::storage::pg_memory_store::PgMemoryStore;
 
-            let store: Box<dyn MemoryStore> = match config.embedder.clone() {
-                Some(embedder) => Box::new(PgMemoryStore::with_embedder(pool.clone(), embedder)),
-                None => Box::new(PgMemoryStore::new(pool.clone())),
+            let store: Arc<dyn MemoryStore> = match config.embedder.clone() {
+                Some(embedder) => Arc::new(PgMemoryStore::with_embedder(pool.clone(), embedder)),
+                None => Arc::new(PgMemoryStore::new(pool.clone())),
             };
-            ToolRegistry::with_memory(store)
+            let registry = ToolRegistry::with_memory(Arc::clone(&store));
+            (registry, Some(store))
         } else {
-            ToolRegistry::new()
+            (ToolRegistry::new(), None)
         }
     };
     #[cfg(not(feature = "memory"))]
@@ -155,6 +157,13 @@ async fn chat_session(
         output,
         &user_id,
     );
+
+    // Attach proactive memory injection if store is available (M6d).
+    #[cfg(feature = "memory")]
+    if let Some(store) = memory_store_for_injection {
+        agent.with_memory_injection(store);
+        info!(chat_id = %chat_id, "proactive memory injection enabled");
+    }
 
     // Attach session persistence per chat if a pool is available.
     #[cfg(feature = "sessions")]

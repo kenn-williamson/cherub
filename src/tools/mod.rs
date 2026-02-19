@@ -214,7 +214,7 @@ impl ToolRegistry {
 
     /// Create a registry with the memory tool attached.
     #[cfg(feature = "memory")]
-    pub fn with_memory(store: Box<dyn crate::storage::MemoryStore>) -> Self {
+    pub fn with_memory(store: std::sync::Arc<dyn crate::storage::MemoryStore>) -> Self {
         Self {
             tools: vec![
                 ToolImpl::Bash(BashTool::new()),
