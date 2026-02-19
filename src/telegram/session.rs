@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+#[cfg(feature = "memory")]
+use std::sync::Arc;
 
 use teloxide::prelude::*;
 use tokio::sync::mpsc;
@@ -26,9 +28,14 @@ pub struct SessionConfig {
     pub model: String,
     pub max_tokens: u32,
     pub api_key: secrecy::SecretString,
-    /// PostgreSQL connection pool for session persistence. `None` = ephemeral sessions.
-    #[cfg(feature = "sessions")]
+    /// PostgreSQL connection pool for session persistence and/or memory.
+    /// Present when `sessions` or `memory` feature is enabled.
+    #[cfg(any(feature = "sessions", feature = "memory"))]
     pub db_pool: Option<deadpool_postgres::Pool>,
+    /// Embedding provider for hybrid memory search (M6c).
+    /// `None` = FTS-only search.
+    #[cfg(feature = "memory")]
+    pub embedder: Option<Arc<dyn crate::storage::embedding::EmbeddingProvider>>,
 }
 
 /// Message sent to the session manager from the connector.
@@ -66,8 +73,10 @@ pub async fn session_manager(
                         model: config.model.clone(),
                         max_tokens: config.max_tokens,
                         api_key: config.api_key.clone(),
-                        #[cfg(feature = "sessions")]
+                        #[cfg(any(feature = "sessions", feature = "memory"))]
                         db_pool: config.db_pool.clone(),
+                        #[cfg(feature = "memory")]
+                        embedder: config.embedder.clone(),
                     };
                     let approval_tx = approval_tx.clone();
 
@@ -110,6 +119,23 @@ async fn chat_session(
     // Derive user identity from the Telegram chat ID (unique per chat channel).
     let user_id = chat_id.to_string();
 
+    // Build ToolRegistry — attach memory store if available.
+    #[cfg(feature = "memory")]
+    let registry = {
+        if let Some(ref pool) = config.db_pool {
+            use crate::storage::MemoryStore;
+            use crate::storage::pg_memory_store::PgMemoryStore;
+
+            let store: Box<dyn MemoryStore> = match config.embedder.clone() {
+                Some(embedder) => Box::new(PgMemoryStore::with_embedder(pool.clone(), embedder)),
+                None => Box::new(PgMemoryStore::new(pool.clone())),
+            };
+            ToolRegistry::with_memory(store)
+        } else {
+            ToolRegistry::new()
+        }
+    };
+    #[cfg(not(feature = "memory"))]
     let registry = ToolRegistry::new();
 
     let cwd = std::env::current_dir()

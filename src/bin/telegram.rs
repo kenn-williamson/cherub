@@ -78,24 +78,48 @@ async fn main() -> Result<()> {
 
     let model = std::env::var("CHERUB_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_owned());
 
-    // Connect to PostgreSQL for session persistence if DATABASE_URL is set.
-    #[cfg(feature = "sessions")]
+    // Connect to PostgreSQL if DATABASE_URL is set (sessions and/or memory).
+    #[cfg(any(feature = "sessions", feature = "memory"))]
     let db_pool = {
         match std::env::var("DATABASE_URL") {
             Ok(db_url_raw) => {
                 match cherub::storage::connect(secrecy::SecretString::from(db_url_raw)).await {
                     Ok(pool) => {
-                        info!("session persistence enabled");
+                        info!("database connected");
                         Some(pool)
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "database connection failed, sessions will be ephemeral");
+                        tracing::warn!(error = %e, "database connection failed, running without persistence");
                         None
                     }
                 }
             }
             Err(_) => {
-                info!("DATABASE_URL not set, sessions will be ephemeral");
+                info!("DATABASE_URL not set, running without persistence");
+                None
+            }
+        }
+    };
+
+    // Build embedding provider if OPENAI_API_KEY is set (M6c hybrid search).
+    #[cfg(feature = "memory")]
+    let embedder: Option<std::sync::Arc<dyn cherub::storage::embedding::EmbeddingProvider>> = {
+        match std::env::var("OPENAI_API_KEY") {
+            Ok(key_raw) if !key_raw.is_empty() => {
+                use cherub::storage::embedding::OpenAiEmbeddingProvider;
+                match OpenAiEmbeddingProvider::new(secrecy::SecretString::from(key_raw)) {
+                    Ok(e) => {
+                        info!("embedding provider configured (hybrid search enabled)");
+                        Some(std::sync::Arc::new(e))
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to create embedding provider, using FTS-only search");
+                        None
+                    }
+                }
+            }
+            _ => {
+                info!("OPENAI_API_KEY not set, using FTS-only memory search");
                 None
             }
         }
@@ -115,8 +139,10 @@ async fn main() -> Result<()> {
         model,
         max_tokens: DEFAULT_MAX_TOKENS,
         api_key,
-        #[cfg(feature = "sessions")]
+        #[cfg(any(feature = "sessions", feature = "memory"))]
         db_pool,
+        #[cfg(feature = "memory")]
+        embedder,
     };
 
     // Spawn session manager and approval manager tasks.

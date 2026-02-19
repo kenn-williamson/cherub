@@ -1,11 +1,19 @@
 //! Shared test fixtures for PostgreSQL integration tests.
 //!
+//! Includes `MockEmbeddingProvider` for hybrid-search integration tests (M6c).
+//!
 //! `TestContainer` starts a reusable pgvector/pgvector:pg18 container (slot-named
 //! for nextest parallelism), runs migrations via `cherub::storage::connect()`, and
 //! TRUNCATEs all data tables so each test starts with a clean database.
 //!
 //! No manual `docker compose up` or `DATABASE_URL` env var needed.
 
+#[cfg(feature = "memory")]
+use async_trait::async_trait;
+#[cfg(feature = "memory")]
+use cherub::error::CherubError;
+#[cfg(feature = "memory")]
+use cherub::storage::embedding::EmbeddingProvider;
 use deadpool_postgres::Pool;
 use secrecy::SecretString;
 use testcontainers::{
@@ -115,5 +123,67 @@ impl TestContainer {
             }
         }
         unreachable!()
+    }
+}
+
+// ─── Mock embedding provider (M6c) ───────────────────────────────────────────
+
+/// Deterministic mock `EmbeddingProvider` for integration tests.
+///
+/// Produces 1536-dimensional vectors from a simple hash of the input text.
+/// Two strings with identical content produce identical vectors; distinct strings
+/// produce distinct (but not semantically meaningful) vectors.
+#[cfg(feature = "memory")]
+pub struct MockEmbeddingProvider {
+    /// When `true`, `embed()` always returns an error.
+    pub fail: bool,
+}
+
+#[cfg(feature = "memory")]
+impl MockEmbeddingProvider {
+    pub fn new() -> Self {
+        Self { fail: false }
+    }
+
+    pub fn failing() -> Self {
+        Self { fail: true }
+    }
+}
+
+#[cfg(feature = "memory")]
+#[async_trait]
+impl EmbeddingProvider for MockEmbeddingProvider {
+    fn dimension(&self) -> usize {
+        1536
+    }
+
+    fn model_name(&self) -> &str {
+        "mock-embedding"
+    }
+
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, CherubError> {
+        if self.fail {
+            return Err(CherubError::Provider("mock embedding failure".into()));
+        }
+        // Deterministic hash-based vector: same text → same vector.
+        let seed = text.bytes().fold(0u64, |acc, b| {
+            acc.wrapping_mul(6364136223846793005).wrapping_add(b as u64)
+        });
+        let mut vec = Vec::with_capacity(1536);
+        let mut state = seed;
+        for _ in 0..1536 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            // Map to [-1, 1] range.
+            let val = ((state >> 33) as f32) / (u32::MAX as f32) * 2.0 - 1.0;
+            vec.push(val);
+        }
+        // Normalize to unit length.
+        let norm = vec.iter().map(|v| v * v).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            vec.iter_mut().for_each(|v| *v /= norm);
+        }
+        Ok(vec)
     }
 }

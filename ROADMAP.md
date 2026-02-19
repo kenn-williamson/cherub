@@ -138,11 +138,11 @@ Everything else — connectors, credential brokering, audit logging, IPC plugins
 - [x] Soft-delete via `superseded_by` self-pointer — audit trail preserved
 - [x] User isolation: each user's memories are filtered by user_id
 
-### Search
-- [ ] Hybrid search: pgvector cosine similarity + tsvector FTS
-- [ ] Reciprocal Rank Fusion for combining results
-- [ ] Embedding provider abstraction (OpenAI text-embedding-3-small initially)
-- [ ] Confidence-weighted result ranking
+### Search (M6c complete)
+- [x] Hybrid search: pgvector cosine similarity + tsvector FTS
+- [x] Reciprocal Rank Fusion for combining results
+- [x] Embedding provider abstraction (OpenAI text-embedding-3-small initially)
+- [x] Confidence-weighted result ranking
 
 ### Proactive Memory Injection
 - [ ] Before each turn, runtime embeds user message and queries relevant memories

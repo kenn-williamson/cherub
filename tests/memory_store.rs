@@ -1,4 +1,4 @@
-//! Integration tests for PgMemoryStore (M6b).
+//! Integration tests for PgMemoryStore (M6b + M6c).
 //!
 //! PostgreSQL starts automatically via testcontainers — no manual setup needed.
 //!
@@ -7,6 +7,8 @@
 #![cfg(feature = "memory")]
 
 mod fixtures;
+
+use std::sync::Arc;
 
 use cherub::storage::pg_memory_store::PgMemoryStore;
 use cherub::storage::{
@@ -286,6 +288,193 @@ async fn touch_updates_last_referenced_at() {
     assert!(
         memories[0].last_referenced_at.is_some(),
         "touch should set last_referenced_at"
+    );
+}
+
+// ─── M6c: Hybrid search integration tests ────────────────────────────────────
+
+#[tokio::test]
+async fn store_creates_embedding() {
+    let tc = fixtures::TestContainer::new().await;
+    let embedder = Arc::new(fixtures::MockEmbeddingProvider::new());
+    let store = PgMemoryStore::with_embedder(tc.pool.clone(), embedder);
+
+    let user_id = format!("test-embed-{}", Uuid::now_v7());
+    let id = store
+        .store(new_memory(&user_id, "preferences/lang", "I prefer Rust"))
+        .await
+        .expect("store");
+
+    // Verify embedding was stored (column non-NULL).
+    let conn = tc.pool.get().await.expect("conn");
+    let row = conn
+        .query_one(
+            "SELECT embedding IS NOT NULL AS has_embedding FROM memories WHERE id = $1",
+            &[&id],
+        )
+        .await
+        .expect("query");
+    let has_embedding: bool = row.get("has_embedding");
+    assert!(
+        has_embedding,
+        "embedding column should be non-NULL when embedder is configured"
+    );
+}
+
+#[tokio::test]
+async fn store_without_embedder_leaves_null() {
+    let tc = fixtures::TestContainer::new().await;
+    let store = PgMemoryStore::new(tc.pool.clone()); // no embedder
+
+    let user_id = format!("test-no-embed-{}", Uuid::now_v7());
+    let id = store
+        .store(new_memory(&user_id, "preferences/lang", "I prefer Go"))
+        .await
+        .expect("store");
+
+    let conn = tc.pool.get().await.expect("conn");
+    let row = conn
+        .query_one(
+            "SELECT embedding IS NULL AS is_null FROM memories WHERE id = $1",
+            &[&id],
+        )
+        .await
+        .expect("query");
+    let is_null: bool = row.get("is_null");
+    assert!(
+        is_null,
+        "embedding should be NULL when no embedder is configured"
+    );
+}
+
+#[tokio::test]
+async fn hybrid_search_returns_results() {
+    let tc = fixtures::TestContainer::new().await;
+    let embedder = Arc::new(fixtures::MockEmbeddingProvider::new());
+    let store = PgMemoryStore::with_embedder(tc.pool.clone(), embedder);
+
+    let user_id = format!("test-hybrid-{}", Uuid::now_v7());
+    store
+        .store(new_memory(
+            &user_id,
+            "prefs/food",
+            "I love spicy tacos and burritos",
+        ))
+        .await
+        .expect("store");
+    store
+        .store(new_memory(
+            &user_id,
+            "prefs/music",
+            "I enjoy jazz and blues guitar",
+        ))
+        .await
+        .expect("store");
+
+    let results = store
+        .search("spicy food", None, Some(&user_id), 5)
+        .await
+        .expect("search");
+
+    assert!(!results.is_empty(), "hybrid search should return results");
+    // The food memory should appear (FTS match on "spicy").
+    assert!(
+        results.iter().any(|m| m.content.contains("spicy")),
+        "food memory should be in results"
+    );
+}
+
+#[tokio::test]
+async fn hybrid_search_fts_fallback() {
+    let tc = fixtures::TestContainer::new().await;
+    let store = PgMemoryStore::new(tc.pool.clone()); // no embedder → FTS-only
+
+    let user_id = format!("test-fts-fallback-{}", Uuid::now_v7());
+    store
+        .store(new_memory(&user_id, "prefs/food", "I love spicy tacos"))
+        .await
+        .expect("store");
+
+    let results = store
+        .search("spicy", None, Some(&user_id), 5)
+        .await
+        .expect("search");
+
+    assert!(
+        !results.is_empty(),
+        "FTS-only search should still work without embedder"
+    );
+    assert!(results[0].content.contains("spicy"));
+}
+
+#[tokio::test]
+async fn update_re_embeds_content() {
+    let tc = fixtures::TestContainer::new().await;
+    let embedder = Arc::new(fixtures::MockEmbeddingProvider::new());
+    let store = PgMemoryStore::with_embedder(tc.pool.clone(), embedder);
+
+    let user_id = format!("test-reembed-{}", Uuid::now_v7());
+    let orig_id = store
+        .store(new_memory(&user_id, "prefs/food", "I like mild food"))
+        .await
+        .expect("store");
+
+    let new_id = store
+        .update(
+            orig_id,
+            MemoryUpdate {
+                content: Some("I like spicy food now".to_owned()),
+                structured: None,
+                confidence: None,
+            },
+        )
+        .await
+        .expect("update");
+
+    // Both rows should have non-NULL embeddings.
+    let conn = tc.pool.get().await.expect("conn");
+    let rows = conn
+        .query(
+            "SELECT id, embedding IS NOT NULL AS has_embedding FROM memories WHERE id = ANY($1)",
+            &[&vec![orig_id, new_id]],
+        )
+        .await
+        .expect("query");
+
+    for row in &rows {
+        let has_embedding: bool = row.get("has_embedding");
+        assert!(
+            has_embedding,
+            "both old and new rows should have embeddings"
+        );
+    }
+}
+
+#[tokio::test]
+async fn embedding_failure_does_not_block_store() {
+    let tc = fixtures::TestContainer::new().await;
+    let failing_embedder = Arc::new(fixtures::MockEmbeddingProvider::failing());
+    let store = PgMemoryStore::with_embedder(tc.pool.clone(), failing_embedder);
+
+    let user_id = format!("test-failembed-{}", Uuid::now_v7());
+    // Store should succeed even though embedding fails.
+    let id = store
+        .store(new_memory(&user_id, "prefs/food", "I like pizza"))
+        .await
+        .expect("store should succeed even when embedding fails");
+
+    let conn = tc.pool.get().await.expect("conn");
+    let row = conn
+        .query_one(
+            "SELECT embedding IS NULL AS is_null FROM memories WHERE id = $1",
+            &[&id],
+        )
+        .await
+        .expect("query");
+    let is_null: bool = row.get("is_null");
+    assert!(
+        is_null,
+        "embedding should be NULL when embedding fails (graceful degradation)"
     );
 }
 

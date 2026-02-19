@@ -1,6 +1,6 @@
 # Secure Agent Runtime — Design Document
 
-**Status:** Draft — Milestone 6a Complete (PostgreSQL Infrastructure + Session Persistence), Plugin Architecture revised (tiered sandbox model)
+**Status:** Draft — Milestone 6c Complete (Hybrid Search: pgvector + FTS + RRF, Embedding Provider Abstraction), Plugin Architecture revised (tiered sandbox model)
 **Author:** Kenn Williamson  
 **Date:** February 2026
 

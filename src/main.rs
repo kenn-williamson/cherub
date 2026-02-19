@@ -106,8 +106,33 @@ async fn main() -> Result<()> {
     let registry = {
         if let Some(ref pool) = db_pool {
             use cherub::storage::pg_memory_store::PgMemoryStore;
-            let store: Box<dyn cherub::storage::MemoryStore> =
-                Box::new(PgMemoryStore::new(pool.clone()));
+            use std::sync::Arc;
+
+            // If OPENAI_API_KEY is set, enable hybrid search; otherwise FTS-only.
+            let store: Box<dyn cherub::storage::MemoryStore> = match std::env::var("OPENAI_API_KEY")
+            {
+                Ok(key_raw) if !key_raw.is_empty() => {
+                    use cherub::storage::embedding::OpenAiEmbeddingProvider;
+                    match OpenAiEmbeddingProvider::new(SecretString::from(key_raw)) {
+                        Ok(embedder) => {
+                            info!("embedding provider configured (hybrid search enabled)");
+                            Box::new(PgMemoryStore::with_embedder(
+                                pool.clone(),
+                                Arc::new(embedder),
+                            ))
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to create embedding provider, using FTS-only search");
+                            Box::new(PgMemoryStore::new(pool.clone()))
+                        }
+                    }
+                }
+                _ => {
+                    info!("OPENAI_API_KEY not set, using FTS-only memory search");
+                    Box::new(PgMemoryStore::new(pool.clone()))
+                }
+            };
+
             ToolRegistry::with_memory(store)
         } else {
             ToolRegistry::new()

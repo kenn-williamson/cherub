@@ -1,5 +1,7 @@
+pub mod embedding;
 pub mod pg_memory_store;
 pub mod pg_session_store;
+pub mod search;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -21,7 +23,7 @@ mod embedded {
 /// Each type of persistent thing owns its trait:
 /// - `SessionStore` for sessions (M6a)
 /// - `MemoryStore` for memories (M6b)
-/// - `EmbeddingProvider` for vector search (M6c)
+/// - `EmbeddingProvider` for vector search (M6c) — in `embedding` module
 ///
 /// AgentLoop never accumulates type parameters — Session owns its store.
 #[async_trait]

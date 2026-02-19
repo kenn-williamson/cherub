@@ -41,10 +41,13 @@ cherub/
 │   │   └── wire.rs           # Serde structs for Anthropic API JSON (private, supports images)
 │   ├── storage/              # Feature-gated: #[cfg(feature = "postgres")]
 │   │   ├── mod.rs            # SessionStore + MemoryStore traits, connect(), migration runner
+│   │   ├── embedding.rs      # EmbeddingProvider trait + OpenAiEmbeddingProvider (M6c)
+│   │   ├── search.rs         # Reciprocal Rank Fusion algorithm (M6c, pure/no-DB)
 │   │   ├── pg_session_store.rs  # PgSessionStore: PostgreSQL SessionStore impl
 │   │   ├── pg_memory_store.rs   # PgMemoryStore: PostgreSQL MemoryStore impl (feature = "memory")
 │   │   └── migrations/
-│   │       └── V1__initial_schema.sql  # Sessions + messages + memory schema (UUIDv7, scope column)
+│   │       ├── V1__initial_schema.sql  # Sessions + messages + memory schema (UUIDv7, scope column)
+│   │       └── V2__vector_indexes.sql  # HNSW indexes for embedding columns (M6c)
 │   └── telegram/             # Feature-gated: #[cfg(feature = "telegram")]
 │       ├── mod.rs             # Module declarations
 │       ├── approval.rs        # TelegramApprovalGate (inline keyboard + oneshot channels)
@@ -54,10 +57,11 @@ cherub/
 ├── tests/
 │   ├── adversarial.rs        # Mock-provider adversarial integration tests (16 tests)
 │   ├── compile_tests.rs      # Compile-time invariant tests (trybuild)
+│   ├── embedding_live.rs     # Live OpenAI embedding tests (#[ignore], requires OPENAI_API_KEY)
 │   ├── fixtures/
-│   │   └── mod.rs            # Shared test fixtures: TestContainer (testcontainers, reusable pg, TRUNCATE)
+│   │   └── mod.rs            # Shared test fixtures: TestContainer + MockEmbeddingProvider (M6c)
 │   ├── memory_enforcement.rs # Memory tool enforcement tests, no DB needed (feature = "memory")
-│   ├── memory_store.rs       # PgMemoryStore integration tests (feature = "memory", auto-starts DB)
+│   ├── memory_store.rs       # PgMemoryStore integration tests (M6b + M6c hybrid search)
 │   ├── redteam.rs            # Live model adversarial tests (#[ignore], requires API key)
 │   ├── session_persistence.rs  # Session persistence integration tests (feature = "sessions", auto-starts DB)
 │   ├── telegram_approval.rs  # Telegram approval flow tests (feature-gated)
@@ -125,7 +129,7 @@ fn process(msg: &Message) {
 }
 ```
 
-Use `enum` when variants are known at compile time. Use `dyn Trait` only at true extension boundaries (plugins loaded at runtime). In this project, the only legitimate `dyn Trait` boundaries are: `Provider` (multiple LLM backends) and `Tool` (plugin tools over IPC). Everything else should be an enum.
+Use `enum` when variants are known at compile time. Use `dyn Trait` only at true extension boundaries (plugins loaded at runtime). In this project, the legitimate `dyn Trait` boundaries are: `Provider` (multiple LLM backends), `Tool` (plugin tools over IPC), `SessionStore`, `MemoryStore`, and `EmbeddingProvider` (all storage/embedding backends selected at runtime). Everything else should be an enum.
 
 ### Use the typestate pattern for capability tokens
 
@@ -234,14 +238,14 @@ These enforce Cherub-specific guarantees the compiler alone can't catch.
 - **CapabilityToken audit rule** — Before any PR/commit, `grep` for `CapabilityToken` and verify: no `pub fn new`, no `Default`, no `From`, no `Clone`, no `Copy`. Only `enforcement/` creates tokens.
 - **Single enforcement path** — Every tool's `execute()` function signature must require a `CapabilityToken` parameter. If a tool function compiles without one, it's a bug.
 - **Policy opacity** — No enforcement error message may contain: rule names, pattern text, tier names, or any string from the policy file. Rejection is always `"action not permitted"`.
-- **Credential isolation** — `secrecy::SecretString` for all credential values. `grep expose_secret` must only appear in the credential broker module. If it appears elsewhere, it's a bug.
+- **Credential isolation** — `secrecy::SecretString` for all credential values. `grep expose_secret` must only appear at the single broker point for each credential type (one call site per credential: DB URL in `storage/mod.rs`, API key in `providers/anthropic.rs`, embedding key in `storage/embedding.rs`). If it appears in general-purpose code, it's a bug.
 - **No `unsafe`** — Zero `unsafe` blocks unless documented with a `// SAFETY:` comment explaining why it's necessary and what invariant the developer is upholding.
 
 ### Idiomatic Rust Rules (LLM Anti-Pattern Watchlist)
 
 Specific patterns to catch and correct — based on what LLMs commonly get wrong when writing Rust.
 
-- **Enum over trait objects** — If variants are known at compile time, use `enum` + `match`. The only `dyn Trait` in this project: `Provider` and `Tool` (plugin boundaries).
+- **Enum over trait objects** — If variants are known at compile time, use `enum` + `match`. Legitimate `dyn Trait` boundaries in this project: `Provider` (LLM backends), `Tool` (plugin boundaries), `SessionStore`, `MemoryStore`, `EmbeddingProvider` (all storage backends selected at runtime).
 - **`&str` in, `String` out** — Function parameters take `&str` or `impl AsRef<str>`. Return `String` only when transferring ownership. Never `fn foo(s: String)` when `fn foo(s: &str)` works.
 - **Iterator chains over mutation** — Prefer `.iter().map().collect()` over `let mut v = Vec::new(); for x in ... { v.push(...) }`.
 - **`?` propagation, never `.unwrap()`** — `.unwrap()` only in tests and code paths that are provably infallible (with a comment explaining why). Use `thiserror` enums in the enforcement layer, `anyhow` at the application/CLI boundary.
@@ -261,7 +265,7 @@ Best practices for the specific crates in use.
 - **`tracing`** — Use structured fields (`tracing::info!(tool = %name, decision = %result)`), not string interpolation. Every enforcement decision gets a span. Every tool execution gets a span.
 - **`reqwest`** — Always set `connect_timeout(10s)`, `read_timeout(30s)`, `timeout(120s)`. Use `reqwest-eventsource` for SSE streaming from LLM providers.
 - **`tokio`** — Use `tokio::process::Command` with `.kill_on_drop(true)`. Wrap all child process execution in `tokio::time::timeout()`. Use `.arg()` arrays, never shell string concatenation (even though we're executing bash — the command string goes as a single arg to `bash -c`).
-- **`secrecy`** — Wrap all credential values in `SecretString`. The `Debug` impl auto-redacts. `expose_secret()` only in the credential broker.
+- **`secrecy`** — Wrap all credential values in `SecretString`. The `Debug` impl auto-redacts. `expose_secret()` only at the single broker point for each credential type (not in general-purpose code).
 - **`toml`** — Enforce file size limit before parsing. Strongly typed deserialization into Rust structs with `#[serde(deny_unknown_fields)]`.
 
 ## Build and Run
@@ -289,9 +293,15 @@ ANTHROPIC_API_KEY=sk-... cargo run
 DATABASE_URL=postgres://cherub:cherub_dev@localhost:5480/cherub \
   ANTHROPIC_API_KEY=sk-... cargo run --features sessions
 
-# Run with memory tool
+# Run with memory tool (FTS-only search)
 DATABASE_URL=postgres://cherub:cherub_dev@localhost:5480/cherub \
   ANTHROPIC_API_KEY=sk-... cargo run --features memory
+
+# Run with memory tool + hybrid search (requires OPENAI_API_KEY for embeddings)
+DATABASE_URL=postgres://cherub:cherub_dev@localhost:5480/cherub \
+  ANTHROPIC_API_KEY=sk-... \
+  OPENAI_API_KEY=sk-... \
+  cargo run --features memory
 
 # Run with custom policy
 ANTHROPIC_API_KEY=sk-... cargo run -- --policy path/to/policy.toml
@@ -317,8 +327,14 @@ cargo test --features sessions session_persistence
 # Test with memory feature (enforcement tests run without Docker)
 cargo test --features memory
 
-# Test PgMemoryStore (auto-starts PostgreSQL via testcontainers)
+# Test PgMemoryStore (auto-starts PostgreSQL via testcontainers, includes M6c hybrid search tests)
 cargo test --features memory memory_store
+
+# Test RRF algorithm (pure unit tests, no DB)
+cargo test --features memory search
+
+# Live embedding test (requires OPENAI_API_KEY, ignored by default)
+OPENAI_API_KEY=sk-... cargo test --features memory embedding_live -- --ignored
 
 # Test enforcement layer specifically
 cargo test enforcement
