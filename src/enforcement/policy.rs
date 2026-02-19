@@ -6,6 +6,7 @@ use regex::{Regex, RegexSet};
 use serde::Deserialize;
 use tracing::{info, info_span};
 
+use super::extraction::MatchSource;
 use super::tier::Tier;
 use crate::error::CherubError;
 
@@ -21,9 +22,31 @@ struct PolicyFile {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MatchSourceValue {
+    Command,
+    Structured,
+}
+
+impl From<MatchSourceValue> for MatchSource {
+    fn from(v: MatchSourceValue) -> Self {
+        match v {
+            MatchSourceValue::Command => MatchSource::Command,
+            MatchSourceValue::Structured => MatchSource::Structured,
+        }
+    }
+}
+
+fn default_match_source() -> MatchSourceValue {
+    MatchSourceValue::Command
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ToolConfig {
     enabled: bool,
+    #[serde(default = "default_match_source")]
+    match_source: MatchSourceValue,
     #[serde(default)]
     actions: HashMap<String, ActionConfig>,
     #[serde(default)]
@@ -106,6 +129,7 @@ impl std::fmt::Debug for Policy {
 pub(super) struct CompiledTool {
     name: String,
     enabled: bool,
+    match_source: MatchSource, // How to extract action strings from params
     actions: Vec<CompiledAction>, // Ordered: Commit first, then Act, then Observe
     constraints: Vec<CompiledConstraint>, // Tool-level: hard reject on failure
 }
@@ -236,6 +260,10 @@ impl Predicate {
 impl CompiledTool {
     pub(super) fn enabled(&self) -> bool {
         self.enabled
+    }
+
+    pub(super) fn match_source(&self) -> MatchSource {
+        self.match_source
     }
 
     /// Check tool-level constraints against params.
@@ -425,6 +453,7 @@ fn compile_tool(name: String, config: ToolConfig) -> Result<CompiledTool, Cherub
     Ok(CompiledTool {
         name,
         enabled: config.enabled,
+        match_source: config.match_source.into(),
         actions,
         constraints: tool_constraints,
     })

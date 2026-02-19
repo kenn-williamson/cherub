@@ -107,6 +107,9 @@ async fn chat_session(
         }
     };
 
+    // Derive user identity from the Telegram chat ID (unique per chat channel).
+    let user_id = chat_id.to_string();
+
     let registry = ToolRegistry::new();
 
     let cwd = std::env::current_dir()
@@ -124,6 +127,7 @@ async fn chat_session(
         system_prompt,
         approval_gate,
         output,
+        &user_id,
     );
 
     // Attach session persistence per chat if a pool is available.

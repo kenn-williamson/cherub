@@ -27,21 +27,24 @@ cherub/
 │   ├── enforcement/
 │   │   ├── mod.rs            # Enforcement layer entry point
 │   │   ├── capability.rs     # Capability tokens (private constructors)
+│   │   ├── extraction.rs     # MatchSource enum (Command/Structured) — action extractor strategies
 │   │   ├── policy.rs         # Policy loading and evaluation (Clone for multi-session sharing)
 │   │   ├── shell.rs          # Shell command parser (quote-aware splitting)
 │   │   └── tier.rs           # Observe/Act/Commit tier definitions
 │   ├── tools/
-│   │   ├── mod.rs            # Tool trait, ToolRegistry, ToolImpl enum dispatch
-│   │   └── bash.rs           # Bash execution tool (tokio::process::Command)
+│   │   ├── mod.rs            # Tool trait, ToolRegistry, ToolImpl enum dispatch, ToolContext
+│   │   ├── bash.rs           # Bash execution tool (tokio::process::Command)
+│   │   └── memory.rs         # Memory tool: store/recall/search/update/forget (feature = "memory")
 │   ├── providers/
 │   │   ├── mod.rs            # Provider trait, Message/UserContent/ContentBlock types (serde + Clone)
 │   │   ├── anthropic.rs      # Anthropic API provider (non-streaming)
 │   │   └── wire.rs           # Serde structs for Anthropic API JSON (private, supports images)
 │   ├── storage/              # Feature-gated: #[cfg(feature = "postgres")]
-│   │   ├── mod.rs            # SessionStore trait, connect(), migration runner
+│   │   ├── mod.rs            # SessionStore + MemoryStore traits, connect(), migration runner
 │   │   ├── pg_session_store.rs  # PgSessionStore: PostgreSQL SessionStore impl
+│   │   ├── pg_memory_store.rs   # PgMemoryStore: PostgreSQL MemoryStore impl (feature = "memory")
 │   │   └── migrations/
-│   │       └── V1__initial_schema.sql  # Sessions + messages + memory schema
+│   │       └── V1__initial_schema.sql  # Sessions + messages + memory schema (UUIDv7, scope column)
 │   └── telegram/             # Feature-gated: #[cfg(feature = "telegram")]
 │       ├── mod.rs             # Module declarations
 │       ├── approval.rs        # TelegramApprovalGate (inline keyboard + oneshot channels)
@@ -51,8 +54,12 @@ cherub/
 ├── tests/
 │   ├── adversarial.rs        # Mock-provider adversarial integration tests (16 tests)
 │   ├── compile_tests.rs      # Compile-time invariant tests (trybuild)
+│   ├── fixtures/
+│   │   └── mod.rs            # Shared test fixtures: TestContainer (testcontainers, reusable pg, TRUNCATE)
+│   ├── memory_enforcement.rs # Memory tool enforcement tests, no DB needed (feature = "memory")
+│   ├── memory_store.rs       # PgMemoryStore integration tests (feature = "memory", auto-starts DB)
 │   ├── redteam.rs            # Live model adversarial tests (#[ignore], requires API key)
-│   ├── session_persistence.rs  # Session persistence integration tests (feature-gated: sessions)
+│   ├── session_persistence.rs  # Session persistence integration tests (feature = "sessions", auto-starts DB)
 │   ├── telegram_approval.rs  # Telegram approval flow tests (feature-gated)
 │   └── ui/
 │       ├── capability_token_private.rs      # Proves CapabilityToken can't be constructed outside enforcement
@@ -266,6 +273,9 @@ cargo build
 # Build with session persistence (requires PostgreSQL)
 cargo build --features sessions
 
+# Build with memory tool (requires PostgreSQL; implies postgres)
+cargo build --features memory
+
 # Build with Telegram connector
 cargo build --features telegram
 
@@ -278,6 +288,10 @@ ANTHROPIC_API_KEY=sk-... cargo run
 # Run with session persistence (start PostgreSQL first: docker compose up -d)
 DATABASE_URL=postgres://cherub:cherub_dev@localhost:5480/cherub \
   ANTHROPIC_API_KEY=sk-... cargo run --features sessions
+
+# Run with memory tool
+DATABASE_URL=postgres://cherub:cherub_dev@localhost:5480/cherub \
+  ANTHROPIC_API_KEY=sk-... cargo run --features memory
 
 # Run with custom policy
 ANTHROPIC_API_KEY=sk-... cargo run -- --policy path/to/policy.toml
@@ -297,9 +311,14 @@ cargo test
 # Test with Telegram-specific tests
 cargo test --features telegram
 
-# Test with session persistence (requires DATABASE_URL)
-DATABASE_URL=postgres://cherub:cherub_dev@localhost:5480/cherub \
-  cargo test --features sessions session_persistence
+# Test with session persistence (auto-starts PostgreSQL via testcontainers)
+cargo test --features sessions session_persistence
+
+# Test with memory feature (enforcement tests run without Docker)
+cargo test --features memory
+
+# Test PgMemoryStore (auto-starts PostgreSQL via testcontainers)
+cargo test --features memory memory_store
 
 # Test enforcement layer specifically
 cargo test enforcement

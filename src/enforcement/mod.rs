@@ -1,4 +1,5 @@
 pub mod capability;
+pub(crate) mod extraction;
 pub mod policy;
 pub mod shell;
 pub mod tier;
@@ -28,62 +29,49 @@ pub fn approve_escalation(tier: Tier) -> CapabilityToken {
 /// Returns the transitioned invocation (now `Evaluated`) and the decision.
 ///
 /// Flow:
-/// 1. Extract command from params
-/// 2. Find tool in policy, check enabled
-/// 3. Tool-level constraints → hard reject on failure
-/// 4. Parse compound command into sub-commands
-/// 5. Evaluate each sub-command; most restrictive decision wins
-/// 6. Action-level constraints → apply `on_constraint_failure`
-/// 7. If tier is Commit → Escalate
-/// 8. Otherwise → Allow
+/// 1. Find tool in policy, check enabled
+/// 2. Tool-level constraints → hard reject on failure
+/// 3. Extract action strings via the tool's MatchSource strategy
+/// 4. Evaluate each action; most restrictive decision wins
+/// 5. If tier is Commit → Escalate; otherwise → Allow
 pub fn evaluate(
     proposal: ToolInvocation<Proposed>,
     policy: &Policy,
 ) -> (ToolInvocation<Evaluated>, Decision) {
     let _span = info_span!("evaluate", tool = %proposal.tool).entered();
 
-    let decision = match extract_command(&proposal.params) {
+    let decision = match policy.find_tool(&proposal.tool) {
         None => {
-            info!(decision = "reject", reason = "no_command");
+            info!(decision = "reject", reason = "tool_not_found");
             Decision::Reject
         }
-        Some(command) => {
-            info!(command = %command);
+        Some(tool) if !tool.enabled() => {
+            info!(decision = "reject", reason = "tool_disabled");
+            Decision::Reject
+        }
+        Some(tool) => {
+            // Tool-level constraints — hard reject on failure.
+            if !tool.check_constraints(&proposal.params) {
+                info!(decision = "reject", reason = "tool_constraint_failed");
+                return (proposal.transition(), Decision::Reject);
+            }
 
-            // Parse compound command into simple commands.
-            let sub_commands = match shell::parse_commands(command) {
+            // Extract action strings via the tool's configured strategy.
+            match tool.match_source().extract(&proposal.params) {
                 None => {
-                    info!(decision = "reject", reason = "unparseable_command");
+                    info!(decision = "reject", reason = "action_extraction_failed");
                     return (proposal.transition(), Decision::Reject);
                 }
-                Some(cmds) if cmds.is_empty() => {
-                    info!(decision = "reject", reason = "empty_command");
+                Some(actions) if actions.is_empty() => {
+                    info!(decision = "reject", reason = "empty_actions");
                     return (proposal.transition(), Decision::Reject);
                 }
-                Some(cmds) => cmds,
-            };
-
-            match policy.find_tool(&proposal.tool) {
-                None => {
-                    info!(decision = "reject", reason = "tool_not_found");
-                    Decision::Reject
-                }
-                Some(tool) if !tool.enabled() => {
-                    info!(decision = "reject", reason = "tool_disabled");
-                    Decision::Reject
-                }
-                Some(tool) => {
-                    // Tool-level constraints — hard reject on failure.
-                    if !tool.check_constraints(&proposal.params) {
-                        info!(decision = "reject", reason = "tool_constraint_failed");
-                        return (proposal.transition(), Decision::Reject);
-                    }
-
-                    // Evaluate each sub-command. Most restrictive decision wins.
+                Some(actions) => {
+                    // Evaluate each action. Most restrictive decision wins.
                     combine_decisions(
-                        sub_commands
+                        actions
                             .iter()
-                            .map(|cmd| evaluate_single_command(cmd, tool, &proposal.params)),
+                            .map(|action| evaluate_single_action(action, tool, &proposal.params)),
                     )
                 }
             }
@@ -93,24 +81,24 @@ pub fn evaluate(
     (proposal.transition(), decision)
 }
 
-/// Evaluate a single (non-compound) command against a tool's actions.
-fn evaluate_single_command(
-    command: &str,
+/// Evaluate a single action string against a tool's actions.
+fn evaluate_single_action(
+    action: &str,
     tool: &policy::CompiledTool,
     params: &serde_json::Value,
 ) -> Decision {
-    match tool.match_action(command) {
+    match tool.match_action(action) {
         None => {
-            info!(decision = "reject", reason = "no_pattern_match", sub_command = %command);
+            info!(decision = "reject", reason = "no_pattern_match", action = %action);
             Decision::Reject
         }
-        Some(action) => {
-            let tier = action.tier;
+        Some(matched_action) => {
+            let tier = matched_action.tier;
 
             // Action-level constraints.
-            if !action.check_constraints(params) {
-                info!(decision = "constraint_fail", reason = "action_constraint_failed", sub_command = %command);
-                return match action.on_constraint_failure {
+            if !matched_action.check_constraints(params) {
+                info!(decision = "constraint_fail", reason = "action_constraint_failed", action = %action);
+                return match matched_action.on_constraint_failure {
                     OnConstraintFailure::Reject => Decision::Reject,
                     OnConstraintFailure::Escalate => Decision::Escalate { tier },
                 };
@@ -118,17 +106,17 @@ fn evaluate_single_command(
 
             // Commit always escalates, others allow.
             if tier == Tier::Commit {
-                info!(decision = "escalate", reason = "commit_tier", sub_command = %command);
+                info!(decision = "escalate", reason = "commit_tier", action = %action);
                 Decision::Escalate { tier: Tier::Commit }
             } else {
-                info!(decision = "allow", sub_command = %command);
+                info!(decision = "allow", action = %action);
                 Decision::Allow(CapabilityToken::new(tier))
             }
         }
     }
 }
 
-/// Combine decisions from multiple sub-commands.
+/// Combine decisions from multiple actions.
 /// - Any Reject → Reject
 /// - No rejects, any Escalate → Escalate (highest tier)
 /// - All Allow → Allow (highest tier)
@@ -161,14 +149,6 @@ fn combine_decisions(decisions: impl Iterator<Item = Decision>) -> Decision {
     } else {
         Decision::Reject
     }
-}
-
-/// Extract `params["command"]` as a non-empty string.
-fn extract_command(params: &serde_json::Value) -> Option<&str> {
-    params
-        .get("command")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
 }
 
 #[cfg(test)]
@@ -792,5 +772,108 @@ patterns = ["^ls "]
         );
         let (_, d2) = evaluate(p2, &policy);
         assert!(matches!(d2, Decision::Reject));
+    }
+
+    // --- Structured match_source tests ---
+
+    const MEMORY_POLICY: &str = r#"
+[tools.memory]
+enabled = true
+match_source = "structured"
+
+[tools.memory.actions.read]
+tier = "observe"
+patterns = ["^(recall|search)$", "^(recall|search):"]
+
+[tools.memory.actions.write_user]
+tier = "act"
+patterns = ["^store:preferences/", "^store:observations/", "^update:preferences/", "^update:observations/"]
+
+[tools.memory.actions.write_identity]
+tier = "commit"
+patterns = ["^store:identity/", "^update:identity/", "^(store|update):agent/", "^(store|update):instructions/"]
+
+[tools.memory.actions.delete]
+tier = "commit"
+patterns = ["^forget"]
+"#;
+
+    fn make_memory_proposal(action: &str, path: Option<&str>) -> ToolInvocation<Proposed> {
+        let params = if let Some(p) = path {
+            json!({"action": action, "path": p})
+        } else {
+            json!({"action": action})
+        };
+        ToolInvocation::new("memory", "execute", params)
+    }
+
+    #[test]
+    fn structured_recall_allowed_observe() {
+        let policy = Policy::from_str(MEMORY_POLICY).unwrap();
+        let (_, decision) = evaluate(make_memory_proposal("recall", None), &policy);
+        match decision {
+            Decision::Allow(token) => assert_eq!(token.tier, Tier::Observe),
+            _ => panic!("expected Allow(Observe)"),
+        }
+    }
+
+    #[test]
+    fn structured_store_preferences_act() {
+        let policy = Policy::from_str(MEMORY_POLICY).unwrap();
+        let (_, decision) = evaluate(
+            make_memory_proposal("store", Some("preferences/food")),
+            &policy,
+        );
+        match decision {
+            Decision::Allow(token) => assert_eq!(token.tier, Tier::Act),
+            _ => panic!("expected Allow(Act)"),
+        }
+    }
+
+    #[test]
+    fn structured_store_identity_escalates() {
+        let policy = Policy::from_str(MEMORY_POLICY).unwrap();
+        let (_, decision) = evaluate(
+            make_memory_proposal("store", Some("identity/values")),
+            &policy,
+        );
+        assert!(matches!(
+            decision,
+            Decision::Escalate { tier: Tier::Commit }
+        ));
+    }
+
+    #[test]
+    fn structured_forget_escalates() {
+        let policy = Policy::from_str(MEMORY_POLICY).unwrap();
+        let (_, decision) = evaluate(make_memory_proposal("forget", None), &policy);
+        assert!(matches!(
+            decision,
+            Decision::Escalate { tier: Tier::Commit }
+        ));
+    }
+
+    #[test]
+    fn structured_missing_action_rejected() {
+        let policy = Policy::from_str(MEMORY_POLICY).unwrap();
+        let proposal = ToolInvocation::new("memory", "execute", json!({"path": "preferences/x"}));
+        let (_, decision) = evaluate(proposal, &policy);
+        assert!(matches!(decision, Decision::Reject));
+    }
+
+    #[test]
+    fn structured_unmatched_action_rejected() {
+        let policy = Policy::from_str(MEMORY_POLICY).unwrap();
+        let (_, decision) = evaluate(make_memory_proposal("inject_persona", None), &policy);
+        assert!(matches!(decision, Decision::Reject));
+    }
+
+    #[test]
+    fn bash_still_works_with_default_match_source() {
+        // Bash uses default match_source = "command"; should be unaffected.
+        let policy = Policy::from_str(MEMORY_POLICY).unwrap();
+        // bash tool is not in this policy → rejected
+        let (_, d) = evaluate(make_proposal("bash", "ls /tmp"), &policy);
+        assert!(matches!(d, Decision::Reject));
     }
 }

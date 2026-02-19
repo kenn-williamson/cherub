@@ -11,7 +11,7 @@ use crate::enforcement::policy::Policy;
 use crate::enforcement::{self, Decision};
 use crate::error::CherubError;
 use crate::providers::{ContentBlock, Message, Provider, StopReason, ToolDefinition, UserContent};
-use crate::tools::{Proposed, ToolInvocation, ToolRegistry};
+use crate::tools::{Proposed, ToolContext, ToolInvocation, ToolRegistry};
 
 use approval::{ApprovalGate, ApprovalResult, EscalationContext};
 use output::{OutputEvent, OutputSink};
@@ -40,10 +40,11 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
         system_prompt: String,
         approval_gate: A,
         output: O,
+        user_id: &str,
     ) -> Self {
         let tool_definitions = registry.definitions();
         Self {
-            session: Session::new(),
+            session: Session::new(user_id),
             policy,
             provider,
             registry,
@@ -67,7 +68,8 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
     ) -> Result<(), CherubError> {
         let (session_id, messages) = store.get_or_create_session(connector, connector_id).await?;
         let msg_count = messages.len();
-        self.session = Session::from_persisted(session_id, messages, store);
+        let user_id = self.session.user_id.clone();
+        self.session = Session::from_persisted(session_id, messages, user_id, store);
         tracing::info!(
             session_id = %session_id,
             message_count = msg_count,
@@ -151,28 +153,37 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                 return Ok(());
             }
 
+            // Construct context for this tool execution cycle.
+            let ctx = ToolContext {
+                user_id: self.session.user_id.clone(),
+                session_id: self.session.id,
+                turn_number: self.session.next_ordinal,
+            };
+
             // Process tool calls through enforcement
             for (tool_use_id, name, input) in tool_uses {
-                let command_str = input
+                // Build a display string that works for any tool type.
+                let display_str = input
                     .get("command")
+                    .or_else(|| input.get("action"))
                     .and_then(|v| v.as_str())
-                    .unwrap_or("<no command>");
+                    .unwrap_or("<no action>");
 
                 let proposal = ToolInvocation::<Proposed>::new(&name, "execute", input.clone());
                 let (evaluated, decision) = enforcement::evaluate(proposal, &self.policy);
 
                 match decision {
                     Decision::Allow(token) => {
-                        info!(decision = "ALLOWED", tool = %name, command = %command_str);
+                        info!(decision = "ALLOWED", tool = %name, action = %display_str);
                         self.output
                             .emit(OutputEvent::ToolAllowed {
                                 tool: &name,
-                                command: command_str,
+                                command: display_str,
                             })
                             .await;
 
                         let exec_start = Instant::now();
-                        match evaluated.execute(token, &self.registry).await {
+                        match evaluated.execute(token, &self.registry, &ctx).await {
                             Ok(result) => {
                                 info!(duration_ms = %exec_start.elapsed().as_millis(), "tool execution complete");
                                 if !result.output.is_empty() {
@@ -203,11 +214,11 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                         }
                     }
                     Decision::Reject => {
-                        info!(decision = "REJECTED", tool = %name, command = %command_str);
+                        info!(decision = "REJECTED", tool = %name, action = %display_str);
                         self.output
                             .emit(OutputEvent::ToolRejected {
                                 tool: &name,
-                                command: command_str,
+                                command: display_str,
                             })
                             .await;
                         self.session.push(Message::ToolResult {
@@ -219,26 +230,26 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                         self.session.persist_last().await;
                     }
                     Decision::Escalate { tier } => {
-                        info!(decision = "ESCALATED", tool = %name, command = %command_str);
+                        info!(decision = "ESCALATED", tool = %name, action = %display_str);
 
                         let context = EscalationContext {
                             tool: &name,
-                            command: command_str,
+                            command: display_str,
                             params: &input,
                         };
                         match self.approval_gate.request_approval(&context).await {
                             ApprovalResult::Approved => {
                                 let token = enforcement::approve_escalation(tier);
-                                info!(decision = "APPROVED", tool = %name, command = %command_str);
+                                info!(decision = "APPROVED", tool = %name, action = %display_str);
                                 self.output
                                     .emit(OutputEvent::ToolApproved {
                                         tool: &name,
-                                        command: command_str,
+                                        command: display_str,
                                     })
                                     .await;
 
                                 let exec_start = Instant::now();
-                                match evaluated.execute(token, &self.registry).await {
+                                match evaluated.execute(token, &self.registry, &ctx).await {
                                     Ok(result) => {
                                         info!(duration_ms = %exec_start.elapsed().as_millis(), "tool execution complete");
                                         if !result.output.is_empty() {
@@ -269,11 +280,11 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                                 }
                             }
                             ApprovalResult::Denied => {
-                                info!(decision = "DENIED", tool = %name, command = %command_str);
+                                info!(decision = "DENIED", tool = %name, action = %display_str);
                                 self.output
                                     .emit(OutputEvent::ToolDenied {
                                         tool: &name,
-                                        command: command_str,
+                                        command: display_str,
                                     })
                                     .await;
                                 // Policy opacity: identical message to Reject

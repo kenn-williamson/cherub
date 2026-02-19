@@ -127,12 +127,16 @@ Everything else — connectors, credential brokering, audit logging, IPC plugins
 - [x] Schema: sessions table, session_messages table
 - [x] Migration framework (refinery, embedded migrations)
 
-### Memory as an Enforced Tool
-- [ ] `memory` tool: read, search, write, delete operations
-- [ ] Memory writes pass through enforcement layer (same CapabilityToken requirement)
-- [ ] Policy controls: identity writes = Commit tier, preference writes = Act tier, reads = Observe
-- [ ] Memory tier system: explicit (1.0), confirmed (0.9), inferred (0.5-0.7)
-- [ ] Provenance tracking: source session, source turn, source type on every memory
+### Memory as an Enforced Tool (M6b complete)
+- [x] `memory` tool: store, recall, search, update, forget operations
+- [x] Memory writes pass through enforcement layer (same CapabilityToken requirement)
+- [x] Policy controls: identity writes = Commit tier, preference writes = Act tier, reads = Observe
+- [x] Memory tier system: explicit (1.0), confirmed (0.9), inferred (0.5-0.7)
+- [x] Provenance tracking: source session, source turn, source type on every memory
+- [x] `match_source = "structured"` enforcement strategy — generalizes enforcement beyond bash
+- [x] Three memory scopes: agent (Commit to modify), user (Act to modify), working (Observe to modify)
+- [x] Soft-delete via `superseded_by` self-pointer — audit trail preserved
+- [x] User isolation: each user's memories are filtered by user_id
 
 ### Search
 - [ ] Hybrid search: pgvector cosine similarity + tsvector FTS

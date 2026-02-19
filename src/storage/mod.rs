@@ -1,6 +1,8 @@
+pub mod pg_memory_store;
 pub mod pg_session_store;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use deadpool_postgres::{Config, Pool, Runtime};
 use secrecy::{ExposeSecret, SecretString};
 use tokio_postgres::NoTls;
@@ -50,6 +52,215 @@ pub trait SessionStore: Send + Sync {
 
     /// Load all messages for a session in ordinal order.
     async fn load_messages(&self, session_id: Uuid) -> Result<Vec<Message>, CherubError>;
+}
+
+// ─── Memory types (M6b) ───────────────────────────────────────────────────────
+
+/// Which scope a memory belongs to.
+///
+/// - `Agent`: shared across all users; requires Commit tier to modify
+/// - `User`: per-user memories; requires Act tier to modify
+/// - `Working`: continuity context for the current session; requires Observe tier
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryScope {
+    Agent,
+    User,
+    Working,
+}
+
+impl MemoryScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MemoryScope::Agent => "agent",
+            MemoryScope::User => "user",
+            MemoryScope::Working => "working",
+        }
+    }
+}
+
+impl std::fmt::Display for MemoryScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for MemoryScope {
+    type Err = CherubError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "agent" => Ok(MemoryScope::Agent),
+            "user" => Ok(MemoryScope::User),
+            "working" => Ok(MemoryScope::Working),
+            other => Err(CherubError::Storage(format!(
+                "unknown memory scope: {other}"
+            ))),
+        }
+    }
+}
+
+/// What kind of information a memory represents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryCategory {
+    Preference,
+    Fact,
+    Instruction,
+    Identity,
+    Observation,
+}
+
+impl MemoryCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MemoryCategory::Preference => "preference",
+            MemoryCategory::Fact => "fact",
+            MemoryCategory::Instruction => "instruction",
+            MemoryCategory::Identity => "identity",
+            MemoryCategory::Observation => "observation",
+        }
+    }
+}
+
+impl std::str::FromStr for MemoryCategory {
+    type Err = CherubError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "preference" => Ok(MemoryCategory::Preference),
+            "fact" => Ok(MemoryCategory::Fact),
+            "instruction" => Ok(MemoryCategory::Instruction),
+            "identity" => Ok(MemoryCategory::Identity),
+            "observation" => Ok(MemoryCategory::Observation),
+            other => Err(CherubError::Storage(format!(
+                "unknown memory category: {other}"
+            ))),
+        }
+    }
+}
+
+/// How the memory was established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceType {
+    /// User stated it explicitly.
+    Explicit,
+    /// User confirmed an agent observation.
+    Confirmed,
+    /// Agent inferred it from behavior.
+    Inferred,
+}
+
+impl SourceType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SourceType::Explicit => "explicit",
+            SourceType::Confirmed => "confirmed",
+            SourceType::Inferred => "inferred",
+        }
+    }
+}
+
+impl std::str::FromStr for SourceType {
+    type Err = CherubError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "explicit" => Ok(SourceType::Explicit),
+            "confirmed" => Ok(SourceType::Confirmed),
+            "inferred" => Ok(SourceType::Inferred),
+            other => Err(CherubError::Storage(format!(
+                "unknown source type: {other}"
+            ))),
+        }
+    }
+}
+
+/// A fully-loaded memory row from the database.
+#[derive(Debug, Clone)]
+pub struct Memory {
+    pub id: Uuid,
+    pub user_id: String,
+    pub scope: MemoryScope,
+    pub category: MemoryCategory,
+    pub path: String,
+    pub content: String,
+    pub structured: Option<serde_json::Value>,
+    pub source_session_id: Option<Uuid>,
+    pub source_turn_number: Option<i32>,
+    pub source_type: SourceType,
+    pub confidence: f32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_referenced_at: Option<DateTime<Utc>>,
+    pub superseded_by: Option<Uuid>,
+}
+
+/// Input for creating a new memory. ID and timestamps are DB-generated.
+#[derive(Debug)]
+pub struct NewMemory {
+    pub user_id: String,
+    pub scope: MemoryScope,
+    pub category: MemoryCategory,
+    pub path: String,
+    pub content: String,
+    pub structured: Option<serde_json::Value>,
+    pub source_session_id: Option<Uuid>,
+    pub source_turn_number: Option<i32>,
+    pub source_type: SourceType,
+    pub confidence: f32,
+}
+
+/// Filter parameters for `MemoryStore::recall()`.
+#[derive(Debug, Default)]
+pub struct MemoryFilter {
+    pub scope: Option<MemoryScope>,
+    pub category: Option<MemoryCategory>,
+    /// Path prefix (LIKE 'prefix%').
+    pub path_prefix: Option<String>,
+    pub user_id: Option<String>,
+    pub limit: Option<i64>,
+}
+
+/// Fields that can be changed on an existing memory via `MemoryStore::update()`.
+/// Creates a new memory row and sets `superseded_by` on the old one.
+#[derive(Debug)]
+pub struct MemoryUpdate {
+    pub content: Option<String>,
+    pub structured: Option<serde_json::Value>,
+    pub confidence: Option<f32>,
+}
+
+/// Storage backend for the memory tool.
+///
+/// Implementations: `PgMemoryStore` (PostgreSQL, M6b), in-memory (tests).
+/// This is a true `dyn Trait` boundary — backend selected at runtime.
+#[async_trait]
+pub trait MemoryStore: Send + Sync {
+    /// Create a new memory. Returns the DB-assigned ID.
+    async fn store(&self, memory: NewMemory) -> Result<Uuid, CherubError>;
+
+    /// Retrieve memories matching the filter. Active records only
+    /// (superseded_by IS NULL).
+    async fn recall(&self, filter: MemoryFilter) -> Result<Vec<Memory>, CherubError>;
+
+    /// Full-text search over memory content.
+    /// Returns up to `limit` memories ranked by relevance.
+    async fn search(
+        &self,
+        query: &str,
+        scope: Option<MemoryScope>,
+        user_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Memory>, CherubError>;
+
+    /// Update a memory by creating a new row and chaining `superseded_by`.
+    /// Returns the new memory's ID.
+    async fn update(&self, id: Uuid, changes: MemoryUpdate) -> Result<Uuid, CherubError>;
+
+    /// Soft-delete: mark a memory as superseded (points to itself as sentinel).
+    async fn forget(&self, id: Uuid) -> Result<(), CherubError>;
+
+    /// Touch `last_referenced_at` for a recalled memory.
+    async fn touch(&self, id: Uuid) -> Result<(), CherubError>;
 }
 
 /// Connect to PostgreSQL, run pending migrations, and return a connection pool.

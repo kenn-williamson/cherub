@@ -57,6 +57,9 @@ async fn main() -> Result<()> {
 
     let (policy_path, model) = parse_args();
 
+    // Derive user identity from the OS username.
+    let user_id = std::env::var("USER").unwrap_or_else(|_| "local".to_owned());
+
     // Load API key
     let api_key_raw = std::env::var("ANTHROPIC_API_KEY")
         .context("ANTHROPIC_API_KEY environment variable not set")?;
@@ -74,11 +77,45 @@ async fn main() -> Result<()> {
     // Build components
     let provider = AnthropicProvider::new(api_key, &model, DEFAULT_MAX_TOKENS)
         .map_err(|e| anyhow::anyhow!("failed to create provider: {e}"))?;
-    let registry = ToolRegistry::new();
 
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| ".".to_owned());
+
+    // Connect to PostgreSQL if DATABASE_URL is set (needed for sessions and/or memory).
+    #[cfg(any(feature = "sessions", feature = "memory"))]
+    let db_pool = {
+        match std::env::var("DATABASE_URL") {
+            Ok(db_url_raw) => {
+                match cherub::storage::connect(SecretString::from(db_url_raw)).await {
+                    Ok(pool) => Some(pool),
+                    Err(e) => {
+                        eprintln!(
+                            "[warn] database connection failed, running without persistence: {e}"
+                        );
+                        None
+                    }
+                }
+            }
+            Err(_) => None,
+        }
+    };
+
+    // Build ToolRegistry — attach memory store if the feature is enabled and DB is available.
+    #[cfg(feature = "memory")]
+    let registry = {
+        if let Some(ref pool) = db_pool {
+            use cherub::storage::pg_memory_store::PgMemoryStore;
+            let store: Box<dyn cherub::storage::MemoryStore> =
+                Box::new(PgMemoryStore::new(pool.clone()));
+            ToolRegistry::with_memory(store)
+        } else {
+            ToolRegistry::new()
+        }
+    };
+    #[cfg(not(feature = "memory"))]
+    let registry = ToolRegistry::new();
+
     let system_prompt = build_system_prompt(&cwd);
 
     let approval_gate = CliApprovalGate::new();
@@ -90,43 +127,35 @@ async fn main() -> Result<()> {
         system_prompt,
         approval_gate,
         output,
+        &user_id,
     );
 
-    // Attach session persistence if DATABASE_URL is set and the `sessions` feature is compiled in.
+    // Attach session persistence if available.
     #[cfg(feature = "sessions")]
     {
-        if let Ok(db_url_raw) = std::env::var("DATABASE_URL") {
-            match cherub::storage::connect(SecretString::from(db_url_raw)).await {
-                Ok(pool) => {
-                    use cherub::storage::pg_session_store::PgSessionStore;
-                    let store = Box::new(PgSessionStore::new(pool));
-                    match agent.with_persistence(store, "cli", "default").await {
-                        Ok(()) => {
-                            let msg_count = agent.session_messages().len();
-                            if msg_count > 0 {
-                                println!(
-                                    "Resumed session {} ({msg_count} messages).",
-                                    agent.session_id()
-                                );
-                            } else {
-                                println!("New session {}.", agent.session_id());
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("[warn] session persistence unavailable: {e}");
-                        }
+        if let Some(pool) = db_pool {
+            use cherub::storage::pg_session_store::PgSessionStore;
+            let store = Box::new(PgSessionStore::new(pool));
+            match agent.with_persistence(store, "cli", "default").await {
+                Ok(()) => {
+                    let msg_count = agent.session_messages().len();
+                    if msg_count > 0 {
+                        println!(
+                            "Resumed session {} ({msg_count} messages).",
+                            agent.session_id()
+                        );
+                    } else {
+                        println!("New session {}.", agent.session_id());
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "[warn] database connection failed, running without persistence: {e}"
-                    );
+                    eprintln!("[warn] session persistence unavailable: {e}");
                 }
             }
         }
     }
 
-    info!(model = %model, "cherub started");
+    info!(model = %model, user_id = %user_id, "cherub started");
     println!("cherub: secure agent runtime (model: {model})");
     println!("Type a message, Ctrl-D to exit, Ctrl-C to cancel input.\n");
 

@@ -10,6 +10,7 @@ use crate::storage::SessionStore;
 /// Persistence is Session's concern, not AgentLoop's.
 pub struct Session {
     pub(crate) id: Uuid,
+    pub(crate) user_id: String,
     pub(crate) messages: Vec<Message>,
     pub(crate) next_ordinal: i32,
     #[cfg(feature = "sessions")]
@@ -19,10 +20,10 @@ pub struct Session {
 impl Session {
     /// Create an ephemeral session (no persistence).
     // No Default impl — Default as constructor substitute is prohibited (see CLAUDE.md).
-    #[allow(clippy::new_without_default)]
-    pub fn new() -> Self {
+    pub fn new(user_id: &str) -> Self {
         Self {
             id: Uuid::now_v7(),
+            user_id: user_id.to_owned(),
             messages: Vec::new(),
             next_ordinal: 0,
             #[cfg(feature = "sessions")]
@@ -32,10 +33,16 @@ impl Session {
 
     /// Restore a session from persisted state with an attached store.
     #[cfg(feature = "sessions")]
-    pub fn from_persisted(id: Uuid, messages: Vec<Message>, store: Box<dyn SessionStore>) -> Self {
+    pub fn from_persisted(
+        id: Uuid,
+        messages: Vec<Message>,
+        user_id: String,
+        store: Box<dyn SessionStore>,
+    ) -> Self {
         let next_ordinal = messages.len() as i32;
         Self {
             id,
+            user_id,
             messages,
             next_ordinal,
             store: Some(store),
@@ -78,14 +85,14 @@ mod tests {
 
     #[test]
     fn push_and_retrieve() {
-        let mut session = Session::new();
+        let mut session = Session::new("test");
         session.push(Message::user_text("hello"));
         assert_eq!(session.messages.len(), 1);
     }
 
     #[test]
     fn push_returns_ordinal() {
-        let mut session = Session::new();
+        let mut session = Session::new("test");
         let ord0 = session.push(Message::user_text("first"));
         let ord1 = session.push(Message::user_text("second"));
         assert_eq!(ord0, 0);
@@ -95,9 +102,15 @@ mod tests {
 
     #[test]
     fn session_id_is_v7() {
-        let s = Session::new();
+        let s = Session::new("test");
         // UUID v7 has version bits set to 7
         assert_eq!(s.id.get_version_num(), 7);
+    }
+
+    #[test]
+    fn user_id_stored() {
+        let s = Session::new("alice");
+        assert_eq!(s.user_id, "alice");
     }
 
     #[test]

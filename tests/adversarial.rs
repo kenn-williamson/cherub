@@ -144,6 +144,7 @@ fn make_agent(
         system_prompt,
         approval_gate,
         NullSink,
+        "test",
     )
 }
 

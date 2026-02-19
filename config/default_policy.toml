@@ -1,6 +1,8 @@
 # Cherub default policy
 # Deny by default — only explicitly listed actions are permitted.
 
+# ─── Bash tool ───────────────────────────────────────────────────────────────
+
 [tools.bash]
 enabled = true
 
@@ -61,7 +63,74 @@ patterns = [
     "^cargo install",
 ]
 
-# Constraint operators:
+# ─── Memory tool (M6b) ────────────────────────────────────────────────────────
+#
+# Patterns match "{action}" or "{action}:{path}" depending on whether a path
+# is provided. The match_source = "structured" directive activates the
+# structured extractor instead of shell command parsing.
+#
+# Tier assignment by scope and operation:
+#   Observe  — read-only (recall, search) and working-scope writes
+#   Act      — user-scope writes (preferences, observations, facts)
+#   Commit   — identity/agent/instruction writes; all deletes
+
+[tools.memory]
+enabled = true
+match_source = "structured"
+
+[tools.memory.actions.read]
+# Recall and search are always observe-tier regardless of scope.
+tier = "observe"
+patterns = [
+    "^recall$",
+    "^recall:",
+    "^search$",
+    "^search:",
+]
+
+[tools.memory.actions.write_working]
+# Working-scope writes are observe-tier (continuity context, low stakes).
+tier = "observe"
+patterns = [
+    "^store:working/",
+    "^update:working/",
+    "^forget:working/",
+]
+
+[tools.memory.actions.write_user]
+# User-scope writes require Act tier.
+tier = "act"
+patterns = [
+    "^store:preferences/",
+    "^store:observations/",
+    "^store:facts/",
+    "^update:preferences/",
+    "^update:observations/",
+    "^update:facts/",
+]
+
+[tools.memory.actions.write_identity]
+# Identity, agent-scope, and instruction writes require Commit (human approval).
+tier = "commit"
+patterns = [
+    "^store:identity/",
+    "^update:identity/",
+    "^store:agent/",
+    "^update:agent/",
+    "^store:instructions/",
+    "^update:instructions/",
+]
+
+[tools.memory.actions.delete]
+# All other deletes require Commit (human approval).
+tier = "commit"
+patterns = [
+    "^forget$",
+    "^forget:",
+]
+
+# ─── Constraint operators ─────────────────────────────────────────────────────
+#
 #   eq          — exact match (string, number, bool)
 #   lt / gt     — numeric comparison (strict: equal values fail)
 #   contains    — substring in string, or element in array

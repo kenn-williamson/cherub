@@ -80,6 +80,7 @@ fn make_agent() -> AgentLoop<AnthropicProvider, DenyAllGate, NullSink> {
         system_prompt,
         approval_gate,
         NullSink,
+        "test",
     )
 }
 

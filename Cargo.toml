@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [features]
 telegram = ["dep:teloxide", "dep:base64"]
-# postgres: database infrastructure — connection pool, migrations, SessionStore trait, PgSessionStore.
+# postgres: database infrastructure — connection pool, migrations, SessionStore/MemoryStore traits, PgSessionStore/PgMemoryStore.
 # Use when you need postgres for any purpose (sessions, credentials M7, memory M6b).
 postgres = [
     "dep:deadpool-postgres",
@@ -19,6 +19,9 @@ postgres = [
 # sessions: session persistence wiring — persist_last(), with_persistence(), CLI/Telegram hooks.
 # Implies postgres. Use to make conversations survive restarts.
 sessions = ["postgres"]
+# memory: enforced memory tool — store/recall/search/update/forget memories across sessions.
+# Implies postgres. All memory operations pass through the enforcement pipeline.
+memory = ["postgres"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -59,3 +62,5 @@ required-features = ["telegram"]
 
 [dev-dependencies]
 trybuild = "1.0"
+testcontainers = { version = "0.26", features = ["reusable-containers"] }
+testcontainers-modules = "0.14"
