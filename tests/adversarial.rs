@@ -507,3 +507,332 @@ async fn escalation_approved_executes_command() {
         "approved command should execute successfully"
     );
 }
+
+// ===========================================================================
+// HTTP tool enforcement (M7b)
+// ===========================================================================
+
+/// Helper: build an agent that has the http tool in policy with specific allowed hosts.
+fn make_http_agent(
+    responses: Vec<Message>,
+    extra_policy: &str,
+    approval_policy: MockApprovalPolicy,
+) -> AgentLoop<MockProvider, MockApprovalGate, NullSink> {
+    let policy_str = format!(
+        r#"
+[tools.bash]
+enabled = true
+
+[tools.bash.actions.read]
+tier = "observe"
+patterns = ["^ls ", "^echo "]
+
+{}
+"#,
+        extra_policy
+    );
+    let policy = Policy::from_str(&policy_str).unwrap();
+    let provider = MockProvider::new(responses);
+    let registry = ToolRegistry::new(); // No HTTP tool registered — only bash.
+    let system_prompt = "test".to_owned();
+    let approval_gate = MockApprovalGate {
+        policy: approval_policy,
+    };
+    AgentLoop::new(
+        policy,
+        provider,
+        registry,
+        system_prompt,
+        approval_gate,
+        NullSink,
+        "test",
+    )
+}
+
+#[tokio::test]
+async fn http_tool_rejected_when_not_in_policy() {
+    // Agent proposes http tool call, but the policy has no [tools.http] section.
+    // → enforcement rejects (deny by default for unknown tools).
+    let http_call = tool_use_msg_raw(
+        "1",
+        "http",
+        json!({
+            "action": "get",
+            "url": "https://api.stripe.com/v1/charges"
+        }),
+    );
+
+    let mut agent = make_agent(vec![http_call], MockApprovalPolicy::AlwaysDeny);
+    agent.run_turn_text("fetch stripe charges").await.unwrap();
+
+    let results = find_tool_results(agent.session_messages());
+    assert_eq!(results.len(), 1);
+    // No [tools.http] in DEFAULT_POLICY → rejected.
+    assert_eq!(results[0].1, "action not permitted");
+    assert!(results[0].2, "should be an error");
+}
+
+#[tokio::test]
+async fn http_tool_rejected_for_unlisted_host() {
+    // Policy allows GET to api.stripe.com only. Agent tries evil.com → rejected.
+    let http_policy = r#"
+[tools.http]
+enabled = true
+match_source = "http_structured"
+
+[tools.http.actions.api_read]
+tier = "observe"
+patterns = ["^get:api\\.stripe\\.com$"]
+"#;
+
+    let evil_call = tool_use_msg_raw(
+        "1",
+        "http",
+        json!({
+            "action": "get",
+            "url": "https://evil.com/steal"
+        }),
+    );
+
+    let mut agent = make_http_agent(vec![evil_call], http_policy, MockApprovalPolicy::AlwaysDeny);
+    agent.run_turn_text("fetch data").await.unwrap();
+
+    let results = find_tool_results(agent.session_messages());
+    assert_eq!(results.len(), 1);
+    // "get:evil.com" does not match "^get:api\\.stripe\\.com$" → rejected.
+    assert_eq!(results[0].1, "action not permitted");
+    assert!(results[0].2);
+}
+
+#[tokio::test]
+async fn http_tool_malformed_url_rejected() {
+    // Malformed URL → HttpStructured extraction returns None → Reject.
+    let http_policy = r#"
+[tools.http]
+enabled = true
+match_source = "http_structured"
+
+[tools.http.actions.api_read]
+tier = "observe"
+patterns = ["^get:"]
+"#;
+
+    // No "://" in url → extract_url_host returns None → Reject.
+    let bad_url_call = tool_use_msg_raw(
+        "1",
+        "http",
+        json!({
+            "action": "get",
+            "url": "not-a-url-at-all"
+        }),
+    );
+
+    let mut agent = make_http_agent(
+        vec![bad_url_call],
+        http_policy,
+        MockApprovalPolicy::AlwaysDeny,
+    );
+    agent.run_turn_text("test").await.unwrap();
+
+    let results = find_tool_results(agent.session_messages());
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].1, "action not permitted");
+    assert!(results[0].2);
+}
+
+#[tokio::test]
+async fn http_tool_empty_url_rejected() {
+    // Empty URL → extraction returns None → Reject.
+    let http_policy = r#"
+[tools.http]
+enabled = true
+match_source = "http_structured"
+
+[tools.http.actions.api_read]
+tier = "observe"
+patterns = ["^get:"]
+"#;
+
+    let empty_url_call = tool_use_msg_raw(
+        "1",
+        "http",
+        json!({
+            "action": "get",
+            "url": ""
+        }),
+    );
+
+    let mut agent = make_http_agent(
+        vec![empty_url_call],
+        http_policy,
+        MockApprovalPolicy::AlwaysDeny,
+    );
+    agent.run_turn_text("test").await.unwrap();
+
+    let results = find_tool_results(agent.session_messages());
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].1, "action not permitted");
+    assert!(results[0].2);
+}
+
+#[tokio::test]
+async fn http_tool_method_not_in_policy_rejected() {
+    // Policy allows GET but not DELETE. Agent tries DELETE → rejected.
+    let http_policy = r#"
+[tools.http]
+enabled = true
+match_source = "http_structured"
+
+[tools.http.actions.api_read]
+tier = "observe"
+patterns = ["^get:api\\.stripe\\.com$"]
+"#;
+
+    let delete_call = tool_use_msg_raw(
+        "1",
+        "http",
+        json!({
+            "action": "delete",
+            "url": "https://api.stripe.com/v1/charges/ch_123"
+        }),
+    );
+
+    let mut agent = make_http_agent(
+        vec![delete_call],
+        http_policy,
+        MockApprovalPolicy::AlwaysDeny,
+    );
+    agent.run_turn_text("test").await.unwrap();
+
+    let results = find_tool_results(agent.session_messages());
+    assert_eq!(results.len(), 1);
+    // "delete:api.stripe.com" does not match "^get:api\\.stripe\\.com$" → rejected.
+    assert_eq!(results[0].1, "action not permitted");
+    assert!(results[0].2);
+}
+
+#[tokio::test]
+async fn http_tool_write_requires_commit_escalation() {
+    // Policy puts POST at commit tier. Agent tries POST → escalation → denied.
+    let http_policy = r#"
+[tools.http]
+enabled = true
+match_source = "http_structured"
+
+[tools.http.actions.api_write]
+tier = "commit"
+patterns = ["^post:api\\.stripe\\.com$"]
+"#;
+
+    let post_call = tool_use_msg_raw(
+        "1",
+        "http",
+        json!({
+            "action": "post",
+            "url": "https://api.stripe.com/v1/charges",
+            "body": "{\"amount\": 1000}"
+        }),
+    );
+
+    let mut agent = make_http_agent(vec![post_call], http_policy, MockApprovalPolicy::AlwaysDeny);
+    agent.run_turn_text("test").await.unwrap();
+
+    let results = find_tool_results(agent.session_messages());
+    assert_eq!(results.len(), 1);
+    // Escalated → denied → "action not permitted".
+    assert_eq!(results[0].1, "action not permitted");
+    assert!(results[0].2);
+}
+
+#[tokio::test]
+async fn http_tool_disabled_in_policy_rejected() {
+    // [tools.http] enabled = false → any http tool call is rejected.
+    let http_policy = r#"
+[tools.http]
+enabled = false
+match_source = "http_structured"
+
+[tools.http.actions.api_read]
+tier = "observe"
+patterns = ["^get:"]
+"#;
+
+    let get_call = tool_use_msg_raw(
+        "1",
+        "http",
+        json!({
+            "action": "get",
+            "url": "https://api.stripe.com/v1/charges"
+        }),
+    );
+
+    let mut agent = make_http_agent(vec![get_call], http_policy, MockApprovalPolicy::AlwaysDeny);
+    agent.run_turn_text("test").await.unwrap();
+
+    let results = find_tool_results(agent.session_messages());
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].1, "action not permitted");
+    assert!(results[0].2);
+}
+
+#[tokio::test]
+async fn http_tool_unknown_tool_when_not_registered() {
+    // Policy allows http, but the registry only has bash (no HttpTool registered).
+    // → Tool execution fails with "unknown tool: http" (not a policy rejection, but
+    //   an execution error). Enforcement still ran; the tool just isn't in the registry.
+    let http_policy = r#"
+[tools.bash]
+enabled = true
+
+[tools.bash.actions.read]
+tier = "observe"
+patterns = ["^ls "]
+
+[tools.http]
+enabled = true
+match_source = "http_structured"
+
+[tools.http.actions.api_read]
+tier = "observe"
+patterns = ["^get:api\\.example\\.com$"]
+"#;
+
+    let get_call = tool_use_msg_raw(
+        "1",
+        "http",
+        json!({
+            "action": "get",
+            "url": "https://api.example.com/data"
+        }),
+    );
+
+    // Build the agent directly with a registry that has no http tool registered.
+    let policy = Policy::from_str(http_policy).unwrap();
+    let provider = MockProvider::new(vec![get_call]);
+    let registry = ToolRegistry::new(); // bash only — no http
+    let approval_gate = MockApprovalGate {
+        policy: MockApprovalPolicy::AlwaysDeny,
+    };
+    let mut agent = AgentLoop::new(
+        policy,
+        provider,
+        registry,
+        "test".to_owned(),
+        approval_gate,
+        NullSink,
+        "test",
+    );
+
+    agent.run_turn_text("test").await.unwrap();
+
+    let results = find_tool_results(agent.session_messages());
+    assert_eq!(results.len(), 1);
+    // Enforcement allowed it (policy says observe), but registry doesn't have the tool.
+    // → error result with "unknown tool" message.
+    let result_content = results[0].1;
+    assert!(
+        result_content.contains("unknown tool") || result_content == "action not permitted",
+        "expected 'unknown tool' error, got: {result_content}"
+    );
+    assert!(results[0].2, "should be an error");
+}

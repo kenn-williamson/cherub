@@ -1,6 +1,6 @@
 # Secure Agent Runtime — Design Document
 
-**Status:** Draft — Milestone 6d Complete (Proactive Memory Injection: runtime-controlled context injection before each turn), Plugin Architecture revised (tiered sandbox model)
+**Status:** Draft — Milestone 7 Complete (Credential Broker: AES-256-GCM vault, HTTP tool with runtime injection, leak detection), Plugin Architecture revised (tiered sandbox model)
 **Author:** Kenn Williamson  
 **Date:** February 2026
 

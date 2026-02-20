@@ -3,6 +3,7 @@
 //! Different tools express their intended action differently:
 //! - `bash` puts it in `params["command"]`, parsed via the shell module
 //! - `memory` puts it in `params["action"]`, optionally qualified by `params["path"]`
+//! - `http` puts it in `params["action"]` (method) + `params["url"]` (host)
 //!
 //! `MatchSource` selects the extraction strategy at policy-compile time.
 //! No changes to `evaluate()` are needed when adding new structured tools.
@@ -20,6 +21,10 @@ pub(super) enum MatchSource {
     /// Extract `params["action"]`, optionally qualified by `params["path"]`.
     /// Produces a single action string: `"{action}:{path}"` or `"{action}"`.
     Structured,
+    /// Extract `params["action"]` (HTTP method) + `params["url"]` (host).
+    /// Produces a single action string: `"{method}:{host}"`, e.g. `"get:api.stripe.com"`.
+    /// Malformed URL → `None` → Reject.
+    HttpStructured,
 }
 
 impl MatchSource {
@@ -56,8 +61,40 @@ impl MatchSource {
 
                 Some(vec![action_str])
             }
+            MatchSource::HttpStructured => {
+                let action = params
+                    .get("action")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())?;
+
+                let url_str = params
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())?;
+
+                let host = extract_url_host(url_str)?;
+                Some(vec![format!("{action}:{host}")])
+            }
         }
     }
+}
+
+/// Extract the host component from a URL string.
+///
+/// Handles standard HTTP/HTTPS URLs. Does not handle IPv6 addresses with brackets.
+/// Malformed or unusual URLs return `None` → enforcement rejects the action.
+///
+/// This is intentionally simple — we do not need full URL parsing for enforcement.
+/// The broker uses `url::Url` for the security-critical host validation.
+fn extract_url_host(url: &str) -> Option<&str> {
+    // Strip scheme: "https://api.stripe.com/v1" → "api.stripe.com/v1"
+    let after_scheme = url.split_once("://")?.1;
+    // Strip path and query: "api.stripe.com/v1?k=v" → "api.stripe.com"
+    let host_and_port = after_scheme.split('/').next()?;
+    // Strip port: "api.stripe.com:443" → "api.stripe.com"
+    let host = host_and_port.split(':').next()?;
+
+    if host.is_empty() { None } else { Some(host) }
 }
 
 #[cfg(test)]
@@ -153,5 +190,96 @@ mod tests {
     fn structured_non_string_action_returns_none() {
         let params = json!({"action": 42});
         assert!(MatchSource::Structured.extract(&params).is_none());
+    }
+
+    // --- HttpStructured extraction ---
+
+    #[test]
+    fn http_structured_get() {
+        let params = json!({"action": "get", "url": "https://api.stripe.com/v1/charges"});
+        assert_eq!(
+            MatchSource::HttpStructured.extract(&params),
+            Some(vec!["get:api.stripe.com".to_owned()])
+        );
+    }
+
+    #[test]
+    fn http_structured_post() {
+        let params = json!({"action": "post", "url": "https://hooks.slack.com/services/xyz"});
+        assert_eq!(
+            MatchSource::HttpStructured.extract(&params),
+            Some(vec!["post:hooks.slack.com".to_owned()])
+        );
+    }
+
+    #[test]
+    fn http_structured_strips_port() {
+        let params = json!({"action": "get", "url": "https://api.example.com:8443/path"});
+        assert_eq!(
+            MatchSource::HttpStructured.extract(&params),
+            Some(vec!["get:api.example.com".to_owned()])
+        );
+    }
+
+    #[test]
+    fn http_structured_missing_url_returns_none() {
+        let params = json!({"action": "get"});
+        assert!(MatchSource::HttpStructured.extract(&params).is_none());
+    }
+
+    #[test]
+    fn http_structured_missing_action_returns_none() {
+        let params = json!({"url": "https://api.stripe.com/v1"});
+        assert!(MatchSource::HttpStructured.extract(&params).is_none());
+    }
+
+    #[test]
+    fn http_structured_no_scheme_returns_none() {
+        // No "://" → no host to extract → Reject.
+        let params = json!({"action": "get", "url": "api.stripe.com/v1"});
+        assert!(MatchSource::HttpStructured.extract(&params).is_none());
+    }
+
+    #[test]
+    fn http_structured_empty_url_returns_none() {
+        let params = json!({"action": "get", "url": ""});
+        assert!(MatchSource::HttpStructured.extract(&params).is_none());
+    }
+
+    #[test]
+    fn http_structured_non_string_url_returns_none() {
+        let params = json!({"action": "get", "url": 42});
+        assert!(MatchSource::HttpStructured.extract(&params).is_none());
+    }
+
+    // --- extract_url_host unit tests ---
+
+    #[test]
+    fn extract_host_simple() {
+        assert_eq!(
+            extract_url_host("https://api.stripe.com/v1"),
+            Some("api.stripe.com")
+        );
+    }
+
+    #[test]
+    fn extract_host_with_port() {
+        assert_eq!(
+            extract_url_host("https://api.example.com:8443/path"),
+            Some("api.example.com")
+        );
+    }
+
+    #[test]
+    fn extract_host_no_path() {
+        assert_eq!(
+            extract_url_host("https://api.example.com"),
+            Some("api.example.com")
+        );
+    }
+
+    #[test]
+    fn extract_host_no_scheme_returns_none() {
+        assert_eq!(extract_url_host("api.example.com/path"), None);
     }
 }

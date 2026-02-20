@@ -1,4 +1,10 @@
 pub mod bash;
+#[cfg(feature = "credentials")]
+pub mod credential_broker;
+#[cfg(feature = "credentials")]
+pub mod http;
+#[cfg(feature = "credentials")]
+pub(crate) mod leak_detector;
 #[cfg(feature = "memory")]
 pub mod memory;
 
@@ -12,6 +18,8 @@ use crate::error::CherubError;
 use crate::providers::ToolDefinition;
 
 use bash::BashTool;
+#[cfg(feature = "credentials")]
+use http::HttpTool;
 #[cfg(feature = "memory")]
 use memory::MemoryTool;
 
@@ -84,11 +92,13 @@ pub struct ToolResult {
 }
 
 /// Enum dispatch for tool implementations. Known variants at compile time.
-/// `dyn Tool` deferred to M7 plugin IPC.
+/// `dyn Tool` deferred to M8/M9 plugin IPC.
 pub(crate) enum ToolImpl {
     Bash(BashTool),
     #[cfg(feature = "memory")]
     Memory(MemoryTool),
+    #[cfg(feature = "credentials")]
+    Http(HttpTool),
 }
 
 impl ToolImpl {
@@ -97,6 +107,8 @@ impl ToolImpl {
             Self::Bash(_) => "bash",
             #[cfg(feature = "memory")]
             Self::Memory(_) => "memory",
+            #[cfg(feature = "credentials")]
+            Self::Http(_) => "http",
         }
     }
 
@@ -104,14 +116,16 @@ impl ToolImpl {
         &self,
         params: &serde_json::Value,
         token: CapabilityToken,
-        // Prefixed with _ to suppress warning when compiled without --features memory.
-        // Memory arms use it for provenance; bash ignores it.
+        // Prefixed with _ to suppress warning when compiled without --features memory/credentials.
+        // Memory arms use it for provenance; http uses it for user_id; bash ignores it.
         _ctx: &ToolContext,
     ) -> Result<ToolResult, CherubError> {
         match self {
             Self::Bash(tool) => tool.execute(params, token).await,
             #[cfg(feature = "memory")]
             Self::Memory(tool) => tool.execute(params, token, _ctx).await,
+            #[cfg(feature = "credentials")]
+            Self::Http(tool) => tool.execute(params, token, _ctx).await,
         }
     }
 
@@ -195,6 +209,8 @@ impl ToolImpl {
                     "required": ["action"]
                 }),
             },
+            #[cfg(feature = "credentials")]
+            Self::Http(_) => http::http_tool_definition(),
         }
     }
 }
@@ -223,6 +239,19 @@ impl ToolRegistry {
         }
     }
 
+    /// Add the HTTP tool to an existing registry (consumes and returns self).
+    ///
+    /// The `CredentialBroker` is shared between the tool and the registry.
+    /// Call after `new()` or `with_memory()`.
+    #[cfg(feature = "credentials")]
+    pub fn with_credentials(
+        mut self,
+        broker: std::sync::Arc<credential_broker::CredentialBroker>,
+    ) -> Self {
+        self.tools.push(ToolImpl::Http(HttpTool::new(broker)));
+        self
+    }
+
     pub(crate) fn find(&self, name: &str) -> Option<&ToolImpl> {
         self.tools.iter().find(|t| t.name() == name)
     }
@@ -232,8 +261,8 @@ impl ToolRegistry {
     }
 }
 
-/// Extension point for tool implementations. Retained for future M7 plugin use.
-/// Not used in M2 — enum dispatch via `ToolImpl` is preferred for known variants.
+/// Extension point for tool implementations. Retained for future M8/M9 plugin IPC.
+/// Not used for known variants — enum dispatch via `ToolImpl` is preferred.
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
 

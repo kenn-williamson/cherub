@@ -215,7 +215,7 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
             let assistant_msg = self
                 .provider
                 .complete(
-                    &effective_system,
+                    effective_system,
                     &self.session.messages,
                     &self.tool_definitions,
                 )

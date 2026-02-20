@@ -3,6 +3,13 @@ pub mod pg_memory_store;
 pub mod pg_session_store;
 pub mod search;
 
+#[cfg(feature = "credentials")]
+pub mod credential_types;
+#[cfg(feature = "credentials")]
+pub(crate) mod crypto;
+#[cfg(feature = "credentials")]
+pub mod pg_credential_store;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use deadpool_postgres::{Config, Pool, Runtime};
@@ -263,6 +270,53 @@ pub trait MemoryStore: Send + Sync {
 
     /// Touch `last_referenced_at` for a recalled memory.
     async fn touch(&self, id: Uuid) -> Result<(), CherubError>;
+}
+
+// ─── Credential types + trait (M7a) ──────────────────────────────────────────
+
+#[cfg(feature = "credentials")]
+pub use credential_types::{
+    Credential, CredentialLocation, CredentialRef, DecryptedCredential, NewCredential,
+};
+
+/// Storage backend for the credential vault (M7a).
+///
+/// Implementations: `PgCredentialStore` (PostgreSQL, M7a).
+/// This is a true `dyn Trait` boundary — backend selected at runtime.
+#[cfg(feature = "credentials")]
+#[async_trait]
+pub trait CredentialStore: Send + Sync {
+    /// Store a new credential or update an existing one (upsert by name).
+    /// The plaintext value in `NewCredential.value` is encrypted before storage.
+    async fn store(&self, cred: NewCredential) -> Result<Uuid, CherubError>;
+
+    /// Retrieve the encrypted credential row. Does not decrypt.
+    async fn get(&self, user_id: &str, name: &str) -> Result<Credential, CherubError>;
+
+    /// Retrieve the agent-safe credential reference (no encrypted bytes).
+    async fn get_ref(&self, user_id: &str, name: &str) -> Result<CredentialRef, CherubError>;
+
+    /// List all credentials for a user (returns `CredentialRef` — no encrypted bytes).
+    async fn list(&self, user_id: &str) -> Result<Vec<CredentialRef>, CherubError>;
+
+    /// Delete a credential. Returns `Credential` error if not found.
+    async fn delete(&self, user_id: &str, name: &str) -> Result<(), CherubError>;
+
+    /// Check whether a credential exists for the user.
+    async fn exists(&self, user_id: &str, name: &str) -> Result<bool, CherubError>;
+
+    /// Decrypt an encrypted credential row into an ephemeral `DecryptedCredential`.
+    ///
+    /// The returned handle has no Clone/Display — only `credential_broker.rs`
+    /// calls `expose()` on it (the single broker injection point).
+    async fn decrypt(&self, cred: &Credential) -> Result<DecryptedCredential, CherubError>;
+
+    /// Update `last_used_at` and increment `usage_count` for a credential.
+    /// Called after successful injection. Fire-and-forget; failures are logged, not fatal.
+    async fn record_usage(&self, user_id: &str, name: &str) -> Result<(), CherubError>;
+
+    /// Check whether a credential has passed its `expires_at` timestamp.
+    async fn is_expired(&self, user_id: &str, name: &str) -> Result<bool, CherubError>;
 }
 
 /// Connect to PostgreSQL, run pending migrations, and return a connection pool.

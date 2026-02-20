@@ -23,6 +23,9 @@ sessions = ["postgres"]
 # memory: enforced memory tool — store/recall/search/update/forget memories across sessions.
 # Implies postgres. All memory operations pass through the enforcement pipeline.
 memory = ["postgres"]
+# credentials: encrypted credential vault + HTTP tool with broker injection (M7).
+# Implies postgres (vault storage). Requires CHERUB_MASTER_KEY env var at runtime.
+credentials = ["postgres", "dep:aes-gcm", "dep:hkdf", "dep:sha2", "dep:rand", "dep:url"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -53,6 +56,13 @@ refinery = { version = "0.9", features = ["tokio-postgres"], optional = true }
 chrono = { version = "0.4", features = ["serde"], optional = true }
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
+# Credentials feature dependencies (M7)
+aes-gcm = { version = "0.10", optional = true }
+hkdf = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true }
+rand = { version = "0.9", optional = true }
+url = { version = "2.5", optional = true }
+
 [[bin]]
 name = "cherub"
 path = "src/main.rs"
@@ -66,3 +76,4 @@ required-features = ["telegram"]
 trybuild = "1.0"
 testcontainers = { version = "0.26", features = ["reusable-containers"] }
 testcontainers-modules = "0.14"
+wiremock = "0.6"

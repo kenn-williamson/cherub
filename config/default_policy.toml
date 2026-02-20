@@ -129,6 +129,52 @@ patterns = [
     "^forget:",
 ]
 
+# ─── HTTP tool (M7b) ─────────────────────────────────────────────────────────
+#
+# The HTTP tool uses `match_source = "http_structured"` which extracts the
+# action string as `"{method}:{host}"` from params["action"] + params["url"].
+# This means patterns match the method AND host together.
+#
+# Tier assignment:
+#   Observe  — idempotent reads (GET, HEAD)
+#   Act      — state-changing writes (POST, PUT, PATCH)
+#   Commit   — deletions (DELETE)
+#
+# IMPORTANT: Only hosts explicitly listed here are permitted. Any request to
+# an unlisted host is rejected at the enforcement layer. Add allowlisted hosts
+# as needed.
+#
+# Example (uncomment to enable):
+#
+# [tools.http]
+# enabled = true
+# match_source = "http_structured"
+#
+# [tools.http.actions.api_read]
+# # Allow GET requests to approved API hosts.
+# tier = "observe"
+# patterns = [
+#     "^get:api\\.stripe\\.com$",
+#     "^get:api\\.github\\.com$",
+# ]
+#
+# [tools.http.actions.api_write]
+# # POST/PUT/PATCH to approved API hosts — requires Act tier (auto-allowed in CLI).
+# tier = "act"
+# patterns = [
+#     "^post:api\\.stripe\\.com$",
+#     "^put:api\\.stripe\\.com$",
+#     "^patch:api\\.stripe\\.com$",
+#     "^post:hooks\\.slack\\.com$",
+# ]
+#
+# [tools.http.actions.api_delete]
+# # DELETE requests — always require Commit tier (human approval in CLI).
+# tier = "commit"
+# patterns = [
+#     "^delete:api\\.stripe\\.com$",
+# ]
+
 # ─── Constraint operators ─────────────────────────────────────────────────────
 #
 #   eq          — exact match (string, number, bool)

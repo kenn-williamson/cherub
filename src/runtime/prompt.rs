@@ -54,20 +54,26 @@ pub fn format_memory_injection(memories: &[crate::storage::Memory]) -> String {
 /// Build the system prompt for the agent.
 ///
 /// Minimal prompt — no safety guardrails (enforcement layer handles that).
+/// Sections are appended based on which features are compiled in.
 pub fn build_system_prompt(cwd: &str) -> String {
-    let base = format!(
-        "You are a coding assistant with access to a bash tool for running commands.\n\
-         \n\
-         Current working directory: {cwd}\n\
-         \n\
-         Use the bash tool to run commands when the user asks you to interact with the system.\n\
-         Explain what you're doing and share relevant output with the user.\n\
-         If a command fails or is rejected, inform the user and suggest alternatives."
-    );
-
-    #[cfg(feature = "memory")]
+    // Build inside a block so `p` is always mut regardless of which features are
+    // enabled — avoids "unused_mut" warnings when neither memory nor credentials
+    // are compiled in.
     {
-        let memory_section = "\n\n\
+        #[allow(unused_mut)] // mut used by push_str when memory/credentials features are active
+        let mut p = format!(
+            "You are a coding assistant with access to a bash tool for running commands.\n\
+             \n\
+             Current working directory: {cwd}\n\
+             \n\
+             Use the bash tool to run commands when the user asks you to interact with the system.\n\
+             Explain what you're doing and share relevant output with the user.\n\
+             If a command fails or is rejected, inform the user and suggest alternatives."
+        );
+
+        #[cfg(feature = "memory")]
+        p.push_str(
+            "\n\n\
             ## Memory\n\
             \n\
             You have access to a memory tool for storing information across sessions.\n\
@@ -85,12 +91,29 @@ pub fn build_system_prompt(cwd: &str) -> String {
             Do NOT store sensitive credentials, secrets, or private data.\n\
             Do NOT modify agent-scope or identity memories without explicit user instruction.\n\
             Policy enforcement controls which operations are permitted — rejected operations\n\
-            will return 'action not permitted'.";
-        format!("{base}{memory_section}")
-    }
+            will return 'action not permitted'.",
+        );
 
-    #[cfg(not(feature = "memory"))]
-    base
+        #[cfg(feature = "credentials")]
+        p.push_str(
+            "\n\n\
+            ## HTTP Tool and Credentials\n\
+            \n\
+            You have access to an HTTP tool for calling external APIs.\n\
+            \n\
+            **Usage**: specify `action` (get/post/put/patch/delete), `url`, optional `headers`,\n\
+            optional `body`, and optional `credential` (name of a stored credential).\n\
+            \n\
+            **Credentials**: reference stored credentials by name only — you never see their\n\
+            values. The runtime injects the credential into the HTTP request at execution time.\n\
+            Specify the credential name in the `credential` field; the value is never revealed.\n\
+            \n\
+            Policy enforcement controls which hosts and methods are permitted.\n\
+            Requests to hosts not in the policy will be rejected.",
+        );
+
+        p
+    }
 }
 
 #[cfg(test)]

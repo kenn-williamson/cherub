@@ -26,6 +26,8 @@ struct PolicyFile {
 enum MatchSourceValue {
     Command,
     Structured,
+    /// For the `http` tool: extracts `"{method}:{host}"` from params.
+    HttpStructured,
 }
 
 impl From<MatchSourceValue> for MatchSource {
@@ -33,6 +35,7 @@ impl From<MatchSourceValue> for MatchSource {
         match v {
             MatchSourceValue::Command => MatchSource::Command,
             MatchSourceValue::Structured => MatchSource::Structured,
+            MatchSourceValue::HttpStructured => MatchSource::HttpStructured,
         }
     }
 }

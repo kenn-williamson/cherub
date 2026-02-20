@@ -26,4 +26,15 @@ pub enum CherubError {
     #[cfg(feature = "postgres")]
     #[error("storage error: {0}")]
     Storage(String),
+
+    /// Credential vault errors (M7a). Phrasing is always generic — never exposes
+    /// key material, pattern details, or anything that could help an attacker.
+    #[cfg(feature = "credentials")]
+    #[error("credential error: {0}")]
+    Credential(String),
+
+    /// HTTP tool errors (M7b). Request-level failures that don't involve credentials.
+    #[cfg(feature = "credentials")]
+    #[error("http tool error: {0}")]
+    Http(String),
 }

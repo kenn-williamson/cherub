@@ -19,8 +19,44 @@ const DEFAULT_POLICY_PATH: &str = "config/default_policy.toml";
 const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
-fn parse_args() -> (PathBuf, String) {
+// ─── CLI argument parsing ─────────────────────────────────────────────────────
+
+/// Top-level command parsed from `std::env::args()`.
+enum Command {
+    /// Run the interactive agent REPL.
+    Agent { policy_path: PathBuf, model: String },
+    /// Credential vault management (M7a).
+    #[cfg(feature = "credentials")]
+    Credential(CredentialSubcommand),
+}
+
+#[cfg(feature = "credentials")]
+enum CredentialSubcommand {
+    /// Store or update a credential (reads value from stdin).
+    Store {
+        name: String,
+        provider: Option<String>,
+        host_patterns: Vec<String>,
+        capabilities: Vec<String>,
+        location: cherub::storage::CredentialLocation,
+        expires_days: Option<u64>,
+    },
+    /// List all credentials for the current user.
+    List,
+    /// Delete a named credential.
+    Delete { name: String },
+}
+
+fn parse_args() -> Result<Command> {
     let args: Vec<String> = std::env::args().collect();
+
+    // Check for credential subcommand before agent args.
+    #[cfg(feature = "credentials")]
+    if args.get(1).map(|s| s.as_str()) == Some("credential") {
+        return parse_credential_args(&args[2..]);
+    }
+
+    // Default: agent REPL.
     let mut policy_path = PathBuf::from(DEFAULT_POLICY_PATH);
     let mut model = DEFAULT_MODEL.to_owned();
 
@@ -44,23 +80,229 @@ fn parse_args() -> (PathBuf, String) {
         i += 1;
     }
 
-    (policy_path, model)
+    Ok(Command::Agent { policy_path, model })
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    dotenvy::dotenv().ok();
+#[cfg(feature = "credentials")]
+fn parse_credential_args(args: &[String]) -> Result<Command> {
+    use cherub::storage::CredentialLocation;
 
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "cherub=info".into()))
-        .init();
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("");
+    match sub {
+        "store" => {
+            let name = args
+                .get(1)
+                .cloned()
+                .context("usage: cherub credential store <name> [--provider <p>] [--host-patterns <h,...>] [--capabilities <c,...>] [--expires-days <n>] [--location bearer|header:<name>|query:<name>]")?;
 
-    let (policy_path, model) = parse_args();
+            let mut provider = None;
+            let mut host_patterns = Vec::new();
+            let mut capabilities = Vec::new();
+            let mut expires_days: Option<u64> = None;
+            let mut location = CredentialLocation::AuthorizationBearer;
 
-    // Derive user identity from the OS username.
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--provider" => {
+                        i += 1;
+                        provider = args.get(i).cloned();
+                    }
+                    "--host-patterns" => {
+                        i += 1;
+                        if let Some(v) = args.get(i) {
+                            host_patterns = v.split(',').map(|s| s.trim().to_owned()).collect();
+                        }
+                    }
+                    "--capabilities" => {
+                        i += 1;
+                        if let Some(v) = args.get(i) {
+                            capabilities = v.split(',').map(|s| s.trim().to_owned()).collect();
+                        }
+                    }
+                    "--expires-days" => {
+                        i += 1;
+                        if let Some(v) = args.get(i) {
+                            expires_days =
+                                Some(v.parse().context("--expires-days must be a number")?);
+                        }
+                    }
+                    "--location" => {
+                        i += 1;
+                        if let Some(v) = args.get(i) {
+                            location = parse_location(v)?;
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+
+            Ok(Command::Credential(CredentialSubcommand::Store {
+                name,
+                provider,
+                host_patterns,
+                capabilities,
+                location,
+                expires_days,
+            }))
+        }
+        "list" => Ok(Command::Credential(CredentialSubcommand::List)),
+        "delete" => {
+            let name = args
+                .get(1)
+                .cloned()
+                .context("usage: cherub credential delete <name>")?;
+            Ok(Command::Credential(CredentialSubcommand::Delete { name }))
+        }
+        _ => bail!(
+            "unknown credential subcommand '{}'. Available: store, list, delete",
+            sub
+        ),
+    }
+}
+
+#[cfg(feature = "credentials")]
+fn parse_location(s: &str) -> Result<cherub::storage::CredentialLocation> {
+    use cherub::storage::CredentialLocation;
+    if s == "bearer" {
+        Ok(CredentialLocation::AuthorizationBearer)
+    } else if let Some(name) = s.strip_prefix("header:") {
+        Ok(CredentialLocation::Header {
+            name: name.to_owned(),
+            prefix: None,
+        })
+    } else if let Some(name) = s.strip_prefix("query:") {
+        Ok(CredentialLocation::QueryParam {
+            name: name.to_owned(),
+        })
+    } else {
+        bail!(
+            "unknown location '{}'. Use: bearer | header:<name> | query:<name>",
+            s
+        )
+    }
+}
+
+// ─── Credential subcommand handlers ──────────────────────────────────────────
+
+#[cfg(feature = "credentials")]
+async fn run_credential_command(sub: CredentialSubcommand) -> Result<()> {
+    use std::io::{self, BufRead, Write};
+
+    use cherub::storage::pg_credential_store::PgCredentialStore;
+    use cherub::storage::{CredentialStore, NewCredential};
+    use std::sync::Arc;
+
+    let db_url = std::env::var("DATABASE_URL")
+        .context("DATABASE_URL must be set for credential management")?;
+    let master_key_raw = std::env::var("CHERUB_MASTER_KEY")
+        .context("CHERUB_MASTER_KEY must be set for credential management")?;
     let user_id = std::env::var("USER").unwrap_or_else(|_| "local".to_owned());
 
-    // Load API key
+    let pool = cherub::storage::connect(SecretString::from(db_url))
+        .await
+        .context("failed to connect to PostgreSQL")?;
+
+    let store = Arc::new(
+        PgCredentialStore::new(pool, SecretString::from(master_key_raw))
+            .context("failed to initialize credential store — check CHERUB_MASTER_KEY")?,
+    );
+
+    match sub {
+        CredentialSubcommand::Store {
+            name,
+            provider,
+            host_patterns,
+            capabilities,
+            location,
+            expires_days,
+        } => {
+            print!("Enter credential value for '{name}': ");
+            io::stdout().flush()?;
+            let mut value = String::new();
+            io::stdin().lock().read_line(&mut value)?;
+            let value = value.trim().to_owned();
+            if value.is_empty() {
+                bail!("credential value cannot be empty");
+            }
+
+            let expires_at =
+                expires_days.map(|days| chrono::Utc::now() + chrono::Duration::days(days as i64));
+
+            let id = store
+                .store(NewCredential {
+                    user_id: user_id.clone(),
+                    name: name.clone(),
+                    value,
+                    provider: provider.clone(),
+                    capabilities: capabilities.clone(),
+                    host_patterns: host_patterns.clone(),
+                    location,
+                    expires_at,
+                })
+                .await
+                .context("failed to store credential")?;
+
+            println!("Stored credential '{name}' (id: {id}).");
+            if !host_patterns.is_empty() {
+                println!("  host patterns: {}", host_patterns.join(", "));
+            }
+            if !capabilities.is_empty() {
+                println!("  capabilities: {}", capabilities.join(", "));
+            }
+            if let Some(p) = provider {
+                println!("  provider: {p}");
+            }
+        }
+
+        CredentialSubcommand::List => {
+            let refs = store
+                .list(&user_id)
+                .await
+                .context("failed to list credentials")?;
+            if refs.is_empty() {
+                println!("No credentials stored for user '{user_id}'.");
+            } else {
+                println!("Credentials for '{user_id}':");
+                for r in &refs {
+                    let provider_str = r.provider.as_deref().unwrap_or("-");
+                    let caps = if r.capabilities.is_empty() {
+                        "any".to_owned()
+                    } else {
+                        r.capabilities.join(", ")
+                    };
+                    let hosts = if r.host_patterns.is_empty() {
+                        "any".to_owned()
+                    } else {
+                        r.host_patterns.join(", ")
+                    };
+                    println!(
+                        "  {:<30} provider={provider_str}  caps=[{caps}]  hosts=[{hosts}]",
+                        r.name
+                    );
+                }
+            }
+        }
+
+        CredentialSubcommand::Delete { name } => {
+            store
+                .delete(&user_id, &name)
+                .await
+                .context(format!("failed to delete credential '{name}'"))?;
+            println!("Deleted credential '{name}'.");
+        }
+    }
+
+    Ok(())
+}
+
+// ─── Agent REPL ───────────────────────────────────────────────────────────────
+
+async fn run_agent(policy_path: PathBuf, model: String) -> Result<()> {
+    let user_id = std::env::var("USER").unwrap_or_else(|_| "local".to_owned());
+
+    // Load API key.
     let api_key_raw = std::env::var("ANTHROPIC_API_KEY")
         .context("ANTHROPIC_API_KEY environment variable not set")?;
     if api_key_raw.is_empty() {
@@ -68,13 +310,12 @@ async fn main() -> Result<()> {
     }
     let api_key = SecretString::from(api_key_raw);
 
-    // Load policy
+    // Load policy.
     let policy = Policy::load(&policy_path).map_err(|e| {
         anyhow::anyhow!("failed to load policy from {}: {e}", policy_path.display())
     })?;
     info!(policy = %policy_path.display(), "policy loaded");
 
-    // Build components
     let provider = AnthropicProvider::new(api_key, &model, DEFAULT_MAX_TOKENS)
         .map_err(|e| anyhow::anyhow!("failed to create provider: {e}"))?;
 
@@ -82,8 +323,8 @@ async fn main() -> Result<()> {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| ".".to_owned());
 
-    // Connect to PostgreSQL if DATABASE_URL is set (needed for sessions and/or memory).
-    #[cfg(any(feature = "sessions", feature = "memory"))]
+    // Connect to PostgreSQL if DATABASE_URL is set (needed for sessions, memory, or credentials).
+    #[cfg(any(feature = "sessions", feature = "memory", feature = "credentials"))]
     let db_pool = {
         match std::env::var("DATABASE_URL") {
             Ok(db_url_raw) => {
@@ -101,15 +342,13 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Build ToolRegistry — attach memory store if the feature is enabled and DB is available.
-    // The store is Arc so it can be shared between the tool registry and injection.
+    // Build ToolRegistry — attach memory store if available.
     #[cfg(feature = "memory")]
     let (registry, memory_store_for_injection) = {
         if let Some(ref pool) = db_pool {
             use cherub::storage::pg_memory_store::PgMemoryStore;
             use std::sync::Arc;
 
-            // If OPENAI_API_KEY is set, enable hybrid search; otherwise FTS-only.
             let store: Arc<dyn cherub::storage::MemoryStore> = match std::env::var("OPENAI_API_KEY")
             {
                 Ok(key_raw) if !key_raw.is_empty() => {
@@ -142,6 +381,35 @@ async fn main() -> Result<()> {
     };
     #[cfg(not(feature = "memory"))]
     let registry = ToolRegistry::new();
+
+    // Attach credential broker + HTTP tool if credentials feature is active.
+    #[cfg(feature = "credentials")]
+    let registry = {
+        use cherub::storage::pg_credential_store::PgCredentialStore;
+        use cherub::tools::credential_broker::CredentialBroker;
+        use std::sync::Arc;
+
+        match (std::env::var("CHERUB_MASTER_KEY"), &db_pool) {
+            (Ok(key_raw), Some(pool)) if !key_raw.is_empty() => {
+                match PgCredentialStore::new(pool.clone(), SecretString::from(key_raw)) {
+                    Ok(store) => {
+                        let cred_store: Arc<dyn cherub::storage::CredentialStore> = Arc::new(store);
+                        let broker = Arc::new(CredentialBroker::new(cred_store));
+                        info!("credential broker configured (HTTP tool enabled)");
+                        registry.with_credentials(broker)
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "credential store init failed, HTTP tool disabled");
+                        registry
+                    }
+                }
+            }
+            _ => {
+                info!("CHERUB_MASTER_KEY not set or DB unavailable, HTTP tool disabled");
+                registry
+            }
+        }
+    };
 
     let system_prompt = build_system_prompt(&cwd);
 
@@ -193,7 +461,6 @@ async fn main() -> Result<()> {
     println!("cherub: secure agent runtime (model: {model})");
     println!("Type a message, Ctrl-D to exit, Ctrl-C to cancel input.\n");
 
-    // REPL
     let mut rl = DefaultEditor::new().context("failed to init readline")?;
 
     loop {
@@ -224,4 +491,21 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+// ─── Entry point ─────────────────────────────────────────────────────────────
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
+
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "cherub=info".into()))
+        .init();
+
+    match parse_args()? {
+        Command::Agent { policy_path, model } => run_agent(policy_path, model).await,
+        #[cfg(feature = "credentials")]
+        Command::Credential(sub) => run_credential_command(sub).await,
+    }
 }

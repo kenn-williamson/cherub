@@ -34,20 +34,27 @@ cherub/
 │   ├── tools/
 │   │   ├── mod.rs            # Tool trait, ToolRegistry, ToolImpl enum dispatch, ToolContext
 │   │   ├── bash.rs           # Bash execution tool (tokio::process::Command)
-│   │   └── memory.rs         # Memory tool: store/recall/search/update/forget (feature = "memory")
+│   │   ├── memory.rs         # Memory tool: store/recall/search/update/forget (feature = "memory")
+│   │   ├── http.rs           # HTTP tool: GET/POST/PUT/PATCH/DELETE with broker injection (feature = "credentials")
+│   │   ├── credential_broker.rs  # CredentialBroker: name → inject into reqwest::RequestBuilder (feature = "credentials")
+│   │   └── leak_detector.rs  # Per-request secret scanner: redacts values from response bodies (feature = "credentials")
 │   ├── providers/
 │   │   ├── mod.rs            # Provider trait, Message/UserContent/ContentBlock types (serde + Clone)
 │   │   ├── anthropic.rs      # Anthropic API provider (non-streaming)
 │   │   └── wire.rs           # Serde structs for Anthropic API JSON (private, supports images)
 │   ├── storage/              # Feature-gated: #[cfg(feature = "postgres")]
-│   │   ├── mod.rs            # SessionStore + MemoryStore traits, connect(), migration runner
+│   │   ├── mod.rs            # SessionStore + MemoryStore + CredentialStore traits, connect(), migration runner
 │   │   ├── embedding.rs      # EmbeddingProvider trait + OpenAiEmbeddingProvider (M6c)
 │   │   ├── search.rs         # Reciprocal Rank Fusion algorithm (M6c, pure/no-DB)
 │   │   ├── pg_session_store.rs  # PgSessionStore: PostgreSQL SessionStore impl
 │   │   ├── pg_memory_store.rs   # PgMemoryStore: PostgreSQL MemoryStore impl (feature = "memory")
+│   │   ├── crypto.rs         # AES-256-GCM + HKDF-SHA256 per-secret encryption (feature = "credentials")
+│   │   ├── credential_types.rs  # Credential/CredentialRef/DecryptedCredential/CredentialLocation (feature = "credentials")
+│   │   ├── pg_credential_store.rs  # PgCredentialStore: PostgreSQL CredentialStore impl (feature = "credentials")
 │   │   └── migrations/
 │   │       ├── V1__initial_schema.sql  # Sessions + messages + memory schema (UUIDv7, scope column)
-│   │       └── V2__vector_indexes.sql  # HNSW indexes for embedding columns (M6c)
+│   │       ├── V2__vector_indexes.sql  # HNSW indexes for embedding columns (M6c)
+│   │       └── V3__credentials.sql     # Encrypted credential vault table (M7a)
 │   └── telegram/             # Feature-gated: #[cfg(feature = "telegram")]
 │       ├── mod.rs             # Module declarations
 │       ├── approval.rs        # TelegramApprovalGate (inline keyboard + oneshot channels)
@@ -241,7 +248,7 @@ These enforce Cherub-specific guarantees the compiler alone can't catch.
 - **CapabilityToken audit rule** — Before any PR/commit, `grep` for `CapabilityToken` and verify: no `pub fn new`, no `Default`, no `From`, no `Clone`, no `Copy`. Only `enforcement/` creates tokens.
 - **Single enforcement path** — Every tool's `execute()` function signature must require a `CapabilityToken` parameter. If a tool function compiles without one, it's a bug.
 - **Policy opacity** — No enforcement error message may contain: rule names, pattern text, tier names, or any string from the policy file. Rejection is always `"action not permitted"`.
-- **Credential isolation** — `secrecy::SecretString` for all credential values. `grep expose_secret` must only appear at the single broker point for each credential type (one call site per credential: DB URL in `storage/mod.rs`, API key in `providers/anthropic.rs`, embedding key in `storage/embedding.rs`). If it appears in general-purpose code, it's a bug.
+- **Credential isolation** — `secrecy::SecretString` for all credential values. `grep expose_secret` must only appear at these six call sites: (1) DB URL in `storage/mod.rs`, (2) API key in `providers/anthropic.rs`, (3) embedding key in `storage/embedding.rs`, (4) agent credential injection in `storage/credential_types.rs::DecryptedCredential::expose()` (called only from `tools/credential_broker.rs`), (5) master key hex-validation in `storage/crypto.rs::CredentialCrypto::new()`, (6) master key HKDF input in `storage/crypto.rs::CredentialCrypto::derive_key()`. If it appears anywhere else, it's a bug.
 - **No `unsafe`** — Zero `unsafe` blocks unless documented with a `// SAFETY:` comment explaining why it's necessary and what invariant the developer is upholding.
 
 ### Idiomatic Rust Rules (LLM Anti-Pattern Watchlist)
@@ -268,7 +275,7 @@ Best practices for the specific crates in use.
 - **`tracing`** — Use structured fields (`tracing::info!(tool = %name, decision = %result)`), not string interpolation. Every enforcement decision gets a span. Every tool execution gets a span.
 - **`reqwest`** — Always set `connect_timeout(10s)`, `read_timeout(30s)`, `timeout(120s)`. Use `reqwest-eventsource` for SSE streaming from LLM providers.
 - **`tokio`** — Use `tokio::process::Command` with `.kill_on_drop(true)`. Wrap all child process execution in `tokio::time::timeout()`. Use `.arg()` arrays, never shell string concatenation (even though we're executing bash — the command string goes as a single arg to `bash -c`).
-- **`secrecy`** — Wrap all credential values in `SecretString`. The `Debug` impl auto-redacts. `expose_secret()` only at the single broker point for each credential type (not in general-purpose code).
+- **`secrecy`** — Wrap all credential values in `SecretString`. The `Debug` impl auto-redacts. `expose_secret()` only at the six documented call sites: DB URL, API key, embedding key, credential broker, and the two crypto.rs master-key sites (hex validation + HKDF IKM). Not in general-purpose code.
 - **`toml`** — Enforce file size limit before parsing. Strongly typed deserialization into Rust structs with `#[serde(deny_unknown_fields)]`.
 
 ## Build and Run

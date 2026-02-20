@@ -162,15 +162,37 @@ Everything else — connectors, credential brokering, audit logging, IPC plugins
 
 ---
 
-## Milestone 7: Credential Broker
+## Milestone 7: Credential Broker ✓
 
 **Goal:** The agent can reference credentials by name. Actual values are injected at execution time, outside the agent's context.
 
-- [ ] Credential vault: encrypted store in PostgreSQL (AES-256-GCM, per-secret key derivation via HKDF)
-- [ ] Agent sees: `credential:stripe_api` (a name, not a value)
-- [ ] HTTP tool: makes API calls with credential injection
-- [ ] Enforcement layer validates credential scope: `stripe_api` with capability `["read"]` cannot be used for a POST to `/payments`
-- [ ] Credential values never appear in: session history, model context, logs, memory store
+### M7a: Credential Vault (complete)
+- [x] Encrypted credential storage in PostgreSQL (AES-256-GCM + HKDF-SHA256 per-secret key derivation)
+- [x] `CredentialStore` trait with `PgCredentialStore` implementation
+- [x] Master key from `CHERUB_MASTER_KEY` env var (32+ bytes, hex-encoded)
+- [x] CLI: `cherub credential store/list/delete` subcommands
+- [x] Unit tests: encrypt/decrypt roundtrip, salt uniqueness, tamper detection, key validation
+
+### M7b: HTTP Tool + Credential Injection (complete)
+- [x] `HttpTool` with configured timeouts (connect 10s, read 30s, total 120s)
+- [x] `CredentialBroker`: resolves name → validates host+capability → decrypts → injects
+- [x] `HttpStructured` match source: extracts `"{method}:{host}"` from params
+- [x] Policy gating: `http_structured` match source in policy; by default HTTP is disabled
+- [x] Defense in depth: policy gates the action; broker re-validates host + capability scope
+- [x] Agent sees credential name only — value is injected at the execution boundary
+
+### M7c: Leak Prevention (complete)
+- [x] `LeakDetector`: per-request scanner, registered with decrypted values
+- [x] Response body scanned before being returned to session history
+- [x] Error messages scanned before being logged
+- [x] `DecryptedCredential`: no Clone, no Display; `expose()` is `pub(crate)` only
+- [x] `expose_secret()` appears exactly once in the broker (the 4th call site in the codebase)
+
+### M7d: Polish + Documentation (complete)
+- [x] `config/default_policy.toml`: HTTP tool section with examples and comments
+- [x] `ROADMAP.md`: M7 documented
+- [x] `CLAUDE.md`: credential isolation rules updated for 4th expose_secret() site
+- [x] `tests/adversarial.rs`: HTTP enforcement adversarial tests
 
 ---
 
