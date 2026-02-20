@@ -1,6 +1,6 @@
 # Secure Agent Runtime — Design Document
 
-**Status:** Draft — Milestone 7 Complete (Credential Broker: AES-256-GCM vault, HTTP tool with runtime injection, leak detection), Plugin Architecture revised (tiered sandbox model)
+**Status:** Draft — Milestone 8 Complete (WASM sandbox: Wasmtime component model, WIT host functions, capability TOML sidecars, BLAKE3 loader, 7-layer defense-in-depth)
 **Author:** Kenn Williamson  
 **Date:** February 2026
 

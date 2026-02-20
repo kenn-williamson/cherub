@@ -200,16 +200,16 @@ Everything else — connectors, credential brokering, audit logging, IPC plugins
 
 **Goal:** Untrusted tools run in WASM sandboxes with host-mediated I/O. The enforcement layer gates entry; the sandbox constrains execution.
 
-- [ ] Wasmtime integration: compile, instantiate, and execute WASM modules
-- [ ] Host functions: `workspace_read`, `http_request`, `secret_exists`, `log`, `now_millis`
-- [ ] Capability declaration: per-tool manifest (allowlisted endpoints, path prefixes, credential names)
-- [ ] Credential injection at host boundary (tool never sees secret values)
-- [ ] Resource limits: fuel metering (CPU), memory cap, execution timeout
-- [ ] Leak detection: scan HTTP responses and tool output for secret exfiltration
-- [ ] Fresh WASM instance per execution (no shared state between invocations)
-- [ ] Tool loader: discover WASM tools from a configured directory, validate with BLAKE3 hash
-- [ ] Write a WASM tool (HTTP/API tool) to validate the sandbox works end-to-end
-- [ ] Enforcement layer gates WASM tools identically to in-process tools (same CapabilityToken requirement)
+- [x] Wasmtime integration: compile, instantiate, and execute WASM modules
+- [x] Host functions: `workspace_read`, `http_request`, `secret_exists`, `log`, `now_millis`
+- [x] Capability declaration: per-tool manifest (allowlisted endpoints, path prefixes, credential names)
+- [x] Credential injection at host boundary (tool never sees secret values)
+- [x] Resource limits: fuel metering (CPU), memory cap, execution timeout
+- [x] Leak detection: scan HTTP responses and tool output for secret exfiltration
+- [x] Fresh WASM instance per execution (no shared state between invocations)
+- [x] Tool loader: discover WASM tools from a configured directory, validate with BLAKE3 hash
+- [x] Write a WASM tool (HTTP/API tool) to validate the sandbox works end-to-end
+- [x] Enforcement layer gates WASM tools identically to in-process tools (same CapabilityToken requirement)
 
 ---
 

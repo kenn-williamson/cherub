@@ -37,4 +37,10 @@ pub enum CherubError {
     #[cfg(feature = "credentials")]
     #[error("http tool error: {0}")]
     Http(String),
+
+    /// WASM sandbox errors (M8). Compilation, instantiation, or execution failures.
+    /// Never contains credential values or policy details.
+    #[cfg(feature = "wasm")]
+    #[error("wasm error: {0}")]
+    Wasm(String),
 }

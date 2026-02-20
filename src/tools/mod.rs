@@ -7,6 +7,8 @@ pub mod http;
 pub(crate) mod leak_detector;
 #[cfg(feature = "memory")]
 pub mod memory;
+#[cfg(feature = "wasm")]
+pub mod wasm;
 
 use std::marker::PhantomData;
 
@@ -22,6 +24,8 @@ use bash::BashTool;
 use http::HttpTool;
 #[cfg(feature = "memory")]
 use memory::MemoryTool;
+#[cfg(feature = "wasm")]
+use wasm::WasmTool;
 
 /// Typestate: tool invocation parsed from model output, not yet evaluated.
 pub struct Proposed;
@@ -92,13 +96,15 @@ pub struct ToolResult {
 }
 
 /// Enum dispatch for tool implementations. Known variants at compile time.
-/// `dyn Tool` deferred to M8/M9 plugin IPC.
+/// `dyn Tool` deferred to M9 container IPC.
 pub(crate) enum ToolImpl {
     Bash(BashTool),
     #[cfg(feature = "memory")]
     Memory(MemoryTool),
     #[cfg(feature = "credentials")]
     Http(HttpTool),
+    #[cfg(feature = "wasm")]
+    Wasm(WasmTool),
 }
 
 impl ToolImpl {
@@ -109,6 +115,8 @@ impl ToolImpl {
             Self::Memory(_) => "memory",
             #[cfg(feature = "credentials")]
             Self::Http(_) => "http",
+            #[cfg(feature = "wasm")]
+            Self::Wasm(t) => t.name(),
         }
     }
 
@@ -126,6 +134,8 @@ impl ToolImpl {
             Self::Memory(tool) => tool.execute(params, token, _ctx).await,
             #[cfg(feature = "credentials")]
             Self::Http(tool) => tool.execute(params, token, _ctx).await,
+            #[cfg(feature = "wasm")]
+            Self::Wasm(tool) => tool.execute(params, token, &_ctx.user_id).await,
         }
     }
 
@@ -211,6 +221,15 @@ impl ToolImpl {
             },
             #[cfg(feature = "credentials")]
             Self::Http(_) => http::http_tool_definition(),
+            #[cfg(feature = "wasm")]
+            Self::Wasm(t) => {
+                let m = &t.module;
+                ToolDefinition {
+                    name: m.name.clone(),
+                    description: m.description.clone(),
+                    input_schema: m.schema.clone(),
+                }
+            }
         }
     }
 }
@@ -249,6 +268,15 @@ impl ToolRegistry {
         broker: std::sync::Arc<credential_broker::CredentialBroker>,
     ) -> Self {
         self.tools.push(ToolImpl::Http(HttpTool::new(broker)));
+        self
+    }
+
+    /// Append WASM tools to the registry (builder pattern).
+    ///
+    /// Call after `new()`, `with_memory()`, or `with_credentials()`.
+    #[cfg(feature = "wasm")]
+    pub fn with_wasm(mut self, tools: Vec<WasmTool>) -> Self {
+        self.tools.extend(tools.into_iter().map(ToolImpl::Wasm));
         self
     }
 

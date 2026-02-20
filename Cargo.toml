@@ -26,6 +26,10 @@ memory = ["postgres"]
 # credentials: encrypted credential vault + HTTP tool with broker injection (M7).
 # Implies postgres (vault storage). Requires CHERUB_MASTER_KEY env var at runtime.
 credentials = ["postgres", "dep:aes-gcm", "dep:hkdf", "dep:sha2", "dep:rand", "dep:url"]
+# wasm: WASM sandbox for untrusted tool execution (M8).
+# Independent feature — does not imply postgres or credentials.
+# Credential injection is available when `credentials` is also enabled.
+wasm = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:blake3", "dep:url"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -62,6 +66,11 @@ hkdf = { version = "0.12", optional = true }
 sha2 = { version = "0.10", optional = true }
 rand = { version = "0.9", optional = true }
 url = { version = "2.5", optional = true }
+
+# WASM sandbox feature dependencies (M8)
+wasmtime = { version = "41", features = ["component-model"], optional = true }
+wasmtime-wasi = { version = "41", optional = true }
+blake3 = { version = "1.8", optional = true }
 
 [[bin]]
 name = "cherub"

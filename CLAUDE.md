@@ -37,7 +37,15 @@ cherub/
 │   │   ├── memory.rs         # Memory tool: store/recall/search/update/forget (feature = "memory")
 │   │   ├── http.rs           # HTTP tool: GET/POST/PUT/PATCH/DELETE with broker injection (feature = "credentials")
 │   │   ├── credential_broker.rs  # CredentialBroker: name → inject into reqwest::RequestBuilder (feature = "credentials")
-│   │   └── leak_detector.rs  # Per-request secret scanner: redacts values from response bodies (feature = "credentials")
+│   │   ├── leak_detector.rs  # Per-request secret scanner: redacts values from response bodies (feature = "credentials")
+│   │   └── wasm/             # Feature-gated: #[cfg(feature = "wasm")]
+│   │       ├── mod.rs        # Module declarations, 7-layer defense-in-depth doc
+│   │       ├── capabilities.rs  # Capabilities struct: workspace/http/secrets, parsed from TOML sidecar
+│   │       ├── limits.rs     # ResourceLimits (fuel/memory/timeout), WasmResourceLimiter impl
+│   │       ├── runtime.rs    # WasmToolRuntime: Engine config, epoch ticker, PreparedModule
+│   │       ├── host.rs       # HostState: log/now_millis/workspace_read/check_http_request host fns
+│   │       ├── wrapper.rs    # bindgen! bindings, StoreData, WasmTool, execute_in_sandbox
+│   │       └── loader.rs     # load_from_dir/load_one: directory scan, BLAKE3 hash, compilation
 │   ├── providers/
 │   │   ├── mod.rs            # Provider trait, Message/UserContent/ContentBlock types (serde + Clone)
 │   │   ├── anthropic.rs      # Anthropic API provider (non-streaming)

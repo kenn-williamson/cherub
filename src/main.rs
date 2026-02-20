@@ -24,7 +24,13 @@ const DEFAULT_MAX_TOKENS: u32 = 4096;
 /// Top-level command parsed from `std::env::args()`.
 enum Command {
     /// Run the interactive agent REPL.
-    Agent { policy_path: PathBuf, model: String },
+    Agent {
+        policy_path: PathBuf,
+        model: String,
+        /// Optional directory of WASM tools to load (M8).
+        #[cfg(feature = "wasm")]
+        wasm_tools_dir: Option<PathBuf>,
+    },
     /// Credential vault management (M7a).
     #[cfg(feature = "credentials")]
     Credential(CredentialSubcommand),
@@ -59,6 +65,8 @@ fn parse_args() -> Result<Command> {
     // Default: agent REPL.
     let mut policy_path = PathBuf::from(DEFAULT_POLICY_PATH);
     let mut model = DEFAULT_MODEL.to_owned();
+    #[cfg(feature = "wasm")]
+    let mut wasm_tools_dir: Option<PathBuf> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -75,12 +83,24 @@ fn parse_args() -> Result<Command> {
                     model = args[i].clone();
                 }
             }
+            #[cfg(feature = "wasm")]
+            "--wasm-tools-dir" => {
+                i += 1;
+                if i < args.len() {
+                    wasm_tools_dir = Some(PathBuf::from(&args[i]));
+                }
+            }
             _ => {}
         }
         i += 1;
     }
 
-    Ok(Command::Agent { policy_path, model })
+    Ok(Command::Agent {
+        policy_path,
+        model,
+        #[cfg(feature = "wasm")]
+        wasm_tools_dir,
+    })
 }
 
 #[cfg(feature = "credentials")]
@@ -299,7 +319,11 @@ async fn run_credential_command(sub: CredentialSubcommand) -> Result<()> {
 
 // ─── Agent REPL ───────────────────────────────────────────────────────────────
 
-async fn run_agent(policy_path: PathBuf, model: String) -> Result<()> {
+async fn run_agent(
+    policy_path: PathBuf,
+    model: String,
+    #[cfg(feature = "wasm")] wasm_tools_dir: Option<PathBuf>,
+) -> Result<()> {
     let user_id = std::env::var("USER").unwrap_or_else(|_| "local".to_owned());
 
     // Load API key.
@@ -411,6 +435,48 @@ async fn run_agent(policy_path: PathBuf, model: String) -> Result<()> {
         }
     };
 
+    // Load WASM tools if a directory was specified (M8).
+    #[cfg(feature = "wasm")]
+    let registry = {
+        use cherub::tools::wasm::{WasmToolRuntime, load_from_dir};
+        use std::sync::Arc;
+
+        if let Some(ref dir) = wasm_tools_dir {
+            match WasmToolRuntime::new() {
+                Ok(runtime) => {
+                    let rt = Arc::new(runtime);
+                    let result = load_from_dir(
+                        dir,
+                        rt,
+                        None,
+                        #[cfg(feature = "credentials")]
+                        None, // broker wiring deferred to M8c full integration
+                    )
+                    .await;
+                    for err in &result.errors {
+                        eprintln!("[warn] WASM tool load error: {err}");
+                    }
+                    if !result.tools.is_empty() {
+                        info!(
+                            count = result.tools.len(),
+                            dir = %dir.display(),
+                            "WASM tools loaded"
+                        );
+                        registry.with_wasm(result.tools)
+                    } else {
+                        registry
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[warn] WASM runtime init failed: {e}");
+                    registry
+                }
+            }
+        } else {
+            registry
+        }
+    };
+
     let system_prompt = build_system_prompt(&cwd);
 
     let approval_gate = CliApprovalGate::new();
@@ -504,7 +570,20 @@ async fn main() -> Result<()> {
         .init();
 
     match parse_args()? {
-        Command::Agent { policy_path, model } => run_agent(policy_path, model).await,
+        Command::Agent {
+            policy_path,
+            model,
+            #[cfg(feature = "wasm")]
+            wasm_tools_dir,
+        } => {
+            run_agent(
+                policy_path,
+                model,
+                #[cfg(feature = "wasm")]
+                wasm_tools_dir,
+            )
+            .await
+        }
         #[cfg(feature = "credentials")]
         Command::Credential(sub) => run_credential_command(sub).await,
     }

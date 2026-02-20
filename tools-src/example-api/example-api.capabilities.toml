@@ -1,0 +1,9 @@
+# Capabilities for the example-api WASM tool.
+#
+# This tool only needs HTTP access to a single public API.
+# No credentials, no workspace access, no secrets.
+
+[http]
+allowed_hosts = ["jsonplaceholder.typicode.com"]
+credentials = []
+max_requests = 20
