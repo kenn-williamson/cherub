@@ -38,14 +38,22 @@ cherub/
 │   │   ├── http.rs           # HTTP tool: GET/POST/PUT/PATCH/DELETE with broker injection (feature = "credentials")
 │   │   ├── credential_broker.rs  # CredentialBroker: name → inject into reqwest::RequestBuilder (feature = "credentials")
 │   │   ├── leak_detector.rs  # Per-request secret scanner: redacts values from response bodies (feature = "credentials")
-│   │   └── wasm/             # Feature-gated: #[cfg(feature = "wasm")]
+│   │   ├── wasm/             # Feature-gated: #[cfg(feature = "wasm")]
+│   │   │   ├── mod.rs        # Module declarations, 7-layer defense-in-depth doc
+│   │   │   ├── capabilities.rs  # Capabilities struct: workspace/http/secrets, parsed from TOML sidecar
+│   │   │   ├── limits.rs     # ResourceLimits (fuel/memory/timeout), WasmResourceLimiter impl
+│   │   │   ├── runtime.rs    # WasmToolRuntime: Engine config, epoch ticker, PreparedModule
+│   │   │   ├── host.rs       # HostState: log/now_millis/workspace_read/check_http_request host fns
+│   │   │   ├── wrapper.rs    # bindgen! bindings, StoreData, WasmTool, execute_in_sandbox
+│   │   │   └── loader.rs     # load_from_dir/load_one: directory scan, BLAKE3 hash, compilation
+│   │   └── container/        # Feature-gated: #[cfg(feature = "container")]
 │   │       ├── mod.rs        # Module declarations, 7-layer defense-in-depth doc
-│   │       ├── capabilities.rs  # Capabilities struct: workspace/http/secrets, parsed from TOML sidecar
-│   │       ├── limits.rs     # ResourceLimits (fuel/memory/timeout), WasmResourceLimiter impl
-│   │       ├── runtime.rs    # WasmToolRuntime: Engine config, epoch ticker, PreparedModule
-│   │       ├── host.rs       # HostState: log/now_millis/workspace_read/check_http_request host fns
-│   │       ├── wrapper.rs    # bindgen! bindings, StoreData, WasmTool, execute_in_sandbox
-│   │       └── loader.rs     # load_from_dir/load_one: directory scan, BLAKE3 hash, compilation
+│   │       ├── capabilities.rs  # ContainerCapabilities: workspace/http/secrets, parsed from TOML sidecar
+│   │       ├── ipc.rs        # Wire format (length-prefixed JSON), IpcTransport, RuntimeMessage/ToolMessage
+│   │       ├── runtime.rs    # ContainerRuntime trait + BollardRuntime (Docker/Podman via bollard)
+│   │       ├── host.rs       # ContainerHostState: async host function proxy (workspace/http/secrets/log)
+│   │       ├── wrapper.rs    # ContainerTool: lifecycle management, IPC execute loop, respawn-on-crash
+│   │       └── loader.rs     # load_from_dir/load_one: scan tool.toml + capabilities.toml per subdirectory
 │   ├── providers/
 │   │   ├── mod.rs            # Provider trait, Message/UserContent/ContentBlock types (serde + Clone)
 │   │   ├── anthropic.rs      # Anthropic API provider (non-streaming)
@@ -76,6 +84,7 @@ cherub/
 │   ├── fixtures/
 │   │   └── mod.rs            # Shared test fixtures: TestContainer + MockEmbeddingProvider (M6c)
 │   ├── memory_enforcement.rs # Memory tool enforcement tests, no DB needed (feature = "memory")
+│   ├── container_lifecycle.rs  # Container IPC interop tests (M9, Python subprocess mock + #[ignore] Docker)
 │   ├── memory_injection.rs   # Proactive injection integration tests (M6d, no DB needed)
 │   ├── memory_store.rs       # PgMemoryStore integration tests (M6b + M6c hybrid search)
 │   ├── redteam.rs            # Live model adversarial tests (#[ignore], requires API key)

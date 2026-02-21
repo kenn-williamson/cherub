@@ -1,6 +1,6 @@
 # Secure Agent Runtime — Design Document
 
-**Status:** Draft — Milestone 8 Complete (WASM sandbox: Wasmtime component model, WIT host functions, capability TOML sidecars, BLAKE3 loader, 7-layer defense-in-depth)
+**Status:** Draft — Milestone 9 Complete (Container sandbox: bollard runtime, length-prefixed JSON IPC over UDS, host function proxy, Python SDK, 7-layer defense-in-depth)
 **Author:** Kenn Williamson  
 **Date:** February 2026
 

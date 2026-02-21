@@ -207,7 +207,8 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
             }
         };
         #[cfg(not(feature = "memory"))]
-        let effective_system: &str = &self.system_prompt;
+        let effective_system: std::borrow::Cow<str> =
+            std::borrow::Cow::Borrowed(self.system_prompt.as_str());
 
         for iteration in 0..MAX_ITERATIONS {
             let _iter_span = info_span!("iteration", n = iteration);
@@ -215,7 +216,7 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
             let assistant_msg = self
                 .provider
                 .complete(
-                    effective_system,
+                    &effective_system,
                     &self.session.messages,
                     &self.tool_definitions,
                 )

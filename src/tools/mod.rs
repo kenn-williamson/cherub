@@ -1,4 +1,6 @@
 pub mod bash;
+#[cfg(feature = "container")]
+pub mod container;
 #[cfg(feature = "credentials")]
 pub mod credential_broker;
 #[cfg(feature = "credentials")]
@@ -20,6 +22,8 @@ use crate::error::CherubError;
 use crate::providers::ToolDefinition;
 
 use bash::BashTool;
+#[cfg(feature = "container")]
+use container::ContainerTool;
 #[cfg(feature = "credentials")]
 use http::HttpTool;
 #[cfg(feature = "memory")]
@@ -96,7 +100,6 @@ pub struct ToolResult {
 }
 
 /// Enum dispatch for tool implementations. Known variants at compile time.
-/// `dyn Tool` deferred to M9 container IPC.
 pub(crate) enum ToolImpl {
     Bash(BashTool),
     #[cfg(feature = "memory")]
@@ -105,6 +108,8 @@ pub(crate) enum ToolImpl {
     Http(HttpTool),
     #[cfg(feature = "wasm")]
     Wasm(WasmTool),
+    #[cfg(feature = "container")]
+    Container(ContainerTool),
 }
 
 impl ToolImpl {
@@ -116,7 +121,9 @@ impl ToolImpl {
             #[cfg(feature = "credentials")]
             Self::Http(_) => "http",
             #[cfg(feature = "wasm")]
-            Self::Wasm(t) => t.name(),
+            Self::Wasm(t) => &t.module.name,
+            #[cfg(feature = "container")]
+            Self::Container(t) => &t.metadata.name,
         }
     }
 
@@ -136,6 +143,8 @@ impl ToolImpl {
             Self::Http(tool) => tool.execute(params, token, _ctx).await,
             #[cfg(feature = "wasm")]
             Self::Wasm(tool) => tool.execute(params, token, &_ctx.user_id).await,
+            #[cfg(feature = "container")]
+            Self::Container(tool) => tool.execute(params, token, _ctx).await,
         }
     }
 
@@ -230,6 +239,15 @@ impl ToolImpl {
                     input_schema: m.schema.clone(),
                 }
             }
+            #[cfg(feature = "container")]
+            Self::Container(t) => {
+                let m = &t.metadata;
+                ToolDefinition {
+                    name: m.name.clone(),
+                    description: m.description.clone(),
+                    input_schema: m.schema.clone(),
+                }
+            }
         }
     }
 }
@@ -280,6 +298,16 @@ impl ToolRegistry {
         self
     }
 
+    /// Append container tools to the registry (builder pattern).
+    ///
+    /// Call after `new()`, `with_memory()`, `with_credentials()`, or `with_wasm()`.
+    #[cfg(feature = "container")]
+    pub fn with_container(mut self, tools: Vec<ContainerTool>) -> Self {
+        self.tools
+            .extend(tools.into_iter().map(ToolImpl::Container));
+        self
+    }
+
     pub(crate) fn find(&self, name: &str) -> Option<&ToolImpl> {
         self.tools.iter().find(|t| t.name() == name)
     }
@@ -289,8 +317,8 @@ impl ToolRegistry {
     }
 }
 
-/// Extension point for tool implementations. Retained for future M8/M9 plugin IPC.
-/// Not used for known variants — enum dispatch via `ToolImpl` is preferred.
+/// Extension point for tool implementations. Not used for known variants —
+/// enum dispatch via `ToolImpl` is preferred. Reserved for future external plugins.
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
 

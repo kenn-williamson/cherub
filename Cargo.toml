@@ -30,6 +30,10 @@ credentials = ["postgres", "dep:aes-gcm", "dep:hkdf", "dep:sha2", "dep:rand", "d
 # Independent feature — does not imply postgres or credentials.
 # Credential injection is available when `credentials` is also enabled.
 wasm = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:blake3", "dep:url"]
+# container: Docker/Podman container sandbox for heavy/polyglot tool execution (M9).
+# Independent feature — does not imply postgres or credentials.
+# Long-lived containers communicate via Unix domain socket IPC.
+container = ["dep:bollard", "dep:async-trait", "dep:url"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -72,6 +76,9 @@ wasmtime = { version = "41", features = ["component-model"], optional = true }
 wasmtime-wasi = { version = "41", optional = true }
 blake3 = { version = "1.8", optional = true }
 
+# Container sandbox feature dependencies (M9)
+bollard = { version = "0.20", optional = true }
+
 [[bin]]
 name = "cherub"
 path = "src/main.rs"
@@ -83,6 +90,6 @@ required-features = ["telegram"]
 
 [dev-dependencies]
 trybuild = "1.0"
-testcontainers = { version = "0.26", features = ["reusable-containers"] }
-testcontainers-modules = "0.14"
+testcontainers = { version = "0.27", features = ["reusable-containers"] }
 wiremock = "0.6"
+tempfile = "3"

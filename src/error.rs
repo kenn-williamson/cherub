@@ -43,4 +43,10 @@ pub enum CherubError {
     #[cfg(feature = "wasm")]
     #[error("wasm error: {0}")]
     Wasm(String),
+
+    /// Container sandbox errors (M9). Lifecycle, IPC, or execution failures.
+    /// Never contains credential values or policy details.
+    #[cfg(feature = "container")]
+    #[error("container error: {0}")]
+    Container(String),
 }

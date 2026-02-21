@@ -30,6 +30,9 @@ enum Command {
         /// Optional directory of WASM tools to load (M8).
         #[cfg(feature = "wasm")]
         wasm_tools_dir: Option<PathBuf>,
+        /// Optional directory of container tool configs to load (M9).
+        #[cfg(feature = "container")]
+        container_tools_dir: Option<PathBuf>,
     },
     /// Credential vault management (M7a).
     #[cfg(feature = "credentials")]
@@ -67,6 +70,8 @@ fn parse_args() -> Result<Command> {
     let mut model = DEFAULT_MODEL.to_owned();
     #[cfg(feature = "wasm")]
     let mut wasm_tools_dir: Option<PathBuf> = None;
+    #[cfg(feature = "container")]
+    let mut container_tools_dir: Option<PathBuf> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -90,6 +95,13 @@ fn parse_args() -> Result<Command> {
                     wasm_tools_dir = Some(PathBuf::from(&args[i]));
                 }
             }
+            #[cfg(feature = "container")]
+            "--container-tools-dir" => {
+                i += 1;
+                if i < args.len() {
+                    container_tools_dir = Some(PathBuf::from(&args[i]));
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -100,6 +112,8 @@ fn parse_args() -> Result<Command> {
         model,
         #[cfg(feature = "wasm")]
         wasm_tools_dir,
+        #[cfg(feature = "container")]
+        container_tools_dir,
     })
 }
 
@@ -323,6 +337,7 @@ async fn run_agent(
     policy_path: PathBuf,
     model: String,
     #[cfg(feature = "wasm")] wasm_tools_dir: Option<PathBuf>,
+    #[cfg(feature = "container")] container_tools_dir: Option<PathBuf>,
 ) -> Result<()> {
     let user_id = std::env::var("USER").unwrap_or_else(|_| "local".to_owned());
 
@@ -477,6 +492,47 @@ async fn run_agent(
         }
     };
 
+    // Load container tools if a directory was specified (M9).
+    #[cfg(feature = "container")]
+    let registry = {
+        use cherub::tools::container::{BollardRuntime, load_from_dir};
+        use std::sync::Arc;
+
+        if let Some(ref dir) = container_tools_dir {
+            match BollardRuntime::new() {
+                Ok(runtime) => {
+                    let rt: Arc<dyn cherub::tools::container::ContainerRuntime> = Arc::new(runtime);
+                    let result = load_from_dir(
+                        dir,
+                        rt,
+                        #[cfg(feature = "credentials")]
+                        None, // broker wiring deferred to M9c full integration
+                    )
+                    .await;
+                    for err in &result.errors {
+                        eprintln!("[warn] container tool load error: {err}");
+                    }
+                    if !result.tools.is_empty() {
+                        info!(
+                            count = result.tools.len(),
+                            dir = %dir.display(),
+                            "container tools loaded"
+                        );
+                        registry.with_container(result.tools)
+                    } else {
+                        registry
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[warn] container runtime init failed (Docker unavailable?): {e}");
+                    registry
+                }
+            }
+        } else {
+            registry
+        }
+    };
+
     let system_prompt = build_system_prompt(&cwd);
 
     let approval_gate = CliApprovalGate::new();
@@ -575,12 +631,16 @@ async fn main() -> Result<()> {
             model,
             #[cfg(feature = "wasm")]
             wasm_tools_dir,
+            #[cfg(feature = "container")]
+            container_tools_dir,
         } => {
             run_agent(
                 policy_path,
                 model,
                 #[cfg(feature = "wasm")]
                 wasm_tools_dir,
+                #[cfg(feature = "container")]
+                container_tools_dir,
             )
             .await
         }

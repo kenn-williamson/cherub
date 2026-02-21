@@ -217,14 +217,14 @@ Everything else — connectors, credential brokering, audit logging, IPC plugins
 
 **Goal:** Heavy/polyglot tools run in Docker/Podman containers. Language-agnostic plugin ecosystem.
 
-- [ ] Define IPC protocol: length-prefixed JSON over Unix domain sockets
-- [ ] Plugin registration handshake: type, identity, capability declarations
-- [ ] Container lifecycle management: spawn, connect, health check, restart, kill on timeout
-- [ ] Network isolation by default (no network access; IPC socket is the only channel)
-- [ ] Workspace mounting: read-only directory mounts for tools that need file access
-- [ ] Resource limits via cgroups (CPU, memory)
-- [ ] A crashing container tool does not affect the runtime
-- [ ] Write a container tool plugin (e.g., Python-based) to validate language-agnostic IPC works
+- [x] Define IPC protocol: length-prefixed JSON over Unix domain sockets
+- [x] Plugin registration handshake: type, identity, capability declarations
+- [x] Container lifecycle management: spawn, connect, health check, restart, kill on timeout
+- [x] Network isolation by default (no network access; IPC socket is the only channel)
+- [x] Workspace mounting: read-only directory mounts for tools that need file access
+- [x] Resource limits via cgroups (CPU, memory)
+- [x] A crashing container tool does not affect the runtime
+- [x] Write a container tool plugin (e.g., Python-based) to validate language-agnostic IPC works
 
 ---
 

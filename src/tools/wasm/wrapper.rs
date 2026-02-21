@@ -337,11 +337,6 @@ impl WasmTool {
         self
     }
 
-    /// Tool name.
-    pub fn name(&self) -> &str {
-        &self.module.name
-    }
-
     /// Execute this WASM tool.
     ///
     /// Requires a `CapabilityToken` (consumed on use). Runs in `spawn_blocking`.
