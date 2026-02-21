@@ -7,6 +7,16 @@ pub enum Tier {
     Commit,
 }
 
+impl Tier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Tier::Observe => "observe",
+            Tier::Act => "act",
+            Tier::Commit => "commit",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

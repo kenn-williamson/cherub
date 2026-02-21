@@ -17,6 +17,9 @@ use approval::{ApprovalGate, ApprovalResult, EscalationContext};
 use output::{OutputEvent, OutputSink};
 use session::Session;
 
+#[cfg(feature = "postgres")]
+use crate::storage::{AuditDecision, AuditStore, NewAuditEvent};
+
 const MAX_ITERATIONS: usize = 25;
 
 /// Maximum number of memories injected into the system prompt per turn.
@@ -60,6 +63,11 @@ pub struct AgentLoop<P: Provider, A: ApprovalGate, O: OutputSink> {
     /// the top results into the system prompt. The agent cannot suppress this.
     #[cfg(feature = "memory")]
     memory_store: Option<std::sync::Arc<dyn crate::storage::MemoryStore>>,
+    /// Optional audit log store (M10).
+    /// When set, every enforcement decision and execution outcome is appended.
+    /// Failures are non-fatal — logged and skipped; they never block tool execution.
+    #[cfg(feature = "postgres")]
+    audit_store: Option<std::sync::Arc<dyn AuditStore>>,
 }
 
 impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
@@ -84,6 +92,8 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
             output,
             #[cfg(feature = "memory")]
             memory_store: None,
+            #[cfg(feature = "postgres")]
+            audit_store: None,
         }
     }
 
@@ -100,6 +110,18 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
         store: std::sync::Arc<dyn crate::storage::MemoryStore>,
     ) {
         self.memory_store = Some(store);
+    }
+
+    /// Attach an audit log store (M10).
+    ///
+    /// When attached, every enforcement decision (allow/reject/escalate/approve/deny)
+    /// and execution outcome is appended to the store. Append failures are non-fatal —
+    /// they are logged and execution continues normally.
+    ///
+    /// Call this once after `new()` and before the first `run_turn()`.
+    #[cfg(feature = "postgres")]
+    pub fn with_audit_log(&mut self, store: std::sync::Arc<dyn AuditStore>) {
+        self.audit_store = Some(store);
     }
 
     /// Attach a PostgreSQL session store. Resumes the previous session for the given
@@ -135,6 +157,17 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
     /// The session ID (UUID v7, time-sortable).
     pub fn session_id(&self) -> uuid::Uuid {
         self.session.id
+    }
+
+    /// Append an audit event non-fatally. Logs a warning on failure; never panics.
+    /// Audit failures must never block tool execution — the runtime continues regardless.
+    #[cfg(feature = "postgres")]
+    async fn audit(&self, event: NewAuditEvent) {
+        if let Some(ref store) = self.audit_store {
+            if let Err(e) = store.append(event).await {
+                warn!(error = %e, "audit log append failed (non-fatal)");
+            }
+        }
     }
 
     /// Convenience wrapper: run a text-only user turn.
@@ -277,6 +310,8 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
 
                 match decision {
                     Decision::Allow(token) => {
+                        #[cfg(feature = "postgres")]
+                        let tier_str = token.tier.as_str().to_owned();
                         info!(decision = "ALLOWED", tool = %name, action = %display_str);
                         self.output
                             .emit(OutputEvent::ToolAllowed {
@@ -288,7 +323,21 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                         let exec_start = Instant::now();
                         match evaluated.execute(token, &self.registry, &ctx).await {
                             Ok(result) => {
-                                info!(duration_ms = %exec_start.elapsed().as_millis(), "tool execution complete");
+                                let duration_ms = exec_start.elapsed().as_millis() as i64;
+                                info!(duration_ms = %duration_ms, "tool execution complete");
+                                #[cfg(feature = "postgres")]
+                                self.audit(NewAuditEvent {
+                                    session_id: Some(ctx.session_id),
+                                    user_id: ctx.user_id.clone(),
+                                    turn_number: Some(ctx.turn_number),
+                                    tool: name.clone(),
+                                    action: Some(display_str.to_owned()),
+                                    decision: AuditDecision::Allow,
+                                    tier: Some(tier_str),
+                                    duration_ms: Some(duration_ms),
+                                    is_error: Some(false),
+                                })
+                                .await;
                                 if !result.output.is_empty() {
                                     self.output
                                         .emit(OutputEvent::ToolOutput(&result.output))
@@ -303,8 +352,22 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                                 self.session.persist_last().await;
                             }
                             Err(e) => {
+                                let duration_ms = exec_start.elapsed().as_millis() as i64;
                                 let err_msg = e.to_string();
-                                warn!(duration_ms = %exec_start.elapsed().as_millis(), error = %err_msg, "tool execution failed");
+                                warn!(duration_ms = %duration_ms, error = %err_msg, "tool execution failed");
+                                #[cfg(feature = "postgres")]
+                                self.audit(NewAuditEvent {
+                                    session_id: Some(ctx.session_id),
+                                    user_id: ctx.user_id.clone(),
+                                    turn_number: Some(ctx.turn_number),
+                                    tool: name.clone(),
+                                    action: Some(display_str.to_owned()),
+                                    decision: AuditDecision::Allow,
+                                    tier: Some(tier_str),
+                                    duration_ms: Some(duration_ms),
+                                    is_error: Some(true),
+                                })
+                                .await;
                                 self.output.emit(OutputEvent::ToolError(&err_msg)).await;
                                 self.session.push(Message::ToolResult {
                                     tool_use_id,
@@ -318,6 +381,19 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                     }
                     Decision::Reject => {
                         info!(decision = "REJECTED", tool = %name, action = %display_str);
+                        #[cfg(feature = "postgres")]
+                        self.audit(NewAuditEvent {
+                            session_id: Some(ctx.session_id),
+                            user_id: ctx.user_id.clone(),
+                            turn_number: Some(ctx.turn_number),
+                            tool: name.clone(),
+                            action: Some(display_str.to_owned()),
+                            decision: AuditDecision::Reject,
+                            tier: None,
+                            duration_ms: None,
+                            is_error: None,
+                        })
+                        .await;
                         self.output
                             .emit(OutputEvent::ToolRejected {
                                 tool: &name,
@@ -333,7 +409,22 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                         self.session.persist_last().await;
                     }
                     Decision::Escalate { tier } => {
+                        #[cfg(feature = "postgres")]
+                        let tier_str = tier.as_str().to_owned();
                         info!(decision = "ESCALATED", tool = %name, action = %display_str);
+                        #[cfg(feature = "postgres")]
+                        self.audit(NewAuditEvent {
+                            session_id: Some(ctx.session_id),
+                            user_id: ctx.user_id.clone(),
+                            turn_number: Some(ctx.turn_number),
+                            tool: name.clone(),
+                            action: Some(display_str.to_owned()),
+                            decision: AuditDecision::Escalate,
+                            tier: Some(tier_str.clone()),
+                            duration_ms: None,
+                            is_error: None,
+                        })
+                        .await;
 
                         let context = EscalationContext {
                             tool: &name,
@@ -354,7 +445,21 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                                 let exec_start = Instant::now();
                                 match evaluated.execute(token, &self.registry, &ctx).await {
                                     Ok(result) => {
-                                        info!(duration_ms = %exec_start.elapsed().as_millis(), "tool execution complete");
+                                        let duration_ms = exec_start.elapsed().as_millis() as i64;
+                                        info!(duration_ms = %duration_ms, "tool execution complete");
+                                        #[cfg(feature = "postgres")]
+                                        self.audit(NewAuditEvent {
+                                            session_id: Some(ctx.session_id),
+                                            user_id: ctx.user_id.clone(),
+                                            turn_number: Some(ctx.turn_number),
+                                            tool: name.clone(),
+                                            action: Some(display_str.to_owned()),
+                                            decision: AuditDecision::Approve,
+                                            tier: Some(tier_str.clone()),
+                                            duration_ms: Some(duration_ms),
+                                            is_error: Some(false),
+                                        })
+                                        .await;
                                         if !result.output.is_empty() {
                                             self.output
                                                 .emit(OutputEvent::ToolOutput(&result.output))
@@ -369,8 +474,22 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                                         self.session.persist_last().await;
                                     }
                                     Err(e) => {
+                                        let duration_ms = exec_start.elapsed().as_millis() as i64;
                                         let err_msg = e.to_string();
-                                        warn!(duration_ms = %exec_start.elapsed().as_millis(), error = %err_msg, "tool execution failed");
+                                        warn!(duration_ms = %duration_ms, error = %err_msg, "tool execution failed");
+                                        #[cfg(feature = "postgres")]
+                                        self.audit(NewAuditEvent {
+                                            session_id: Some(ctx.session_id),
+                                            user_id: ctx.user_id.clone(),
+                                            turn_number: Some(ctx.turn_number),
+                                            tool: name.clone(),
+                                            action: Some(display_str.to_owned()),
+                                            decision: AuditDecision::Approve,
+                                            tier: Some(tier_str.clone()),
+                                            duration_ms: Some(duration_ms),
+                                            is_error: Some(true),
+                                        })
+                                        .await;
                                         self.output.emit(OutputEvent::ToolError(&err_msg)).await;
                                         self.session.push(Message::ToolResult {
                                             tool_use_id,
@@ -384,6 +503,19 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                             }
                             ApprovalResult::Denied => {
                                 info!(decision = "DENIED", tool = %name, action = %display_str);
+                                #[cfg(feature = "postgres")]
+                                self.audit(NewAuditEvent {
+                                    session_id: Some(ctx.session_id),
+                                    user_id: ctx.user_id.clone(),
+                                    turn_number: Some(ctx.turn_number),
+                                    tool: name.clone(),
+                                    action: Some(display_str.to_owned()),
+                                    decision: AuditDecision::Deny,
+                                    tier: Some(tier_str),
+                                    duration_ms: None,
+                                    is_error: None,
+                                })
+                                .await;
                                 self.output
                                     .emit(OutputEvent::ToolDenied {
                                         tool: &name,

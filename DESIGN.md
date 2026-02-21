@@ -1,6 +1,6 @@
 # Secure Agent Runtime — Design Document
 
-**Status:** Draft — Milestone 9 Complete (Container sandbox: bollard runtime, length-prefixed JSON IPC over UDS, host function proxy, Python SDK, 7-layer defense-in-depth)
+**Status:** Draft — Milestone 10 Complete (Security hardening: DNS rebinding defense + no-redirect policy in HttpTool; audit log: append-only AuditStore + PgAuditStore + `cherub audit list` CLI)
 **Author:** Kenn Williamson  
 **Date:** February 2026
 

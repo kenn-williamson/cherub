@@ -6,15 +6,29 @@
 //! The plaintext credential value never appears in the tool parameters, return
 //! value, or session history.
 //!
+//! # Security hardening (M10)
+//!
+//! - **No redirects**: `reqwest` is configured with `redirect::Policy::none()`.
+//!   An injected redirect could exfiltrate credentials to an attacker-controlled host.
+//! - **DNS rebinding defense**: the hostname is resolved before sending.
+//!   Any resolved IP in a private/loopback/link-local range is rejected.
+//!   This prevents SSRF attacks where the agent is tricked into hitting internal services
+//!   (e.g., `http://metadata.internal/`, `http://10.0.0.1/`).
+//! - **Leak detection covers all response bodies**: the `LeakDetector` scan runs on the
+//!   full body regardless of HTTP status code (2xx or error). Non-2xx bodies are still
+//!   returned to the agent so it can handle API errors, but credentials are redacted first.
+//!
 //! # Enforcement flow
 //!
 //! 1. Agent proposes `http` tool call with `action: "get"`, `url: "https://api.stripe.com/v1/..."`.
 //! 2. `HttpStructured` extractor produces `"get:api.stripe.com"`.
 //! 3. Enforcement evaluates against `[tools.http.actions.*]` patterns → Allow/Escalate/Reject.
 //! 4. On Allow: `HttpTool::execute()` is called with a `CapabilityToken`.
-//! 5. Broker injects credential (if specified), request is sent.
-//! 6. Response body is scanned by `LeakDetector` before being returned.
+//! 5. DNS is resolved; any private IP rejects the call.
+//! 6. Broker injects credential (if specified), request is sent without redirect following.
+//! 7. Response body (any status) is scanned by `LeakDetector` before returning.
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -45,12 +59,20 @@ pub struct HttpTool {
 }
 
 impl HttpTool {
-    /// Create an `HttpTool` with pre-configured timeouts.
+    /// Create an `HttpTool` with pre-configured timeouts and security policy.
+    ///
+    /// Security configuration applied here:
+    /// - Redirects disabled (`Policy::none()`) — prevents credential exfiltration via redirect.
+    /// - Timeouts enforced at connect, read, and total-request levels.
+    /// - DNS rebinding check enforced per-request (see `check_dns_rebinding()`).
     pub fn new(broker: Arc<CredentialBroker>) -> Self {
         let client = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .read_timeout(READ_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
+            // No redirect following: a redirect to an attacker-controlled host after
+            // credential injection would exfiltrate the Authorization header.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("reqwest client construction is infallible with valid config");
         Self { client, broker }
@@ -82,6 +104,11 @@ impl HttpTool {
                 "http: only http and https schemes are permitted".to_owned(),
             ));
         }
+
+        // DNS rebinding defense (M10): resolve the hostname and reject if any resolved
+        // address is in a private/loopback/link-local range. This prevents SSRF attacks
+        // where the agent is tricked into targeting internal services.
+        check_dns_rebinding(&url).await?;
 
         let method =
             reqwest::Method::from_bytes(action.to_uppercase().as_bytes()).map_err(|_| {
@@ -172,6 +199,93 @@ impl HttpTool {
     }
 }
 
+/// Resolve the URL hostname and reject if any IP is in a private/reserved range.
+///
+/// Blocks:
+/// - IPv4 loopback: 127.0.0.0/8
+/// - IPv4 private: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+/// - IPv4 link-local (APIPA): 169.254.0.0/16
+/// - IPv6 loopback: ::1
+/// - IPv6 unique-local: fc00::/7
+/// - IPv6 link-local: fe80::/10
+///
+/// An empty resolution (no DNS records) is also rejected.
+async fn check_dns_rebinding(url: &Url) -> Result<(), CherubError> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| CherubError::InvalidInvocation("http: URL has no host".to_owned()))?;
+
+    // Bare IP addresses must be validated directly without a DNS lookup.
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_private_ip(ip) {
+            warn!(host = %host, "http: blocked — direct private IP address");
+            return Err(CherubError::InvalidInvocation(
+                "http: target address is not permitted".to_owned(),
+            ));
+        }
+        return Ok(());
+    }
+
+    let port = url.port_or_known_default().unwrap_or(443);
+    let lookup_target = format!("{host}:{port}");
+
+    let addrs = tokio::net::lookup_host(&lookup_target)
+        .await
+        .map_err(|e| CherubError::Http(format!("http: DNS resolution failed: {e}")))?;
+
+    let mut resolved_any = false;
+    for addr in addrs {
+        resolved_any = true;
+        let ip = addr.ip();
+        if is_private_ip(ip) {
+            warn!(host = %host, ip = %ip, "http: blocked — hostname resolves to private IP");
+            return Err(CherubError::InvalidInvocation(
+                "http: target address is not permitted".to_owned(),
+            ));
+        }
+    }
+
+    if !resolved_any {
+        return Err(CherubError::Http(format!(
+            "http: DNS resolution returned no addresses for '{host}'"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Returns true if the IP address is in a private, loopback, or link-local range.
+fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            // 127.0.0.0/8 — loopback
+            octets[0] == 127
+            // 10.0.0.0/8 — RFC 1918 private
+            || octets[0] == 10
+            // 172.16.0.0/12 — RFC 1918 private
+            || (octets[0] == 172 && (octets[1] & 0xf0) == 16)
+            // 192.168.0.0/16 — RFC 1918 private
+            || (octets[0] == 192 && octets[1] == 168)
+            // 169.254.0.0/16 — link-local (APIPA / AWS metadata)
+            || (octets[0] == 169 && octets[1] == 254)
+            // 0.0.0.0/8 — "this" network
+            || octets[0] == 0
+        }
+        IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            // ::1 — loopback
+            v6.is_loopback()
+            // fc00::/7 — unique-local (ULA)
+            || (segments[0] & 0xfe00) == 0xfc00
+            // fe80::/10 — link-local
+            || (segments[0] & 0xffc0) == 0xfe80
+            // ::ffff:0:0/96 — IPv4-mapped; check the embedded IPv4 address
+            || v6.to_ipv4_mapped().is_some_and(|v4| is_private_ip(IpAddr::V4(v4)))
+        }
+    }
+}
+
 /// Build the JSON schema for the HTTP tool, used by the provider API.
 pub fn http_tool_definition() -> crate::providers::ToolDefinition {
     crate::providers::ToolDefinition {
@@ -224,5 +338,107 @@ mod tests {
         assert!(props.get("action").is_some());
         assert!(props.get("url").is_some());
         assert!(props.get("credential").is_some());
+    }
+
+    // ─── is_private_ip tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn loopback_v4_is_private() {
+        assert!(is_private_ip("127.0.0.1".parse().unwrap()));
+        assert!(is_private_ip("127.255.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn rfc1918_10_is_private() {
+        assert!(is_private_ip("10.0.0.1".parse().unwrap()));
+        assert!(is_private_ip("10.255.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn rfc1918_172_is_private() {
+        assert!(is_private_ip("172.16.0.1".parse().unwrap()));
+        assert!(is_private_ip("172.31.255.255".parse().unwrap()));
+        // 172.15.x is NOT in 172.16.0.0/12
+        assert!(!is_private_ip("172.15.0.1".parse().unwrap()));
+        // 172.32.x is NOT in 172.16.0.0/12
+        assert!(!is_private_ip("172.32.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn rfc1918_192_168_is_private() {
+        assert!(is_private_ip("192.168.0.1".parse().unwrap()));
+        assert!(is_private_ip("192.168.255.255".parse().unwrap()));
+        assert!(!is_private_ip("192.169.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn link_local_v4_is_private() {
+        // AWS EC2 instance metadata and APIPA
+        assert!(is_private_ip("169.254.169.254".parse().unwrap()));
+        assert!(is_private_ip("169.254.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn public_ipv4_is_not_private() {
+        assert!(!is_private_ip("8.8.8.8".parse().unwrap()));
+        assert!(!is_private_ip("1.1.1.1".parse().unwrap()));
+        assert!(!is_private_ip("93.184.216.34".parse().unwrap()));
+    }
+
+    #[test]
+    fn loopback_v6_is_private() {
+        assert!(is_private_ip("::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn ula_v6_is_private() {
+        assert!(is_private_ip("fc00::1".parse().unwrap()));
+        assert!(is_private_ip("fd12:3456::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn link_local_v6_is_private() {
+        assert!(is_private_ip("fe80::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn public_v6_is_not_private() {
+        assert!(!is_private_ip("2606:4700:4700::1111".parse().unwrap()));
+    }
+
+    #[test]
+    fn ipv4_mapped_private_is_blocked() {
+        // ::ffff:127.0.0.1 maps to 127.0.0.1
+        assert!(is_private_ip("::ffff:127.0.0.1".parse().unwrap()));
+        // ::ffff:10.0.0.1 maps to 10.0.0.1
+        assert!(is_private_ip("::ffff:10.0.0.1".parse().unwrap()));
+        // ::ffff:8.8.8.8 is public
+        assert!(!is_private_ip("::ffff:8.8.8.8".parse().unwrap()));
+    }
+
+    // ─── check_dns_rebinding tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn direct_private_ip_blocked() {
+        let url = Url::parse("https://10.0.0.1/api").unwrap();
+        assert!(check_dns_rebinding(&url).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn direct_loopback_blocked() {
+        let url = Url::parse("http://127.0.0.1:8080/").unwrap();
+        assert!(check_dns_rebinding(&url).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn direct_link_local_blocked() {
+        let url = Url::parse("http://169.254.169.254/latest/meta-data/").unwrap();
+        assert!(check_dns_rebinding(&url).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn direct_ipv6_loopback_blocked() {
+        let url = Url::parse("http://[::1]/").unwrap();
+        assert!(check_dns_rebinding(&url).await.is_err());
     }
 }

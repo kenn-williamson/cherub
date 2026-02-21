@@ -1,4 +1,5 @@
 pub mod embedding;
+pub mod pg_audit_store;
 pub mod pg_memory_store;
 pub mod pg_session_store;
 pub mod search;
@@ -317,6 +318,125 @@ pub trait CredentialStore: Send + Sync {
 
     /// Check whether a credential has passed its `expires_at` timestamp.
     async fn is_expired(&self, user_id: &str, name: &str) -> Result<bool, CherubError>;
+}
+
+// ─── Audit log types (M10) ────────────────────────────────────────────────────
+
+/// The outcome of an enforcement evaluation for a single tool invocation.
+///
+/// Stored as a lowercase text string in `audit_events.decision`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditDecision {
+    /// Enforcement passed automatically (Observe or Act tier).
+    Allow,
+    /// Enforcement denied (no match, tool disabled, constraint failure, etc.).
+    Reject,
+    /// Commit-tier action — forwarded to the approval gate.
+    Escalate,
+    /// User approved an escalated action.
+    Approve,
+    /// User denied an escalated action.
+    Deny,
+}
+
+impl AuditDecision {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuditDecision::Allow => "allow",
+            AuditDecision::Reject => "reject",
+            AuditDecision::Escalate => "escalate",
+            AuditDecision::Approve => "approve",
+            AuditDecision::Deny => "deny",
+        }
+    }
+}
+
+impl std::fmt::Display for AuditDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for AuditDecision {
+    type Err = CherubError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "allow" => Ok(AuditDecision::Allow),
+            "reject" => Ok(AuditDecision::Reject),
+            "escalate" => Ok(AuditDecision::Escalate),
+            "approve" => Ok(AuditDecision::Approve),
+            "deny" => Ok(AuditDecision::Deny),
+            other => Err(CherubError::Storage(format!(
+                "unknown audit decision: {other}"
+            ))),
+        }
+    }
+}
+
+/// Input for a new audit event. `id` and `created_at` are DB-generated.
+#[derive(Debug)]
+pub struct NewAuditEvent {
+    pub session_id: Option<Uuid>,
+    pub user_id: String,
+    pub turn_number: Option<i32>,
+    /// Tool name (e.g. "bash", "http", "memory").
+    pub tool: String,
+    /// Action string that was evaluated (e.g. "ls /tmp", "get:api.stripe.com").
+    pub action: Option<String>,
+    pub decision: AuditDecision,
+    /// Tier string: "observe", "act", or "commit". None for reject.
+    pub tier: Option<String>,
+    /// Execution duration in milliseconds. None if not executed.
+    pub duration_ms: Option<i64>,
+    /// Whether the executed tool returned an error. None if not executed.
+    pub is_error: Option<bool>,
+}
+
+/// A fully-loaded audit event row.
+#[derive(Debug, Clone)]
+pub struct AuditEvent {
+    pub id: Uuid,
+    pub session_id: Option<Uuid>,
+    pub user_id: String,
+    pub turn_number: Option<i32>,
+    pub tool: String,
+    pub action: Option<String>,
+    pub decision: AuditDecision,
+    pub tier: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub is_error: Option<bool>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Filter for `AuditStore::list()`.
+#[derive(Debug, Default)]
+pub struct AuditFilter {
+    pub tool: Option<String>,
+    pub decision: Option<AuditDecision>,
+    pub user_id: Option<String>,
+    pub session_id: Option<Uuid>,
+    pub since: Option<DateTime<Utc>>,
+    pub limit: Option<i64>,
+}
+
+/// Append-only event log for enforcement decisions and tool executions.
+///
+/// Implementations: `PgAuditStore` (PostgreSQL, M10).
+/// This is a true `dyn Trait` boundary — backend selected at runtime.
+#[async_trait]
+pub trait AuditStore: Send + Sync {
+    /// Append a new event. Returns the DB-assigned UUID.
+    ///
+    /// Failures are non-fatal from the caller's perspective — the runtime
+    /// logs a warning and continues. The audit log must not prevent tool execution.
+    async fn append(&self, event: NewAuditEvent) -> Result<Uuid, CherubError>;
+
+    /// Query the audit log with optional filters.
+    ///
+    /// Results are ordered by `created_at DESC` (most recent first).
+    /// Defaults to the last 100 events if `filter.limit` is not set.
+    async fn list(&self, filter: AuditFilter) -> Result<Vec<AuditEvent>, CherubError>;
 }
 
 /// Connect to PostgreSQL, run pending migrations, and return a connection pool.

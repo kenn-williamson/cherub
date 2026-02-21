@@ -2,6 +2,24 @@
 # Deny by default — only explicitly listed actions are permitted.
 
 # ─── Bash tool ───────────────────────────────────────────────────────────────
+#
+# IMPORTANT: The bash tool runs in-process in the same OS context as the cherub
+# runtime. This means it shares the same filesystem, environment variables, and
+# working directory as the runtime itself.
+#
+# In-process bash is appropriate for:
+#   - Trusted developer workstations where the agent is acting on your behalf.
+#   - Personal productivity workflows where you own the environment.
+#
+# In-process bash is NOT appropriate for:
+#   - Production deployments serving multiple users.
+#   - Environments where the agent has access to secrets (API keys, credentials)
+#     and could read or exfiltrate them via shell commands (e.g., `cat .env`).
+#   - Untrusted workloads of any kind.
+#
+# For sandboxed bash in production, use a container tool (M9) instead.
+# Container tools run in an isolated filesystem with no access to the host
+# environment, process tree, or secrets.
 
 [tools.bash]
 enabled = true

@@ -228,11 +228,32 @@ Everything else — connectors, credential brokering, audit logging, IPC plugins
 
 ---
 
+## Milestone 10: Security Hardening + Audit Log ✓
+
+**Goal:** Close the remaining security gaps vs. IronClaw. Add operational observability via an append-only audit event log.
+
+### HTTP tool hardening (complete)
+- [x] DNS rebinding defense: resolve hostname before sending; reject if any resolved IP is in a private/loopback/link-local range (127/8, 10/8, 172.16/12, 192.168/16, 169.254/16, ::1, fc00::/7, fe80::/10)
+- [x] Disable HTTP redirects (`redirect::Policy::none()`): prevents credential exfiltration via injected redirect after credential injection
+- [x] Document that LeakDetector scans all response bodies regardless of HTTP status (2xx and error)
+- [x] Document that in-process bash is trusted/dev context only; production should use container-sandboxed bash
+
+### Audit log (complete)
+- [x] V4 migration: `audit_events` table (append-only; rows are never updated or deleted)
+- [x] `AuditDecision` enum: allow, reject, escalate, approve, deny
+- [x] `AuditStore` trait with `append()` and `list()` operations
+- [x] `PgAuditStore` implementation with parameterized dynamic WHERE builder
+- [x] `AgentLoop::with_audit_log()`: optional audit store, non-fatal on append failure
+- [x] Audit events emitted for every enforcement decision (with tier, duration_ms, is_error)
+- [x] `cherub audit list` CLI subcommand with `--tool`, `--decision`, `--user`, `--session`, `--limit` filters
+- [x] Audit store auto-attached when DATABASE_URL is set
+
+---
+
 ## Beyond MVP
 
 These are real goals but not blocking the thesis proof:
 
-- Audit log (append-only, structured, queryable)
 - Discord connector
 - Slack connector
 - Policy hot-reload (file watch + re-evaluate)

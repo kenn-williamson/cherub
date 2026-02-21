@@ -37,6 +37,22 @@ enum Command {
     /// Credential vault management (M7a).
     #[cfg(feature = "credentials")]
     Credential(CredentialSubcommand),
+    /// Audit log queries (M10).
+    #[cfg(feature = "postgres")]
+    Audit(AuditSubcommand),
+}
+
+/// Audit log subcommands.
+#[cfg(feature = "postgres")]
+enum AuditSubcommand {
+    /// List recent audit events with optional filters.
+    List {
+        tool: Option<String>,
+        decision: Option<String>,
+        user_id: Option<String>,
+        session_id: Option<String>,
+        limit: Option<i64>,
+    },
 }
 
 #[cfg(feature = "credentials")]
@@ -63,6 +79,12 @@ fn parse_args() -> Result<Command> {
     #[cfg(feature = "credentials")]
     if args.get(1).map(|s| s.as_str()) == Some("credential") {
         return parse_credential_args(&args[2..]);
+    }
+
+    // Check for audit subcommand.
+    #[cfg(feature = "postgres")]
+    if args.get(1).map(|s| s.as_str()) == Some("audit") {
+        return parse_audit_args(&args[2..]);
     }
 
     // Default: agent REPL.
@@ -331,6 +353,137 @@ async fn run_credential_command(sub: CredentialSubcommand) -> Result<()> {
     Ok(())
 }
 
+// ─── Audit subcommand ─────────────────────────────────────────────────────────
+
+#[cfg(feature = "postgres")]
+fn parse_audit_args(args: &[String]) -> Result<Command> {
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("");
+    match sub {
+        "list" => {
+            let mut tool: Option<String> = None;
+            let mut decision: Option<String> = None;
+            let mut user_id: Option<String> = None;
+            let mut session_id: Option<String> = None;
+            let mut limit: Option<i64> = None;
+
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--tool" => {
+                        i += 1;
+                        tool = args.get(i).cloned();
+                    }
+                    "--decision" => {
+                        i += 1;
+                        decision = args.get(i).cloned();
+                    }
+                    "--user" => {
+                        i += 1;
+                        user_id = args.get(i).cloned();
+                    }
+                    "--session" => {
+                        i += 1;
+                        session_id = args.get(i).cloned();
+                    }
+                    "--limit" => {
+                        i += 1;
+                        if let Some(v) = args.get(i) {
+                            limit = Some(v.parse().context("--limit must be a number")?);
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+
+            Ok(Command::Audit(AuditSubcommand::List {
+                tool,
+                decision,
+                user_id,
+                session_id,
+                limit,
+            }))
+        }
+        _ => anyhow::bail!("unknown audit subcommand '{}'. Available: list", sub),
+    }
+}
+
+#[cfg(feature = "postgres")]
+async fn run_audit_command(sub: AuditSubcommand) -> Result<()> {
+    use cherub::storage::pg_audit_store::PgAuditStore;
+    use cherub::storage::{AuditDecision, AuditFilter, AuditStore};
+    use std::str::FromStr;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    let db_url =
+        std::env::var("DATABASE_URL").context("DATABASE_URL must be set for audit log queries")?;
+
+    let pool = cherub::storage::connect(SecretString::from(db_url))
+        .await
+        .context("failed to connect to PostgreSQL")?;
+
+    let store: Arc<dyn AuditStore> = Arc::new(PgAuditStore::new(pool));
+
+    match sub {
+        AuditSubcommand::List {
+            tool,
+            decision,
+            user_id,
+            session_id,
+            limit,
+        } => {
+            let parsed_decision = decision
+                .as_deref()
+                .map(|s| AuditDecision::from_str(s))
+                .transpose()
+                .context("invalid --decision value; use: allow, reject, escalate, approve, deny")?;
+
+            let parsed_session = session_id
+                .as_deref()
+                .map(|s| Uuid::parse_str(s))
+                .transpose()
+                .context("invalid --session value; must be a UUID")?;
+
+            let filter = AuditFilter {
+                tool: tool.clone(),
+                decision: parsed_decision,
+                user_id: user_id.clone(),
+                session_id: parsed_session,
+                since: None,
+                limit,
+            };
+
+            let events = store
+                .list(filter)
+                .await
+                .context("failed to query audit log")?;
+
+            if events.is_empty() {
+                println!("No audit events found.");
+            } else {
+                println!(
+                    "{:<26}  {:<10}  {:<8}  {:<10}  {}",
+                    "timestamp", "tool", "decision", "tier", "action"
+                );
+                println!("{}", "-".repeat(80));
+                for ev in &events {
+                    let ts = ev.created_at.format("%Y-%m-%d %H:%M:%S%.3f");
+                    let tier = ev.tier.as_deref().unwrap_or("-");
+                    let action = ev.action.as_deref().unwrap_or("-");
+                    println!(
+                        "{ts:<26}  {:<10}  {:<8}  {:<10}  {}",
+                        ev.tool, ev.decision, tier, action
+                    );
+                }
+                println!("\n{} event(s) shown.", events.len());
+            }
+        }
+    }
+
+    Ok(())
+}
+
 // ─── Agent REPL ───────────────────────────────────────────────────────────────
 
 async fn run_agent(
@@ -554,6 +707,20 @@ async fn run_agent(
         info!("proactive memory injection enabled");
     }
 
+    // Attach audit log if DB is available (M10).
+    #[cfg(feature = "postgres")]
+    {
+        use cherub::storage::pg_audit_store::PgAuditStore;
+        use std::sync::Arc;
+
+        if let Some(ref pool) = db_pool {
+            let audit_store: Arc<dyn cherub::storage::AuditStore> =
+                Arc::new(PgAuditStore::new(pool.clone()));
+            agent.with_audit_log(audit_store);
+            info!("audit log enabled");
+        }
+    }
+
     // Attach session persistence if available.
     #[cfg(feature = "sessions")]
     {
@@ -646,5 +813,7 @@ async fn main() -> Result<()> {
         }
         #[cfg(feature = "credentials")]
         Command::Credential(sub) => run_credential_command(sub).await,
+        #[cfg(feature = "postgres")]
+        Command::Audit(sub) => run_audit_command(sub).await,
     }
 }

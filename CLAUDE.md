@@ -59,7 +59,7 @@ cherub/
 │   │   ├── anthropic.rs      # Anthropic API provider (non-streaming)
 │   │   └── wire.rs           # Serde structs for Anthropic API JSON (private, supports images)
 │   ├── storage/              # Feature-gated: #[cfg(feature = "postgres")]
-│   │   ├── mod.rs            # SessionStore + MemoryStore + CredentialStore traits, connect(), migration runner
+│   │   ├── mod.rs            # SessionStore + MemoryStore + CredentialStore + AuditStore traits, connect(), migration runner
 │   │   ├── embedding.rs      # EmbeddingProvider trait + OpenAiEmbeddingProvider (M6c)
 │   │   ├── search.rs         # Reciprocal Rank Fusion algorithm (M6c, pure/no-DB)
 │   │   ├── pg_session_store.rs  # PgSessionStore: PostgreSQL SessionStore impl
@@ -67,10 +67,12 @@ cherub/
 │   │   ├── crypto.rs         # AES-256-GCM + HKDF-SHA256 per-secret encryption (feature = "credentials")
 │   │   ├── credential_types.rs  # Credential/CredentialRef/DecryptedCredential/CredentialLocation (feature = "credentials")
 │   │   ├── pg_credential_store.rs  # PgCredentialStore: PostgreSQL CredentialStore impl (feature = "credentials")
+│   │   ├── pg_audit_store.rs    # PgAuditStore: PostgreSQL AuditStore impl, append-only event log (M10)
 │   │   └── migrations/
 │   │       ├── V1__initial_schema.sql  # Sessions + messages + memory schema (UUIDv7, scope column)
 │   │       ├── V2__vector_indexes.sql  # HNSW indexes for embedding columns (M6c)
-│   │       └── V3__credentials.sql     # Encrypted credential vault table (M7a)
+│   │       ├── V3__credentials.sql     # Encrypted credential vault table (M7a)
+│   │       └── V4__audit_log.sql       # Audit event log table (M10)
 │   └── telegram/             # Feature-gated: #[cfg(feature = "telegram")]
 │       ├── mod.rs             # Module declarations
 │       ├── approval.rs        # TelegramApprovalGate (inline keyboard + oneshot channels)
