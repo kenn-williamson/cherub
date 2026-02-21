@@ -333,9 +333,17 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
 
     /// Flush important facts from old messages to memory before compaction.
     ///
-    /// This is a runtime operation (not an agent tool call) — bypasses enforcement.
-    /// Parallels how memory injection reads without enforcement.
-    /// Non-fatal: if the flush fails, compaction proceeds regardless.
+    /// Two-pass design:
+    /// - **Pass 1 (Working scope):** All extracted facts are written directly to
+    ///   `MemoryScope::Working` via `store.store()`. Working is Observe tier — no
+    ///   enforcement needed for a runtime operation at this level.
+    /// - **Pass 2 (User scope promotion):** High-importance facts (preferences,
+    ///   facts, instructions) are promoted to `MemoryScope::User` through the
+    ///   enforcement pipeline. If enforcement escalates (no user available during
+    ///   compaction) or rejects, the fact stays in Working scope.
+    ///
+    /// Non-fatal throughout: any failure at any step logs a warning and proceeds.
+    /// Compaction must succeed regardless of memory flush outcomes.
     #[cfg(feature = "memory")]
     async fn flush_to_memory(&self, messages: &[Message], effective_system: &str) {
         let Some(ref store) = self.memory_store else {
@@ -347,7 +355,9 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
             "Extract important facts, preferences, and decisions from this conversation. \
              Return a JSON array of objects, each with:\n\
              - \"content\": the fact or preference (one sentence)\n\
-             - \"category\": one of \"preference\", \"fact\", \"instruction\", \"observation\"\n\n\
+             - \"category\": one of \"preference\", \"fact\", \"instruction\", \"observation\"\n\
+             - \"importance\": \"high\" for explicit preferences, instructions, and \
+               identity-relevant facts; \"low\" for transient observations and routine details\n\n\
              Only include information worth remembering across sessions. \
              Omit routine tool outputs and transient details.\n\n\
              --- Conversation ---\n\
@@ -403,7 +413,9 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
             }
         };
 
-        let mut stored_count = 0u32;
+        let mut working_count = 0u32;
+        let mut promoted_count = 0u32;
+
         for fact in &facts {
             let Some(content) = fact.get("content").and_then(|v| v.as_str()) else {
                 continue;
@@ -415,12 +427,17 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
             let category = category_str
                 .parse::<crate::storage::MemoryCategory>()
                 .unwrap_or(crate::storage::MemoryCategory::Observation);
+            let importance = fact
+                .get("importance")
+                .and_then(|v| v.as_str())
+                .unwrap_or("low");
 
-            let new_memory = crate::storage::NewMemory {
+            // Pass 1: Write to Working scope (Observe tier, always succeeds).
+            let working_memory = crate::storage::NewMemory {
                 user_id: self.session.user_id.clone(),
-                scope: crate::storage::MemoryScope::User,
+                scope: crate::storage::MemoryScope::Working,
                 category,
-                path: format!("compaction/{category_str}"),
+                path: format!("working/compaction/{category_str}"),
                 content: content.to_owned(),
                 structured: None,
                 source_session_id: Some(self.session.id),
@@ -428,19 +445,67 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                 source_type: crate::storage::SourceType::Inferred,
                 confidence: 0.8,
             };
-
-            match store.store(new_memory).await {
-                Ok(_) => stored_count += 1,
+            match store.store(working_memory).await {
+                Ok(_) => working_count += 1,
                 Err(e) => {
-                    warn!(error = %e, "memory flush store failed (non-fatal)");
+                    warn!(error = %e, "memory flush working store failed (non-fatal)");
+                }
+            }
+
+            // Pass 2: Attempt User scope promotion for high-importance facts.
+            // Only preferences, facts, and instructions are candidates.
+            // Observations stay in Working scope regardless.
+            if importance != "high" {
+                continue;
+            }
+
+            let user_path = match category_str {
+                "preference" => "preferences/compaction",
+                "fact" => "facts/compaction",
+                "instruction" => "instructions/compaction",
+                _ => continue,
+            };
+
+            let params = serde_json::json!({
+                "action": "store",
+                "scope": "user",
+                "path": user_path,
+                "content": content,
+                "category": category_str,
+                "source_type": "inferred",
+                "confidence": 0.8
+            });
+
+            let proposal = ToolInvocation::<Proposed>::new("memory", "execute", params);
+            let (evaluated, decision) = enforcement::evaluate(proposal, &self.policy);
+
+            match decision {
+                Decision::Allow(token) => {
+                    let ctx = ToolContext {
+                        user_id: self.session.user_id.clone(),
+                        session_id: self.session.id,
+                        turn_number: self.session.next_ordinal,
+                    };
+                    match evaluated.execute(token, &self.registry, &ctx).await {
+                        Ok(_) => promoted_count += 1,
+                        Err(e) => {
+                            warn!(error = %e, "memory flush user promotion failed (non-fatal)");
+                        }
+                    }
+                }
+                Decision::Escalate { .. } => {
+                    // User not available during compaction — fact stays in Working scope.
+                }
+                Decision::Reject => {
+                    // Policy doesn't allow this write — fact stays in Working scope.
                 }
             }
         }
 
-        if stored_count > 0 {
+        if working_count > 0 || promoted_count > 0 {
             info!(
-                stored_count,
-                "pre-compaction memory flush: stored inferred memories"
+                working_count,
+                promoted_count, "pre-compaction memory flush complete"
             );
         }
     }

@@ -81,7 +81,7 @@ cherub/
 │       ├── output.rs          # TelegramSink (OutputSink for Telegram chats)
 │       └── session.rs         # Per-chat session manager (channel-based, no Arc<Mutex>)
 ├── tests/
-│   ├── adversarial.rs        # Mock-provider adversarial integration tests (26 tests)
+│   ├── adversarial.rs        # Mock-provider adversarial integration tests (27 tests)
 │   ├── compile_tests.rs      # Compile-time invariant tests (trybuild)
 │   ├── embedding_live.rs     # Live OpenAI embedding tests (#[ignore], requires OPENAI_API_KEY)
 │   ├── fixtures/

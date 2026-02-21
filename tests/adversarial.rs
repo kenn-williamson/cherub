@@ -905,3 +905,268 @@ async fn compaction_summary_is_not_privileged() {
     assert_eq!(results[0].1, "action not permitted");
     assert!(results[0].2);
 }
+
+// ===========================================================================
+// Compaction memory flush: enforcement-gated User-scope writes (feature = "memory")
+// ===========================================================================
+
+#[cfg(feature = "memory")]
+mod compaction_memory {
+    use std::collections::VecDeque;
+    use std::str::FromStr;
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use uuid::{NoContext, Timestamp, Uuid};
+
+    use cherub::enforcement::policy::Policy;
+    use cherub::error::CherubError;
+    use cherub::providers::{
+        ApiUsage, ContentBlock, Message, Provider, StopReason, ToolDefinition,
+    };
+    use cherub::runtime::AgentLoop;
+    use cherub::runtime::approval::{ApprovalGate, ApprovalResult, EscalationContext};
+    use cherub::runtime::output::NullSink;
+    use cherub::storage::{
+        Memory, MemoryFilter, MemoryScope, MemoryStore, MemoryUpdate, NewMemory,
+    };
+    use cherub::tools::ToolRegistry;
+
+    struct AutoApprove;
+
+    impl ApprovalGate for AutoApprove {
+        async fn request_approval(&self, _context: &EscalationContext<'_>) -> ApprovalResult {
+            ApprovalResult::Approved
+        }
+    }
+
+    /// Provider that reports high usage when messages > 10 to trigger compaction.
+    struct CompactionProvider {
+        responses: Mutex<VecDeque<Message>>,
+    }
+
+    impl CompactionProvider {
+        fn new(responses: Vec<Message>) -> Self {
+            Self {
+                responses: Mutex::new(VecDeque::from(responses)),
+            }
+        }
+    }
+
+    impl Provider for CompactionProvider {
+        async fn complete(
+            &self,
+            _system: &str,
+            messages: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<(Message, Option<ApiUsage>), CherubError> {
+            let mut queue = self.responses.lock().unwrap();
+            let msg = queue.pop_front().unwrap_or_else(end_turn);
+
+            let usage = if messages.len() > 10 {
+                Some(ApiUsage {
+                    input_tokens: 160_000,
+                    output_tokens: 100,
+                })
+            } else {
+                Some(ApiUsage {
+                    input_tokens: 1_000,
+                    output_tokens: 100,
+                })
+            };
+
+            Ok((msg, usage))
+        }
+
+        fn model_name(&self) -> &str {
+            "claude-test"
+        }
+
+        fn max_output_tokens(&self) -> u32 {
+            4096
+        }
+    }
+
+    fn end_turn() -> Message {
+        Message::Assistant {
+            content: vec![ContentBlock::Text {
+                text: "OK.".to_owned(),
+            }],
+            stop_reason: StopReason::EndTurn,
+        }
+    }
+
+    fn summary_response() -> Message {
+        Message::Assistant {
+            content: vec![ContentBlock::Text {
+                text: "Summary: topics discussed.".to_owned(),
+            }],
+            stop_reason: StopReason::EndTurn,
+        }
+    }
+
+    struct StoredRecord {
+        scope: MemoryScope,
+        path: String,
+    }
+
+    struct RecordingStore {
+        records: Mutex<Vec<StoredRecord>>,
+    }
+
+    impl RecordingStore {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                records: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn records_by_scope(&self) -> (Vec<String>, Vec<String>) {
+            let records = self.records.lock().unwrap();
+            let working: Vec<String> = records
+                .iter()
+                .filter(|r| r.scope == MemoryScope::Working)
+                .map(|r| r.path.clone())
+                .collect();
+            let user: Vec<String> = records
+                .iter()
+                .filter(|r| r.scope == MemoryScope::User)
+                .map(|r| r.path.clone())
+                .collect();
+            (working, user)
+        }
+    }
+
+    fn new_uuid() -> Uuid {
+        Uuid::new_v7(Timestamp::now(NoContext))
+    }
+
+    #[async_trait]
+    impl MemoryStore for RecordingStore {
+        async fn store(&self, memory: NewMemory) -> Result<Uuid, CherubError> {
+            self.records.lock().unwrap().push(StoredRecord {
+                scope: memory.scope,
+                path: memory.path,
+            });
+            Ok(new_uuid())
+        }
+
+        async fn recall(&self, _filter: MemoryFilter) -> Result<Vec<Memory>, CherubError> {
+            Ok(vec![])
+        }
+
+        async fn search(
+            &self,
+            _query: &str,
+            _scope: Option<MemoryScope>,
+            _user_id: Option<&str>,
+            _limit: i64,
+        ) -> Result<Vec<Memory>, CherubError> {
+            Ok(vec![])
+        }
+
+        async fn update(&self, id: Uuid, _changes: MemoryUpdate) -> Result<Uuid, CherubError> {
+            Ok(id)
+        }
+
+        async fn forget(&self, _id: Uuid) -> Result<(), CherubError> {
+            Ok(())
+        }
+
+        async fn touch(&self, _id: Uuid) -> Result<(), CherubError> {
+            Ok(())
+        }
+    }
+
+    /// Compaction flush cannot write User-scope memories without enforcement.
+    ///
+    /// When the policy has no memory tool section, enforcement rejects the
+    /// User-scope promotion. Only Working-scope memories (direct store, no
+    /// enforcement needed) should exist after compaction.
+    #[tokio::test]
+    async fn compaction_flush_user_scope_requires_enforcement() {
+        // Policy with NO memory tool — only bash. Enforcement will reject
+        // any memory tool proposals during User-scope promotion.
+        let policy_str = r#"
+[tools.bash]
+enabled = true
+[tools.bash.actions.read]
+tier = "observe"
+patterns = ["^ls ", "^echo "]
+"#;
+
+        // Extraction returns high-importance facts that would normally be promoted.
+        let extraction_response = Message::Assistant {
+            content: vec![ContentBlock::Text {
+                text: r#"[
+                    {"content": "User prefers dark mode", "category": "preference", "importance": "high"},
+                    {"content": "Always use Rust", "category": "instruction", "importance": "high"},
+                    {"content": "Project stack is Rust + PostgreSQL", "category": "fact", "importance": "high"}
+                ]"#
+                .to_owned(),
+            }],
+            stop_reason: StopReason::EndTurn,
+        };
+
+        let store = RecordingStore::new();
+
+        let mut responses: Vec<Message> = Vec::new();
+        for _ in 0..6 {
+            responses.push(end_turn());
+        }
+        responses.push(extraction_response);
+        responses.push(summary_response());
+        responses.push(end_turn());
+
+        let provider = CompactionProvider::new(responses);
+        let policy = Policy::from_str(policy_str).unwrap();
+        let registry = ToolRegistry::with_memory(Arc::clone(&store) as Arc<dyn MemoryStore>);
+        let mut agent = AgentLoop::new(
+            policy,
+            provider,
+            registry,
+            "test".to_owned(),
+            AutoApprove,
+            NullSink,
+            "test",
+        );
+        agent.with_memory_injection(Arc::clone(&store) as Arc<dyn MemoryStore>);
+
+        for i in 0..6 {
+            agent
+                .run_turn_text(&format!(
+                    "Turn {i}: detailed discussion about topic {i} in great detail"
+                ))
+                .await
+                .unwrap();
+        }
+        agent.run_turn_text("trigger compaction now").await.unwrap();
+
+        let (working, user) = store.records_by_scope();
+
+        // Working-scope writes succeed (direct store, no enforcement needed).
+        assert!(
+            working.len() >= 3,
+            "should have Working-scope memories from flush (got {})",
+            working.len()
+        );
+
+        // User-scope writes are blocked — enforcement rejected because
+        // the policy has no [tools.memory] section.
+        assert!(
+            user.is_empty(),
+            "compaction flush must not write User-scope memories without enforcement \
+             (got {} User-scope memories: {:?})",
+            user.len(),
+            user
+        );
+
+        // Verify all Working-scope paths use the compaction prefix.
+        for path in &working {
+            assert!(
+                path.starts_with("working/compaction/"),
+                "Working-scope path should start with 'working/compaction/', got: {path}"
+            );
+        }
+    }
+}
