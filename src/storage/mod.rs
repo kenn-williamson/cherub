@@ -62,6 +62,16 @@ pub trait SessionStore: Send + Sync {
 
     /// Load all messages for a session in ordinal order.
     async fn load_messages(&self, session_id: Uuid) -> Result<Vec<Message>, CherubError>;
+
+    /// Replace all messages for a session atomically (used after compaction).
+    ///
+    /// Deletes all existing messages and inserts the new set in a single transaction.
+    /// Called by `Session::persist_compacted()` after compaction rewrites history.
+    async fn replace_messages(
+        &self,
+        session_id: Uuid,
+        messages: &[Message],
+    ) -> Result<(), CherubError>;
 }
 
 // ─── Memory types (M6b) ───────────────────────────────────────────────────────

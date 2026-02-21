@@ -5,7 +5,7 @@ use secrecy::{ExposeSecret, SecretString};
 use tracing::{Instrument, info, info_span, warn};
 
 use super::wire::{self, RequestBody};
-use super::{Message, Provider, ToolDefinition};
+use super::{ApiUsage, Message, Provider, ToolDefinition};
 use crate::error::CherubError;
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -44,7 +44,7 @@ impl Provider for AnthropicProvider {
         system: &str,
         messages: &[Message],
         tools: &[ToolDefinition],
-    ) -> Result<Message, CherubError> {
+    ) -> Result<(Message, Option<ApiUsage>), CherubError> {
         // Use Instrument instead of entered() — EnteredSpan is !Send, which
         // prevents the future from being Send across await points.
         async {
@@ -90,6 +90,14 @@ impl Provider for AnthropicProvider {
         }
         .instrument(info_span!("api_call", model = %self.model))
         .await
+    }
+
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+
+    fn max_output_tokens(&self) -> u32 {
+        self.max_tokens
     }
 }
 

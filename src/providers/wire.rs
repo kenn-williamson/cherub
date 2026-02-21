@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{ContentBlock, Message, StopReason, ToolDefinition, UserContent};
+use super::{ApiUsage, ContentBlock, Message, StopReason, ToolDefinition, UserContent};
 
 // --- Request types ---
 
@@ -73,6 +73,13 @@ pub(crate) struct WireTool {
 pub(crate) struct ResponseBody {
     pub content: Vec<ResponseContentBlock>,
     pub stop_reason: String,
+    pub usage: Option<WireUsage>,
+}
+
+#[derive(Deserialize, Clone, Copy)]
+pub(crate) struct WireUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
 }
 
 #[derive(Deserialize)]
@@ -191,13 +198,18 @@ fn flush_results(wire: &mut Vec<WireMessage>, pending: &mut Vec<WireContentBlock
     }
 }
 
-/// Convert a wire response to our internal Message type.
-pub(crate) fn response_to_message(resp: ResponseBody) -> Message {
+/// Convert a wire response to our internal Message type, plus optional API usage.
+pub(crate) fn response_to_message(resp: ResponseBody) -> (Message, Option<ApiUsage>) {
     let stop_reason = match resp.stop_reason.as_str() {
         "tool_use" => StopReason::ToolUse,
         "max_tokens" => StopReason::MaxTokens,
         _ => StopReason::EndTurn,
     };
+
+    let usage = resp.usage.map(|u| ApiUsage {
+        input_tokens: u.input_tokens,
+        output_tokens: u.output_tokens,
+    });
 
     let content = resp
         .content
@@ -210,10 +222,12 @@ pub(crate) fn response_to_message(resp: ResponseBody) -> Message {
         })
         .collect();
 
-    Message::Assistant {
+    let message = Message::Assistant {
         content,
         stop_reason,
-    }
+    };
+
+    (message, usage)
 }
 
 #[cfg(test)]
@@ -327,8 +341,10 @@ mod tests {
                 text: "Hello!".to_owned(),
             }],
             stop_reason: "end_turn".to_owned(),
+            usage: None,
         };
-        let msg = response_to_message(resp);
+        let (msg, usage) = response_to_message(resp);
+        assert!(usage.is_none());
         match msg {
             Message::Assistant {
                 content,
@@ -359,8 +375,9 @@ mod tests {
                 },
             ],
             stop_reason: "tool_use".to_owned(),
+            usage: None,
         };
-        let msg = response_to_message(resp);
+        let (msg, _) = response_to_message(resp);
         match msg {
             Message::Assistant {
                 content,
@@ -497,14 +514,29 @@ mod tests {
                 text: "hi".to_owned(),
             }],
             stop_reason: "something_new".to_owned(),
+            usage: None,
         };
-        let msg = response_to_message(resp);
+        let (msg, _) = response_to_message(resp);
         match msg {
             Message::Assistant { stop_reason, .. } => {
                 assert_eq!(stop_reason, StopReason::EndTurn);
             }
             _ => panic!("expected Assistant message"),
         }
+    }
+
+    #[test]
+    fn usage_parsed_when_present() {
+        let json_str = r#"{
+            "content": [{"type": "text", "text": "hi"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 150, "output_tokens": 42}
+        }"#;
+        let resp: ResponseBody = serde_json::from_str(json_str).unwrap();
+        let (_, usage) = response_to_message(resp);
+        let usage = usage.expect("usage should be present");
+        assert_eq!(usage.input_tokens, 150);
+        assert_eq!(usage.output_tokens, 42);
     }
 
     // --- Step 6: Error response handling ---

@@ -7,6 +7,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::CherubError;
 
+/// Token usage reported by the API after a completion call.
+#[derive(Debug, Clone, Copy)]
+pub struct ApiUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
 /// Abstraction over LLM providers. `dyn Provider` is a legitimate extension boundary
 /// per project convention — multiple LLM backends will implement this trait.
 pub trait Provider: Send + Sync {
@@ -15,7 +22,13 @@ pub trait Provider: Send + Sync {
         system: &str,
         messages: &[Message],
         tools: &[ToolDefinition],
-    ) -> impl Future<Output = Result<Message, CherubError>> + Send;
+    ) -> impl Future<Output = Result<(Message, Option<ApiUsage>), CherubError>> + Send;
+
+    /// The model identifier string (e.g. "claude-sonnet-4-20250514").
+    fn model_name(&self) -> &str;
+
+    /// Maximum output tokens configured for this provider.
+    fn max_output_tokens(&self) -> u32;
 }
 
 /// Content within a user message. Supports text and images for multimodal input.

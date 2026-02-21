@@ -23,7 +23,8 @@ cherub/
 │   │   ├── approval.rs       # ApprovalGate trait, CliApprovalGate, EscalationContext
 │   │   ├── output.rs         # OutputSink trait, StdoutSink, NullSink
 │   │   ├── session.rs        # Conversation state, message history, optional persistence
-│   │   └── prompt.rs         # System prompt builder
+│   │   ├── prompt.rs         # System prompt builder
+│   │   └── tokens.rs         # Token estimation for context compaction
 │   ├── enforcement/
 │   │   ├── mod.rs            # Enforcement layer entry point
 │   │   ├── capability.rs     # Capability tokens (private constructors)
@@ -80,7 +81,7 @@ cherub/
 │       ├── output.rs          # TelegramSink (OutputSink for Telegram chats)
 │       └── session.rs         # Per-chat session manager (channel-based, no Arc<Mutex>)
 ├── tests/
-│   ├── adversarial.rs        # Mock-provider adversarial integration tests (16 tests)
+│   ├── adversarial.rs        # Mock-provider adversarial integration tests (26 tests)
 │   ├── compile_tests.rs      # Compile-time invariant tests (trybuild)
 │   ├── embedding_live.rs     # Live OpenAI embedding tests (#[ignore], requires OPENAI_API_KEY)
 │   ├── fixtures/
@@ -90,6 +91,7 @@ cherub/
 │   ├── memory_injection.rs   # Proactive injection integration tests (M6d, no DB needed)
 │   ├── memory_store.rs       # PgMemoryStore integration tests (M6b + M6c hybrid search)
 │   ├── redteam.rs            # Live model adversarial tests (#[ignore], requires API key)
+│   ├── compaction.rs         # Context compaction integration tests (mock provider, no API key)
 │   ├── session_persistence.rs  # Session persistence integration tests (feature = "sessions", auto-starts DB)
 │   ├── telegram_approval.rs  # Telegram approval flow tests (feature-gated)
 │   └── ui/

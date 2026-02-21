@@ -2,6 +2,7 @@ pub mod approval;
 pub mod output;
 pub mod prompt;
 pub mod session;
+pub mod tokens;
 
 use std::time::Instant;
 
@@ -10,7 +11,9 @@ use tracing::{info, info_span, warn};
 use crate::enforcement::policy::Policy;
 use crate::enforcement::{self, Decision};
 use crate::error::CherubError;
-use crate::providers::{ContentBlock, Message, Provider, StopReason, ToolDefinition, UserContent};
+use crate::providers::{
+    ApiUsage, ContentBlock, Message, Provider, StopReason, ToolDefinition, UserContent,
+};
 use crate::tools::{Proposed, ToolContext, ToolInvocation, ToolRegistry};
 
 use approval::{ApprovalGate, ApprovalResult, EscalationContext};
@@ -21,6 +24,15 @@ use session::Session;
 use crate::storage::{AuditDecision, AuditStore, NewAuditEvent};
 
 const MAX_ITERATIONS: usize = 25;
+
+/// Compact when estimated tokens exceed this fraction of the context window.
+const COMPACTION_THRESHOLD_RATIO: f32 = 0.75;
+
+/// Number of recent messages to preserve across compaction (3 turn pairs).
+const COMPACTION_PRESERVE_RECENT: usize = 6;
+
+/// Minimum message count before compaction is even considered.
+const COMPACTION_MIN_MESSAGES: usize = 10;
 
 /// Maximum number of memories injected into the system prompt per turn.
 #[cfg(feature = "memory")]
@@ -58,6 +70,8 @@ pub struct AgentLoop<P: Provider, A: ApprovalGate, O: OutputSink> {
     tool_definitions: Vec<ToolDefinition>,
     approval_gate: A,
     output: O,
+    /// Last API-reported input token count, used for smarter compaction triggering.
+    last_usage: Option<ApiUsage>,
     /// Optional shared memory store for proactive injection (M6d).
     /// When set, the runtime queries memories before each turn and injects
     /// the top results into the system prompt. The agent cannot suppress this.
@@ -90,6 +104,7 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
             tool_definitions,
             approval_gate,
             output,
+            last_usage: None,
             #[cfg(feature = "memory")]
             memory_store: None,
             #[cfg(feature = "postgres")]
@@ -170,6 +185,266 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
         }
     }
 
+    /// Check whether the session exceeds the context window threshold and compact if so.
+    ///
+    /// Called once per turn, after pushing the user message and building the effective
+    /// system prompt, but **before** the iteration loop. Mid-turn compaction would
+    /// break tool_use/tool_result pairing.
+    async fn maybe_compact(&mut self, effective_system: &str) -> Result<(), CherubError> {
+        if self.session.messages.len() < COMPACTION_MIN_MESSAGES {
+            return Ok(());
+        }
+
+        // Use API-reported usage if available, otherwise estimate.
+        let input_tokens = self.last_usage.map(|u| u.input_tokens).unwrap_or_else(|| {
+            tokens::estimate_tokens(
+                effective_system,
+                &self.session.messages,
+                &self.tool_definitions,
+            )
+        });
+
+        let window = tokens::context_window_size(self.provider.model_name());
+        let threshold = (window as f32 * COMPACTION_THRESHOLD_RATIO) as u32;
+
+        if input_tokens < threshold {
+            return Ok(());
+        }
+
+        info!(
+            input_tokens,
+            threshold,
+            message_count = self.session.messages.len(),
+            "context window threshold exceeded, compacting"
+        );
+
+        let Some((old, recent)) = self
+            .session
+            .split_for_compaction(COMPACTION_PRESERVE_RECENT)
+        else {
+            warn!("compaction split failed — not enough messages at clean boundary");
+            return Ok(());
+        };
+
+        // Pre-compaction memory flush (feature-gated, non-fatal).
+        #[cfg(feature = "memory")]
+        self.flush_to_memory(&old, effective_system).await;
+
+        // Summarize the old messages.
+        let summary = self.summarize(&old, effective_system).await?;
+
+        let compaction_number = self.session.compaction_count + 1;
+        let summary_user = Message::user_text(&format!(
+            "[Context Summary — Compaction #{compaction_number}]\n\n{summary}"
+        ));
+        let summary_ack = Message::Assistant {
+            content: vec![ContentBlock::Text {
+                text: "Understood. I have the context from our earlier conversation.".to_owned(),
+            }],
+            stop_reason: StopReason::EndTurn,
+        };
+
+        self.session
+            .apply_compaction(summary_user, summary_ack, recent);
+
+        #[cfg(feature = "sessions")]
+        self.session.persist_compacted().await;
+
+        // Clear last usage since the message list changed dramatically.
+        self.last_usage = None;
+
+        info!(
+            compaction_number,
+            new_message_count = self.session.messages.len(),
+            "compaction complete"
+        );
+
+        self.output
+            .emit(OutputEvent::Warning(
+                "Context compacted — older conversation has been summarized.",
+            ))
+            .await;
+
+        Ok(())
+    }
+
+    /// Call the provider to summarize a block of messages for compaction.
+    ///
+    /// Uses a summarization-only prompt (no tools, no enforcement) — this is a
+    /// runtime operation, not an agent tool call.
+    async fn summarize(
+        &self,
+        messages: &[Message],
+        _effective_system: &str,
+    ) -> Result<String, CherubError> {
+        let conversation_text = prompt::serialize_messages_for_prompt(messages);
+
+        let summarize_prompt = format!(
+            "You are a conversation summarizer. Below is a conversation between a user and an \
+             AI assistant. Produce a concise summary that preserves:\n\
+             - Key decisions and conclusions\n\
+             - Important facts, file paths, and code references\n\
+             - User preferences and instructions\n\
+             - Current state of any in-progress tasks\n\n\
+             Omit routine back-and-forth. Focus on information the assistant would need \
+             to continue the conversation coherently.\n\n\
+             --- Conversation ---\n\
+             {conversation_text}\n\
+             --- End of conversation ---\n\n\
+             Provide only the summary, no preamble."
+        );
+
+        let summary_messages = vec![Message::user_text(&summarize_prompt)];
+
+        let (response, usage) = self
+            .provider
+            .complete(
+                "You are a concise summarizer.",
+                &summary_messages,
+                &[], // No tools for summarization
+            )
+            .await?;
+
+        if usage.is_some() {
+            // Don't store — summarization usage shouldn't influence compaction threshold.
+        }
+
+        // Extract text from the response.
+        match response {
+            Message::Assistant { content, .. } => {
+                let text: String = content
+                    .iter()
+                    .filter_map(|block| {
+                        if let ContentBlock::Text { text } = block {
+                            Some(text.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Ok(text)
+            }
+            _ => Err(CherubError::Provider(
+                "unexpected response type from summarization".to_owned(),
+            )),
+        }
+    }
+
+    /// Flush important facts from old messages to memory before compaction.
+    ///
+    /// This is a runtime operation (not an agent tool call) — bypasses enforcement.
+    /// Parallels how memory injection reads without enforcement.
+    /// Non-fatal: if the flush fails, compaction proceeds regardless.
+    #[cfg(feature = "memory")]
+    async fn flush_to_memory(&self, messages: &[Message], effective_system: &str) {
+        let Some(ref store) = self.memory_store else {
+            return;
+        };
+
+        let conversation_text = prompt::serialize_messages_for_prompt(messages);
+        let extraction_prompt = format!(
+            "Extract important facts, preferences, and decisions from this conversation. \
+             Return a JSON array of objects, each with:\n\
+             - \"content\": the fact or preference (one sentence)\n\
+             - \"category\": one of \"preference\", \"fact\", \"instruction\", \"observation\"\n\n\
+             Only include information worth remembering across sessions. \
+             Omit routine tool outputs and transient details.\n\n\
+             --- Conversation ---\n\
+             {conversation_text}\n\
+             --- End ---\n\n\
+             Return ONLY the JSON array, no other text."
+        );
+
+        let extraction_messages = vec![Message::user_text(&extraction_prompt)];
+        let result = self
+            .provider
+            .complete(effective_system, &extraction_messages, &[])
+            .await;
+
+        let (response, _) = match result {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(error = %e, "memory flush extraction failed (non-fatal)");
+                return;
+            }
+        };
+
+        // Parse the response as a JSON array of facts.
+        let text = match response {
+            Message::Assistant { ref content, .. } => content
+                .iter()
+                .filter_map(|b| {
+                    if let ContentBlock::Text { text } = b {
+                        Some(text.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+            _ => return,
+        };
+
+        // Try to parse JSON array from the response text.
+        // Strip markdown code fences if present.
+        let json_text = text
+            .trim()
+            .strip_prefix("```json")
+            .or_else(|| text.trim().strip_prefix("```"))
+            .and_then(|s| s.strip_suffix("```"))
+            .unwrap_or(text.trim());
+
+        let facts: Vec<serde_json::Value> = match serde_json::from_str(json_text) {
+            Ok(f) => f,
+            Err(e) => {
+                warn!(error = %e, "memory flush JSON parse failed (non-fatal)");
+                return;
+            }
+        };
+
+        let mut stored_count = 0u32;
+        for fact in &facts {
+            let Some(content) = fact.get("content").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let category_str = fact
+                .get("category")
+                .and_then(|v| v.as_str())
+                .unwrap_or("observation");
+            let category = category_str
+                .parse::<crate::storage::MemoryCategory>()
+                .unwrap_or(crate::storage::MemoryCategory::Observation);
+
+            let new_memory = crate::storage::NewMemory {
+                user_id: self.session.user_id.clone(),
+                scope: crate::storage::MemoryScope::User,
+                category,
+                path: format!("compaction/{category_str}"),
+                content: content.to_owned(),
+                structured: None,
+                source_session_id: Some(self.session.id),
+                source_turn_number: None,
+                source_type: crate::storage::SourceType::Inferred,
+                confidence: 0.8,
+            };
+
+            match store.store(new_memory).await {
+                Ok(_) => stored_count += 1,
+                Err(e) => {
+                    warn!(error = %e, "memory flush store failed (non-fatal)");
+                }
+            }
+        }
+
+        if stored_count > 0 {
+            info!(
+                stored_count,
+                "pre-compaction memory flush: stored inferred memories"
+            );
+        }
+    }
+
     /// Convenience wrapper: run a text-only user turn.
     pub async fn run_turn_text(&mut self, text: &str) -> Result<(), CherubError> {
         self.run_turn(vec![UserContent::Text(text.to_owned())])
@@ -195,7 +470,7 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
         // Computed once per turn, used for every provider.complete() call in this turn.
         // The agent cannot suppress injection: this is runtime-controlled context.
         #[cfg(feature = "memory")]
-        let effective_system: std::borrow::Cow<str> = {
+        let effective_system: String = {
             if user_query.len() >= INJECTION_MIN_QUERY_LEN {
                 if let Some(ref store) = self.memory_store {
                     match store
@@ -221,32 +496,35 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                                 memory_count = memories.len(),
                                 "memory injection: surfaced relevant memories"
                             );
-                            std::borrow::Cow::Owned(format!("{}{}", self.system_prompt, injection))
+                            format!("{}{}", self.system_prompt, injection)
                         }
-                        Ok(_) => std::borrow::Cow::Borrowed(&self.system_prompt),
+                        Ok(_) => self.system_prompt.clone(),
                         Err(e) => {
                             warn!(
                                 error = %e,
                                 "memory injection search failed, proceeding without injection"
                             );
-                            std::borrow::Cow::Borrowed(&self.system_prompt)
+                            self.system_prompt.clone()
                         }
                     }
                 } else {
-                    std::borrow::Cow::Borrowed(&self.system_prompt)
+                    self.system_prompt.clone()
                 }
             } else {
-                std::borrow::Cow::Borrowed(&self.system_prompt)
+                self.system_prompt.clone()
             }
         };
         #[cfg(not(feature = "memory"))]
-        let effective_system: std::borrow::Cow<str> =
-            std::borrow::Cow::Borrowed(self.system_prompt.as_str());
+        let effective_system: String = self.system_prompt.clone();
+
+        // Context compaction: summarize older messages if the context window is filling up.
+        // Runs before the iteration loop — mid-turn compaction would break tool_use/tool_result.
+        self.maybe_compact(&effective_system).await?;
 
         for iteration in 0..MAX_ITERATIONS {
             let _iter_span = info_span!("iteration", n = iteration);
 
-            let assistant_msg = self
+            let (assistant_msg, usage) = self
                 .provider
                 .complete(
                     &effective_system,
@@ -254,6 +532,10 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                     &self.tool_definitions,
                 )
                 .await?;
+
+            if usage.is_some() {
+                self.last_usage = usage;
+            }
 
             let (content, stop_reason) = match assistant_msg {
                 Message::Assistant {

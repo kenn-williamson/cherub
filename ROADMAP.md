@@ -152,8 +152,8 @@ Everything else — connectors, credential brokering, audit logging, IPC plugins
 ### Session Persistence
 - [x] Sessions stored in PostgreSQL (messages, tool calls, results) — `sessions` feature
 - [x] Session restore on restart — CLI resumes last session, Telegram resumes per-chat
-- [ ] Context compaction: token estimation, LLM summarization of old turns
-- [ ] Pre-compaction memory flush: extract important information before discarding context
+- [x] Context compaction: token estimation, LLM summarization of old turns
+- [x] Pre-compaction memory flush: extract important information before discarding context
 
 ### Contradiction Detection
 - [ ] On memory write, query semantically similar existing memories

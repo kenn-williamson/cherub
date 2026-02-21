@@ -125,6 +125,56 @@ impl SessionStore for PgSessionStore {
             })
             .collect()
     }
+    async fn replace_messages(
+        &self,
+        session_id: Uuid,
+        messages: &[Message],
+    ) -> Result<(), CherubError> {
+        let mut conn = self.pool.get().await.map_err(Self::pool_err)?;
+        let txn = conn.transaction().await.map_err(Self::query_err)?;
+
+        // Delete all existing messages for this session.
+        txn.execute(
+            "DELETE FROM session_messages WHERE session_id = $1",
+            &[&session_id],
+        )
+        .await
+        .map_err(Self::query_err)?;
+
+        // Re-insert with fresh ordinals.
+        for (ordinal, message) in messages.iter().enumerate() {
+            let msg_id = Uuid::now_v7();
+            let ordinal = ordinal as i32;
+            let message_json = serde_json::to_value(message).map_err(Self::serde_err)?;
+            let role = message_role_str(message);
+
+            txn.execute(
+                "INSERT INTO session_messages (id, session_id, ordinal, message_json, role) \
+                 VALUES ($1, $2, $3, $4, $5)",
+                &[&msg_id, &session_id, &ordinal, &message_json, &role],
+            )
+            .await
+            .map_err(Self::query_err)?;
+        }
+
+        // Touch the session's updated_at timestamp.
+        txn.execute(
+            "UPDATE sessions SET updated_at = now() WHERE id = $1",
+            &[&session_id],
+        )
+        .await
+        .map_err(Self::query_err)?;
+
+        txn.commit().await.map_err(Self::query_err)?;
+
+        tracing::info!(
+            session_id = %session_id,
+            message_count = messages.len(),
+            "replaced session messages after compaction"
+        );
+
+        Ok(())
+    }
 }
 
 /// Extract the role string from a message for the denormalized `role` column.

@@ -21,7 +21,7 @@ use uuid::{NoContext, Timestamp, Uuid};
 
 use cherub::enforcement::policy::Policy;
 use cherub::error::CherubError;
-use cherub::providers::{ContentBlock, Message, Provider, StopReason, ToolDefinition};
+use cherub::providers::{ApiUsage, ContentBlock, Message, Provider, StopReason, ToolDefinition};
 use cherub::runtime::AgentLoop;
 use cherub::runtime::approval::{ApprovalGate, ApprovalResult, EscalationContext};
 use cherub::runtime::output::NullSink;
@@ -60,10 +60,18 @@ impl Provider for CapturingProvider {
         system: &str,
         _messages: &[Message],
         _tools: &[ToolDefinition],
-    ) -> Result<Message, CherubError> {
+    ) -> Result<(Message, Option<ApiUsage>), CherubError> {
         self.captures.lock().unwrap().push(system.to_owned());
         let mut queue = self.responses.lock().unwrap();
-        Ok(queue.pop_front().unwrap_or_else(end_turn))
+        Ok((queue.pop_front().unwrap_or_else(end_turn), None))
+    }
+
+    fn model_name(&self) -> &str {
+        "mock"
+    }
+
+    fn max_output_tokens(&self) -> u32 {
+        4096
     }
 }
 

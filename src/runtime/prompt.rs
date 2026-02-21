@@ -51,6 +51,52 @@ pub fn format_memory_injection(memories: &[crate::storage::Memory]) -> String {
     out
 }
 
+/// Format messages as readable conversation text for summarization/extraction prompts.
+///
+/// Pure function: no I/O, no side effects, unit-testable.
+/// Used by compaction to present conversation history to the LLM for summarization.
+pub fn serialize_messages_for_prompt(messages: &[crate::providers::Message]) -> String {
+    use crate::providers::{ContentBlock, Message, UserContent};
+
+    let mut out = String::new();
+    for msg in messages {
+        match msg {
+            Message::User { content } => {
+                out.push_str("User: ");
+                for c in content {
+                    match c {
+                        UserContent::Text(text) => out.push_str(text),
+                        UserContent::Image { .. } => out.push_str("[image]"),
+                    }
+                }
+                out.push('\n');
+            }
+            Message::Assistant { content, .. } => {
+                out.push_str("Assistant: ");
+                for block in content {
+                    match block {
+                        ContentBlock::Text { text } => out.push_str(text),
+                        ContentBlock::ToolUse { name, input, .. } => {
+                            out.push_str(&format!("[tool_use: {name}({input})]"));
+                        }
+                    }
+                }
+                out.push('\n');
+            }
+            Message::ToolResult {
+                content, is_error, ..
+            } => {
+                if *is_error {
+                    out.push_str(&format!("Tool Error: {content}\n"));
+                } else {
+                    out.push_str(&format!("Tool Result: {content}\n"));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Build the system prompt for the agent.
 ///
 /// Minimal prompt — no safety guardrails (enforcement layer handles that).
@@ -124,6 +170,63 @@ mod tests {
     fn prompt_contains_cwd() {
         let prompt = build_system_prompt("/home/user/project");
         assert!(prompt.contains("/home/user/project"));
+    }
+
+    #[test]
+    fn serialize_messages_user_and_assistant() {
+        use crate::providers::{ContentBlock, Message, StopReason};
+        let messages = vec![
+            Message::user_text("Hello"),
+            Message::Assistant {
+                content: vec![ContentBlock::Text {
+                    text: "Hi there!".to_owned(),
+                }],
+                stop_reason: StopReason::EndTurn,
+            },
+        ];
+        let result = serialize_messages_for_prompt(&messages);
+        assert!(result.contains("User: Hello"));
+        assert!(result.contains("Assistant: Hi there!"));
+    }
+
+    #[test]
+    fn serialize_messages_tool_use_and_result() {
+        use crate::providers::{ContentBlock, Message, StopReason};
+        let messages = vec![
+            Message::Assistant {
+                content: vec![ContentBlock::ToolUse {
+                    id: "t1".to_owned(),
+                    name: "bash".to_owned(),
+                    input: serde_json::json!({"command": "ls"}),
+                }],
+                stop_reason: StopReason::ToolUse,
+            },
+            Message::ToolResult {
+                tool_use_id: "t1".to_owned(),
+                content: "file.txt".to_owned(),
+                is_error: false,
+            },
+        ];
+        let result = serialize_messages_for_prompt(&messages);
+        assert!(result.contains("[tool_use: bash("));
+        assert!(result.contains("Tool Result: file.txt"));
+    }
+
+    #[test]
+    fn serialize_messages_tool_error() {
+        use crate::providers::Message;
+        let messages = vec![Message::ToolResult {
+            tool_use_id: "t1".to_owned(),
+            content: "action not permitted".to_owned(),
+            is_error: true,
+        }];
+        let result = serialize_messages_for_prompt(&messages);
+        assert!(result.contains("Tool Error: action not permitted"));
+    }
+
+    #[test]
+    fn serialize_messages_empty() {
+        assert_eq!(serialize_messages_for_prompt(&[]), "");
     }
 
     #[cfg(feature = "memory")]
