@@ -28,6 +28,11 @@ const MAX_ITERATIONS: usize = 25;
 /// Compact when estimated tokens exceed this fraction of the context window.
 const COMPACTION_THRESHOLD_RATIO: f32 = 0.75;
 
+/// Hard-stop safety net: force compaction before provider.complete() if estimated
+/// tokens exceed this fraction of the window. Catches mid-turn growth from large
+/// tool results that push past the normal 75% pre-turn compaction.
+const HARD_STOP_RATIO: f32 = 0.95;
+
 /// Number of recent messages to preserve across compaction (3 turn pairs).
 const COMPACTION_PRESERVE_RECENT: usize = 6;
 
@@ -178,10 +183,10 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
     /// Audit failures must never block tool execution — the runtime continues regardless.
     #[cfg(feature = "postgres")]
     async fn audit(&self, event: NewAuditEvent) {
-        if let Some(ref store) = self.audit_store {
-            if let Err(e) = store.append(event).await {
-                warn!(error = %e, "audit log append failed (non-fatal)");
-            }
+        if let Some(ref store) = self.audit_store
+            && let Err(e) = store.append(event).await
+        {
+            warn!(error = %e, "audit log append failed (non-fatal)");
         }
     }
 
@@ -589,6 +594,29 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
         for iteration in 0..MAX_ITERATIONS {
             let _iter_span = info_span!("iteration", n = iteration);
 
+            // Hard-stop safety net: if mid-turn tool results pushed us past 95%
+            // of the context window, force compaction before the next API call.
+            if self.session.messages.len() >= COMPACTION_MIN_MESSAGES {
+                let input_tokens = self.last_usage.map(|u| u.input_tokens).unwrap_or_else(|| {
+                    tokens::estimate_tokens(
+                        &effective_system,
+                        &self.session.messages,
+                        &self.tool_definitions,
+                    )
+                });
+                let window = tokens::context_window_size(self.provider.model_name());
+                let hard_stop = (window as f32 * HARD_STOP_RATIO) as u32;
+                if input_tokens > hard_stop {
+                    warn!(
+                        input_tokens,
+                        hard_stop,
+                        iteration,
+                        "hard-stop: context window near capacity, compacting mid-turn"
+                    );
+                    self.maybe_compact(&effective_system).await?;
+                }
+            }
+
             let (assistant_msg, usage) = self
                 .provider
                 .complete(
@@ -623,6 +651,16 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                         tool_uses.push((id.clone(), name.clone(), input.clone()));
                     }
                 }
+            }
+
+            // Warn the user if the model's response was truncated.
+            if stop_reason == StopReason::MaxTokens {
+                warn!(iteration, "model response truncated (max_tokens reached)");
+                self.output
+                    .emit(OutputEvent::Warning(
+                        "Model response was truncated — output may be incomplete.",
+                    ))
+                    .await;
             }
 
             self.session.push(Message::Assistant {

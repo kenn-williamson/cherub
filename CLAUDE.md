@@ -16,6 +16,7 @@ cherub/
 │   ├── main.rs              # Entry point, CLI interface
 │   ├── lib.rs               # Library entry point
 │   ├── error.rs             # Error types
+│   ├── retry.rs             # Retry logic with exponential backoff for transient API errors
 │   ├── bin/
 │   │   └── telegram.rs       # Telegram bot entry point (feature-gated)
 │   ├── runtime/
@@ -92,6 +93,7 @@ cherub/
 │   ├── memory_store.rs       # PgMemoryStore integration tests (M6b + M6c hybrid search)
 │   ├── redteam.rs            # Live model adversarial tests (#[ignore], requires API key)
 │   ├── compaction.rs         # Context compaction integration tests (mock provider, no API key)
+│   ├── retry_integration.rs  # API retry integration tests (wiremock, no API key)
 │   ├── session_persistence.rs  # Session persistence integration tests (feature = "sessions", auto-starts DB)
 │   ├── telegram_approval.rs  # Telegram approval flow tests (feature-gated)
 │   └── ui/

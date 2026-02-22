@@ -1,6 +1,7 @@
 pub mod enforcement;
 pub mod error;
 pub mod providers;
+pub mod retry;
 pub mod runtime;
 #[cfg(feature = "postgres")]
 pub mod storage;

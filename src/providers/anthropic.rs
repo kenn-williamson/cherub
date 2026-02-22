@@ -7,6 +7,7 @@ use tracing::{Instrument, info, info_span, warn};
 use super::wire::{self, RequestBody};
 use super::{ApiUsage, Message, Provider, ToolDefinition};
 use crate::error::CherubError;
+use crate::retry::{RetryConfig, RetryVerdict, classify_status, compute_delay};
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
@@ -17,6 +18,8 @@ pub struct AnthropicProvider {
     api_key: SecretString,
     pub(crate) model: String,
     pub(crate) max_tokens: u32,
+    api_url: String,
+    retry_config: RetryConfig,
 }
 
 impl AnthropicProvider {
@@ -33,12 +36,21 @@ impl AnthropicProvider {
             api_key,
             model: model.to_owned(),
             max_tokens,
+            api_url: API_URL.to_owned(),
+            retry_config: RetryConfig::new(),
         })
+    }
+
+    /// Override the API URL. Intended for testing with wiremock.
+    pub fn with_url(mut self, url: String) -> Self {
+        self.api_url = url;
+        self
     }
 }
 
 impl Provider for AnthropicProvider {
     /// Send a non-streaming completion request to the Anthropic API.
+    /// Retries on transient errors (429, 5xx) with exponential backoff.
     async fn complete(
         &self,
         system: &str,
@@ -60,33 +72,89 @@ impl Provider for AnthropicProvider {
                 stream: false,
             };
 
-            // NEVER log the API key — SecretString redacts on Debug, but we never format it either.
-            let response = self
-                .client
-                .post(API_URL)
-                .header("x-api-key", self.api_key.expose_secret())
-                .header("anthropic-version", API_VERSION)
-                .header("content-type", "application/json")
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| CherubError::Provider(e.to_string()))?;
+            let json_body = serde_json::to_vec(&body)
+                .map_err(|e| CherubError::Provider(format!("JSON serialize error: {e}")))?;
 
-            let status = response.status();
-            info!(status = %status);
+            for attempt in 0..=self.retry_config.max_retries {
+                // NEVER log the API key — SecretString redacts on Debug, but we never format it either.
+                let result = self
+                    .client
+                    .post(&self.api_url)
+                    .header("x-api-key", self.api_key.expose_secret())
+                    .header("anthropic-version", API_VERSION)
+                    .header("content-type", "application/json")
+                    .body(json_body.clone())
+                    .send()
+                    .await;
 
-            if !status.is_success() {
-                let body = response.text().await.unwrap_or_default();
-                warn!(status = %status, "API error response");
-                return Err(CherubError::Provider(format!("API error {status}: {body}")));
+                let response = match result {
+                    Ok(r) => r,
+                    Err(e)
+                        if (e.is_connect() || e.is_timeout())
+                            && attempt < self.retry_config.max_retries =>
+                    {
+                        let delay = compute_delay(&self.retry_config, attempt);
+                        warn!(
+                            error = %e,
+                            attempt,
+                            delay_ms = delay.as_millis() as u64,
+                            "retrying API call (connection/timeout error)"
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    Err(e) => {
+                        let retries = attempt;
+                        return Err(CherubError::Provider(format!(
+                            "connection error: {e} (after {retries} retries)"
+                        )));
+                    }
+                };
+
+                let status = response.status().as_u16();
+                info!(status);
+
+                match classify_status(status) {
+                    RetryVerdict::Success => {
+                        let resp: wire::ResponseBody = response
+                            .json()
+                            .await
+                            .map_err(|e| CherubError::Provider(format!("JSON parse error: {e}")))?;
+
+                        return Ok(wire::response_to_message(resp));
+                    }
+                    RetryVerdict::Transient(_) if attempt < self.retry_config.max_retries => {
+                        // Parse Retry-After header (Anthropic sends seconds as integer).
+                        let retry_after = response
+                            .headers()
+                            .get("retry-after")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .map(Duration::from_secs);
+
+                        let delay = retry_after
+                            .unwrap_or_else(|| compute_delay(&self.retry_config, attempt));
+                        warn!(
+                            status,
+                            attempt,
+                            delay_ms = delay.as_millis() as u64,
+                            "retrying API call"
+                        );
+                        tokio::time::sleep(delay).await;
+                    }
+                    RetryVerdict::Transient(_) | RetryVerdict::Permanent => {
+                        let body_text = response.text().await.unwrap_or_default();
+                        let retries = attempt;
+                        warn!(status, "API error response");
+                        return Err(CherubError::Provider(format!(
+                            "API error {status}: {body_text} (after {retries} retries)"
+                        )));
+                    }
+                }
             }
 
-            let resp: wire::ResponseBody = response
-                .json()
-                .await
-                .map_err(|e| CherubError::Provider(format!("JSON parse error: {e}")))?;
-
-            Ok(wire::response_to_message(resp))
+            // Unreachable: the loop always returns or continues.
+            unreachable!("retry loop exhausted without returning")
         }
         .instrument(info_span!("api_call", model = %self.model))
         .await

@@ -257,12 +257,17 @@ These are real goals but not blocking the thesis proof:
 - Discord connector
 - Slack connector
 - Policy hot-reload (file watch + re-evaluate)
-- Multi-provider support (OpenAI, Ollama)
+- Multi-provider failover (try primary → fallback on failure; Anthropic + OpenAI + Ollama)
 - Session persistence (JSONL)
 - Multi-agent routing (different policies per channel)
 - Per-task dynamic constraints (session-scoped, user-confirmed via approval gate — see DESIGN.md Section 3.5)
-- Stateful constraints (cumulative tracking: daily spend limits, action rate limits, time-windowed budgets)
+- Stateful constraints (cumulative tracking: daily spend limits, action rate limits, time-windowed budgets — first application: LLM cost budget enforcement)
 - Policy generation tooling (analyze a tool's actions, suggest tier classifications)
+- LLM cost tracking + budget enforcement: track token usage (model, input/output tokens, per-model cost rates) in PostgreSQL (V5 migration). Wire cost data into stateful constraints — per-session and per-day spend budgets. Budget exceeded → escalate or reject depending on policy. Subsumes "Token Usage Tracking" from ROADMAP_DEFERRED.md.
+- Multi-provider failover implementation: `FailoverProvider` wraps `Vec<Box<dyn Provider>>`, tries each in order. Start with Anthropic + OpenAI. Log which provider succeeded. Retry/fallback logic with structured tracing.
+- OpenTelemetry export: `tracing-opentelemetry` as optional subscriber. Feature-gated (`otel`). `OTEL_EXPORTER_OTLP_ENDPOINT` env var enables. Cherub already emits structured spans — OTEL export makes them visible in Grafana/Datadog/etc.
+- MCP tool protocol support: support MCP servers as a tool source alongside WASM/container plugins. Spawn server process, discover tools via `tools/list`, route calls through enforcement layer. Feature-gated (`mcp`). `tools/mcp/` module, MCP client (stdio transport), `MatchSource::McpStructured`, capability sidecar TOML.
+- Schedule triggers (cron/interval): `tokio-cron-scheduler` injects "scheduled wake" messages into agent loop at configured intervals. Enables periodic autonomous work within policy bounds. Feature-gated (`schedule`). CLI flag `--schedule`.
 
 ---
 

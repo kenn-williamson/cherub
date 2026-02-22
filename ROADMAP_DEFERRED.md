@@ -10,10 +10,6 @@ M2 uses non-streaming API (`"stream": false`). Add SSE streaming for CLI UX so t
 
 Anthropic `thinking` content blocks are ignored. Add when needed for complex reasoning tasks.
 
-## Context Window Management
-
-Session grows unbounded in memory. Need pruning/summarization strategy before sessions get long.
-
 ## Parallel Tool Execution
 
 When the model returns multiple `tool_use` blocks, they're executed sequentially. Consider parallel execution for independent commands.
@@ -25,14 +21,6 @@ API key `expose_secret()` is in the provider module. Must move to credential bro
 ## Dynamic Dispatch for Provider/Tool
 
 Using concrete types and enum dispatch. Switch to `dyn Trait` (via `async-trait` or `Pin<Box<dyn Future>>`) in M7 when plugin IPC requires it.
-
-## API Error Retry
-
-Network/rate-limit failures surface to the user. No automatic retry with backoff.
-
-## Token Usage Tracking
-
-Anthropic response contains `usage` data; currently ignored. Track for cost awareness.
 
 ## Per-Session Working Directory
 
