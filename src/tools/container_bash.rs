@@ -50,7 +50,11 @@ pub fn build(runtime: Arc<dyn ContainerRuntime>, workspace: PathBuf) -> (Contain
     let capabilities = ContainerCapabilities::default();
 
     let tool = ContainerTool::new(metadata, runtime, capabilities, ipc_dir.clone())
-        .with_workspace(workspace);
+        .with_workspace(workspace)
+        .with_network("bridge")
+        .with_writable_rootfs()
+        .without_tmpfs()
+        .with_memory(4 * 1024 * 1024 * 1024); // 4 GiB — cargo/node builds need headroom
 
     (tool, ipc_dir)
 }

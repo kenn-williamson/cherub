@@ -342,7 +342,9 @@ DATABASE_URL=postgres://cherub:cherub_dev@localhost:5480/cherub \
 ANTHROPIC_API_KEY=sk-... cargo run -- --policy path/to/policy.toml
 
 # Run with sandbox bash (requires Docker + built image)
-# Build image first: docker build -t cherub-sandbox-bash:latest tools/container/sandbox-bash/
+# Build image (base only): docker build -t cherub-sandbox-bash:latest tools/container/sandbox-bash/
+# Build with Rust:         docker build --build-arg LANGUAGES="rust" -t cherub-sandbox-bash:latest tools/container/sandbox-bash/
+# Build with everything:   docker build --build-arg LANGUAGES="rust,node,go" -t cherub-sandbox-bash:latest tools/container/sandbox-bash/
 ANTHROPIC_API_KEY=sk-... cargo run --features container -- --sandbox-bash
 
 # Run Telegram bot (TELEGRAM_ALLOWED_CHATS is required)

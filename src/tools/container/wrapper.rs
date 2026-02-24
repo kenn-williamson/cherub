@@ -70,6 +70,14 @@ pub struct ContainerTool {
     ipc_dir: PathBuf,
     /// Optional host directory bind-mounted at `/workspace` inside the container.
     workspace_dir: Option<PathBuf>,
+    /// Docker network mode override (default: `"none"`).
+    network_mode: Option<String>,
+    /// Whether the root filesystem should be writable (default: read-only).
+    writable_rootfs: bool,
+    /// Whether tmpfs mounts should be disabled (default: enabled).
+    no_tmpfs: bool,
+    /// Memory limit override in bytes (default: `ContainerConfig::DEFAULT_MEMORY_BYTES`).
+    memory_bytes: Option<u64>,
     /// Serializes all IPC access and container lifecycle mutations.
     state: Mutex<ContainerState>,
     /// Monotonic call-ID counter for correlating Execute/Result pairs.
@@ -92,6 +100,10 @@ impl ContainerTool {
             capabilities,
             ipc_dir,
             workspace_dir: None,
+            network_mode: None,
+            writable_rootfs: false,
+            no_tmpfs: false,
+            memory_bytes: None,
             state: Mutex::new(ContainerState {
                 container_id: None,
                 transport: None,
@@ -105,6 +117,30 @@ impl ContainerTool {
     /// Set a host directory to bind-mount at `/workspace` inside the container.
     pub fn with_workspace(mut self, dir: PathBuf) -> Self {
         self.workspace_dir = Some(dir);
+        self
+    }
+
+    /// Set the Docker network mode (e.g., `"bridge"` for outbound access).
+    pub fn with_network(mut self, mode: &str) -> Self {
+        self.network_mode = Some(mode.to_owned());
+        self
+    }
+
+    /// Allow writes to the root filesystem (disables `--read-only`).
+    pub fn with_writable_rootfs(mut self) -> Self {
+        self.writable_rootfs = true;
+        self
+    }
+
+    /// Disable tmpfs mounts (use the container's default `/tmp`).
+    pub fn without_tmpfs(mut self) -> Self {
+        self.no_tmpfs = true;
+        self
+    }
+
+    /// Override the container memory limit.
+    pub fn with_memory(mut self, bytes: u64) -> Self {
+        self.memory_bytes = Some(bytes);
         self
     }
 
@@ -327,6 +363,18 @@ impl ContainerTool {
         );
         if let Some(ref ws) = self.workspace_dir {
             config = config.with_workspace(ws.clone());
+        }
+        if let Some(ref mode) = self.network_mode {
+            config = config.with_network(mode);
+        }
+        if self.writable_rootfs {
+            config = config.with_writable_rootfs();
+        }
+        if self.no_tmpfs {
+            config = config.without_tmpfs();
+        }
+        if let Some(bytes) = self.memory_bytes {
+            config.memory_bytes = bytes;
         }
         let container_id = self.runtime.spawn(&config).await?;
         state.container_id = Some(container_id.clone());

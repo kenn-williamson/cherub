@@ -483,7 +483,7 @@ async fn container_bash_docker_e2e() {
     .expect("execute");
     assert_eq!(result.output.trim(), "hello");
 
-    // Test 2: env should only show CHERUB_IPC_SOCKET
+    // Test 2: env should only show container-internal vars (not host secrets)
     let token2 = enforcement::approve_escalation(Tier::Observe);
     let result2 = timeout(
         Duration::from_secs(30),
@@ -500,6 +500,16 @@ async fn container_bash_docker_e2e() {
     assert!(
         !result2.output.contains("ANTHROPIC_API_KEY"),
         "env should NOT show API key: {}",
+        result2.output
+    );
+    assert!(
+        !result2.output.contains("CHERUB_MASTER_KEY"),
+        "env should NOT show master key: {}",
+        result2.output
+    );
+    assert!(
+        !result2.output.contains("DATABASE_URL"),
+        "env should NOT show database URL: {}",
         result2.output
     );
 
@@ -540,6 +550,42 @@ async fn container_bash_docker_e2e() {
         "workspace should be visible: {}",
         result4.output
     );
+
+    // Test 5: host filesystem not visible (host /etc/hostname differs from container)
+    let token5 = enforcement::approve_escalation(Tier::Observe);
+    let result5 = timeout(
+        Duration::from_secs(30),
+        bash_tool.execute(
+            &serde_json::json!({"command": "cat /etc/os-release 2>&1 | head -1"}),
+            token5,
+            &ctx,
+        ),
+    )
+    .await
+    .expect("execute timeout")
+    .expect("execute");
+    // Container uses Debian (python:3.13-slim), not the host OS.
+    assert!(
+        result5.output.contains("Debian") || result5.output.contains("debian"),
+        "container should run Debian, got: {}",
+        result5.output
+    );
+
+    // Test 6: build tools work (if image built with LANGUAGES=rust)
+    let token6 = enforcement::approve_escalation(Tier::Observe);
+    let result6 = timeout(
+        Duration::from_secs(30),
+        bash_tool.execute(
+            &serde_json::json!({"command": "which cargo 2>/dev/null && cargo --version || echo 'no cargo'"}),
+            token6,
+            &ctx,
+        ),
+    )
+    .await
+    .expect("execute timeout")
+    .expect("execute");
+    // This test passes whether or not Rust was installed — it just logs the result.
+    eprintln!("cargo availability: {}", result6.output.trim());
 
     bash_tool.shutdown().await;
 }

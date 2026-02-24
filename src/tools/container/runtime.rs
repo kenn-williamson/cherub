@@ -35,6 +35,15 @@ pub struct ContainerConfig {
     /// Optional host directory bind-mounted at `/workspace` inside the container.
     /// Used by the sandbox bash tool to give the agent read/write access to project files.
     pub workspace_dir: Option<PathBuf>,
+    /// Docker network mode (default: `"none"` — no outbound network).
+    /// Set to `"bridge"` for sandbox bash to enable dependency fetching.
+    pub network_mode: String,
+    /// Whether the root filesystem is read-only (default: `true`).
+    /// Set to `false` for sandbox bash so build tools can write caches.
+    pub readonly_rootfs: bool,
+    /// Optional tmpfs mounts (default: `/tmp` with `noexec`).
+    /// Set to `None` for sandbox bash — `/tmp` is a normal writable dir.
+    pub tmpfs: Option<HashMap<String, String>>,
 }
 
 impl ContainerConfig {
@@ -51,12 +60,36 @@ impl ContainerConfig {
             memory_bytes: Self::DEFAULT_MEMORY_BYTES,
             cpu_shares: Self::DEFAULT_CPU_SHARES,
             workspace_dir: None,
+            network_mode: "none".to_owned(),
+            readonly_rootfs: true,
+            tmpfs: Some(HashMap::from([(
+                "/tmp".to_owned(),
+                "rw,size=65536k,noexec,nosuid".to_owned(),
+            )])),
         }
     }
 
     /// Set a host directory to bind-mount at `/workspace` inside the container.
     pub fn with_workspace(mut self, dir: PathBuf) -> Self {
         self.workspace_dir = Some(dir);
+        self
+    }
+
+    /// Set the Docker network mode (e.g., `"bridge"` for outbound access).
+    pub fn with_network(mut self, mode: &str) -> Self {
+        self.network_mode = mode.to_owned();
+        self
+    }
+
+    /// Allow writes to the root filesystem (disables `--read-only`).
+    pub fn with_writable_rootfs(mut self) -> Self {
+        self.readonly_rootfs = false;
+        self
+    }
+
+    /// Disable tmpfs mounts (use the container's default `/tmp`).
+    pub fn without_tmpfs(mut self) -> Self {
+        self.tmpfs = None;
         self
     }
 }
@@ -150,25 +183,22 @@ impl ContainerRuntime for BollardRuntime {
         };
 
         let host_config = HostConfig {
-            // No outbound network — tools call host functions for HTTP.
-            network_mode: Some("none".to_owned()),
+            // Network mode: "none" for third-party tools, "bridge" for sandbox bash.
+            network_mode: Some(config.network_mode.clone()),
             // Drop all Linux capabilities.
             cap_drop: Some(vec!["ALL".to_owned()]),
             // Prevent privilege escalation via setuid/setgid.
             security_opt: Some(vec!["no-new-privileges:true".to_owned()]),
-            // Root filesystem is read-only; /tmp is writable via tmpfs (see mounts below).
-            readonly_rootfs: Some(true),
+            // Root filesystem: read-only for third-party tools, writable for sandbox bash.
+            readonly_rootfs: Some(config.readonly_rootfs),
             // cgroup memory limit.
             memory: Some(config.memory_bytes as i64),
             // cgroup CPU weight.
             cpu_shares: Some(config.cpu_shares as i64),
             // Bind-mount IPC and optionally workspace.
             mounts: Some(mounts),
-            // tmpfs at /tmp: tool scratch space, inherently wiped between calls.
-            tmpfs: Some(HashMap::from([(
-                "/tmp".to_owned(),
-                "rw,size=65536k,noexec,nosuid".to_owned(),
-            )])),
+            // tmpfs: restricted /tmp for third-party tools, None for sandbox bash.
+            tmpfs: config.tmpfs.clone(),
             ..Default::default()
         };
 

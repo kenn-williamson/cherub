@@ -21,10 +21,12 @@
 # (Telegram). This replaces in-process bash with a container-sandboxed
 # equivalent that runs in an isolated filesystem with no access to the host
 # environment, process tree, secrets, or policy file. The agent's workspace
-# is bind-mounted at /workspace (read-write).
+# is bind-mounted at /workspace (read-write). The container has full network
+# access and build tools for compiling/testing projects.
 #
 # Requires: Docker daemon + `cherub-sandbox-bash:latest` image.
-# Build:    docker build -t cherub-sandbox-bash:latest tools/container/sandbox-bash/
+# Build (base):      docker build -t cherub-sandbox-bash:latest tools/container/sandbox-bash/
+# Build (with Rust): docker build --build-arg LANGUAGES="rust" -t cherub-sandbox-bash:latest tools/container/sandbox-bash/
 
 [tools.bash]
 enabled = true
