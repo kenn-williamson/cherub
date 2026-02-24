@@ -125,6 +125,27 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Check for sandbox bash (container-sandboxed bash replacement).
+    #[cfg(feature = "container")]
+    let sandbox_bash_runtime: Option<
+        std::sync::Arc<dyn cherub::tools::container::ContainerRuntime>,
+    > = {
+        use cherub::tools::container::BollardRuntime;
+        if std::env::var("CHERUB_SANDBOX_BASH").is_ok() {
+            let runtime = BollardRuntime::new()
+                .context("CHERUB_SANDBOX_BASH requires Docker — failed to connect")?;
+            let rt: std::sync::Arc<dyn cherub::tools::container::ContainerRuntime> =
+                std::sync::Arc::new(runtime);
+            if !rt.is_available().await {
+                bail!("CHERUB_SANDBOX_BASH requires Docker but the daemon is not reachable");
+            }
+            info!("sandbox bash enabled — bash commands will run in isolated containers");
+            Some(rt)
+        } else {
+            None
+        }
+    };
+
     let bot = Bot::new(&bot_token_raw);
     info!(model = %model, "cherub-telegram starting");
 
@@ -143,6 +164,8 @@ async fn main() -> Result<()> {
         db_pool,
         #[cfg(feature = "memory")]
         embedder,
+        #[cfg(feature = "container")]
+        sandbox_bash_runtime,
     };
 
     // Spawn session manager and approval manager tasks.

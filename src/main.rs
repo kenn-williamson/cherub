@@ -33,6 +33,9 @@ enum Command {
         /// Optional directory of container tool configs to load (M9).
         #[cfg(feature = "container")]
         container_tools_dir: Option<PathBuf>,
+        /// Replace in-process bash with a container-sandboxed equivalent.
+        #[cfg(feature = "container")]
+        sandbox_bash: bool,
     },
     /// Credential vault management (M7a).
     #[cfg(feature = "credentials")]
@@ -94,6 +97,8 @@ fn parse_args() -> Result<Command> {
     let mut wasm_tools_dir: Option<PathBuf> = None;
     #[cfg(feature = "container")]
     let mut container_tools_dir: Option<PathBuf> = None;
+    #[cfg(feature = "container")]
+    let mut sandbox_bash = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -124,6 +129,10 @@ fn parse_args() -> Result<Command> {
                     container_tools_dir = Some(PathBuf::from(&args[i]));
                 }
             }
+            #[cfg(feature = "container")]
+            "--sandbox-bash" => {
+                sandbox_bash = true;
+            }
             _ => {}
         }
         i += 1;
@@ -136,6 +145,8 @@ fn parse_args() -> Result<Command> {
         wasm_tools_dir,
         #[cfg(feature = "container")]
         container_tools_dir,
+        #[cfg(feature = "container")]
+        sandbox_bash,
     })
 }
 
@@ -491,6 +502,7 @@ async fn run_agent(
     model: String,
     #[cfg(feature = "wasm")] wasm_tools_dir: Option<PathBuf>,
     #[cfg(feature = "container")] container_tools_dir: Option<PathBuf>,
+    #[cfg(feature = "container")] sandbox_bash: bool,
 ) -> Result<()> {
     let user_id = std::env::var("USER").unwrap_or_else(|_| "local".to_owned());
 
@@ -534,6 +546,12 @@ async fn run_agent(
         }
     };
 
+    // Should we replace in-process bash with container-sandboxed bash?
+    #[cfg(feature = "container")]
+    let skip_builtin_bash = sandbox_bash;
+    #[cfg(not(feature = "container"))]
+    let skip_builtin_bash = false;
+
     // Build ToolRegistry — attach memory store if available.
     #[cfg(feature = "memory")]
     let (registry, memory_store_for_injection) = {
@@ -565,14 +583,24 @@ async fn run_agent(
                 }
             };
 
-            let registry = ToolRegistry::with_memory(Arc::clone(&store));
+            let registry = if skip_builtin_bash {
+                ToolRegistry::with_memory_no_bash(Arc::clone(&store))
+            } else {
+                ToolRegistry::with_memory(Arc::clone(&store))
+            };
             (registry, Some(store))
+        } else if skip_builtin_bash {
+            (ToolRegistry::new_without_bash(), None)
         } else {
             (ToolRegistry::new(), None)
         }
     };
     #[cfg(not(feature = "memory"))]
-    let registry = ToolRegistry::new();
+    let registry = if skip_builtin_bash {
+        ToolRegistry::new_without_bash()
+    } else {
+        ToolRegistry::new()
+    };
 
     // Attach credential broker + HTTP tool if credentials feature is active.
     #[cfg(feature = "credentials")]
@@ -683,6 +711,33 @@ async fn run_agent(
             }
         } else {
             registry
+        }
+    };
+
+    // Replace in-process bash with container-sandboxed bash if requested.
+    #[cfg(feature = "container")]
+    let (registry, _sandbox_bash_ipc_dir) = {
+        if sandbox_bash {
+            use cherub::tools::container::BollardRuntime;
+            use std::sync::Arc;
+
+            let runtime = BollardRuntime::new()
+                .context("--sandbox-bash requires Docker — failed to connect")?;
+            let rt: Arc<dyn cherub::tools::container::ContainerRuntime> = Arc::new(runtime);
+            if !rt.is_available().await {
+                bail!("--sandbox-bash requires Docker but the daemon is not reachable");
+            }
+
+            let workspace = std::env::current_dir()
+                .context("--sandbox-bash: failed to determine current directory")?;
+            let (bash_tool, ipc_dir) =
+                cherub::tools::container_bash::build(Arc::clone(&rt), workspace);
+
+            let registry = registry.with_container(vec![bash_tool]);
+            info!("sandbox bash enabled — bash commands run in isolated container");
+            (registry, Some(ipc_dir))
+        } else {
+            (registry, None)
         }
     };
 
@@ -800,6 +855,8 @@ async fn main() -> Result<()> {
             wasm_tools_dir,
             #[cfg(feature = "container")]
             container_tools_dir,
+            #[cfg(feature = "container")]
+            sandbox_bash,
         } => {
             run_agent(
                 policy_path,
@@ -808,6 +865,8 @@ async fn main() -> Result<()> {
                 wasm_tools_dir,
                 #[cfg(feature = "container")]
                 container_tools_dir,
+                #[cfg(feature = "container")]
+                sandbox_bash,
             )
             .await
         }

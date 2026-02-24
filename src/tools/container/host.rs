@@ -122,8 +122,7 @@ impl ContainerHostState {
             &std::sync::Arc<crate::tools::credential_broker::CredentialBroker>,
         >,
     ) -> serde_json::Value {
-        let _span =
-            tracing::debug_span!("container_host_call", tool = tool_name, function).entered();
+        let _span = tracing::debug_span!("container_host_call", tool = tool_name, function);
 
         let result = match function {
             "now_millis" => Ok(serde_json::json!(now_millis())),

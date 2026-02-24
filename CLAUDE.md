@@ -36,6 +36,7 @@ cherub/
 │   ├── tools/
 │   │   ├── mod.rs            # Tool trait, ToolRegistry, ToolImpl enum dispatch, ToolContext
 │   │   ├── bash.rs           # Bash execution tool (tokio::process::Command)
+│   │   ├── container_bash.rs # Factory: container-sandboxed bash replacement (feature = "container")
 │   │   ├── memory.rs         # Memory tool: store/recall/search/update/forget (feature = "memory")
 │   │   ├── http.rs           # HTTP tool: GET/POST/PUT/PATCH/DELETE with broker injection (feature = "credentials")
 │   │   ├── credential_broker.rs  # CredentialBroker: name → inject into reqwest::RequestBuilder (feature = "credentials")
@@ -88,6 +89,7 @@ cherub/
 │   ├── fixtures/
 │   │   └── mod.rs            # Shared test fixtures: TestContainer + MockEmbeddingProvider (M6c)
 │   ├── memory_enforcement.rs # Memory tool enforcement tests, no DB needed (feature = "memory")
+│   ├── container_bash.rs     # Container-sandboxed bash tests (IPC format, registry, #[ignore] Docker e2e)
 │   ├── container_lifecycle.rs  # Container IPC interop tests (M9, Python subprocess mock + #[ignore] Docker)
 │   ├── memory_injection.rs   # Proactive injection integration tests (M6d, no DB needed)
 │   ├── memory_store.rs       # PgMemoryStore integration tests (M6b + M6c hybrid search)
@@ -339,8 +341,15 @@ DATABASE_URL=postgres://cherub:cherub_dev@localhost:5480/cherub \
 # Run with custom policy
 ANTHROPIC_API_KEY=sk-... cargo run -- --policy path/to/policy.toml
 
+# Run with sandbox bash (requires Docker + built image)
+# Build image first: docker build -t cherub-sandbox-bash:latest tools/container/sandbox-bash/
+ANTHROPIC_API_KEY=sk-... cargo run --features container -- --sandbox-bash
+
 # Run Telegram bot (TELEGRAM_ALLOWED_CHATS is required)
 TELEGRAM_BOT_TOKEN=... ANTHROPIC_API_KEY=sk-... TELEGRAM_ALLOWED_CHATS=123456,789012 cargo run --features telegram --bin cherub-telegram
+
+# Run Telegram bot with sandbox bash
+CHERUB_SANDBOX_BASH=1 TELEGRAM_BOT_TOKEN=... ANTHROPIC_API_KEY=sk-... TELEGRAM_ALLOWED_CHATS=123456,789012 cargo run --features telegram,container --bin cherub-telegram
 
 # Telegram bot open to all users (not recommended)
 TELEGRAM_BOT_TOKEN=... ANTHROPIC_API_KEY=sk-... TELEGRAM_ALLOWED_CHATS='*' cargo run --features telegram --bin cherub-telegram
@@ -377,6 +386,15 @@ cargo nextest run --features memory --test memory_enforcement --test memory_inje
 
 # Live embedding test (requires OPENAI_API_KEY, skipped by default)
 OPENAI_API_KEY=sk-... cargo nextest run --features memory --test embedding_live -- --ignored
+
+# Test container-sandboxed bash (Python subprocess mock, no Docker needed)
+cargo nextest run --features container --test container_bash
+
+# Test container bash + existing container lifecycle tests
+cargo nextest run --features container --test container_bash --test container_lifecycle
+
+# Docker integration test (requires Docker + built images, skipped by default)
+cargo nextest run --features container --test container_bash -- --ignored
 ```
 
 ## Policy File Format (TOML)

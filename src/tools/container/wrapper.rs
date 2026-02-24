@@ -68,6 +68,8 @@ pub struct ContainerTool {
     capabilities: ContainerCapabilities,
     /// Host filesystem directory bind-mounted at `/ipc/` inside the container.
     ipc_dir: PathBuf,
+    /// Optional host directory bind-mounted at `/workspace` inside the container.
+    workspace_dir: Option<PathBuf>,
     /// Serializes all IPC access and container lifecycle mutations.
     state: Mutex<ContainerState>,
     /// Monotonic call-ID counter for correlating Execute/Result pairs.
@@ -89,6 +91,7 @@ impl ContainerTool {
             runtime,
             capabilities,
             ipc_dir,
+            workspace_dir: None,
             state: Mutex::new(ContainerState {
                 container_id: None,
                 transport: None,
@@ -97,6 +100,12 @@ impl ContainerTool {
             #[cfg(feature = "credentials")]
             broker: None,
         }
+    }
+
+    /// Set a host directory to bind-mount at `/workspace` inside the container.
+    pub fn with_workspace(mut self, dir: PathBuf) -> Self {
+        self.workspace_dir = Some(dir);
+        self
     }
 
     /// Attach a credential broker for credential injection in host HTTP calls.
@@ -311,11 +320,14 @@ impl ContainerTool {
         })?;
 
         // Spawn the container (bind-mounts ipc_dir → /ipc/ in the container).
-        let config = ContainerConfig::new(
+        let mut config = ContainerConfig::new(
             &self.metadata.image,
             &self.metadata.name,
             self.ipc_dir.clone(),
         );
+        if let Some(ref ws) = self.workspace_dir {
+            config = config.with_workspace(ws.clone());
+        }
         let container_id = self.runtime.spawn(&config).await?;
         state.container_id = Some(container_id.clone());
 

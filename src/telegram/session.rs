@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-#[cfg(feature = "memory")]
+#[cfg(any(feature = "memory", feature = "container"))]
 use std::sync::Arc;
 
 use teloxide::prelude::*;
@@ -36,6 +36,10 @@ pub struct SessionConfig {
     /// `None` = FTS-only search.
     #[cfg(feature = "memory")]
     pub embedder: Option<Arc<dyn crate::storage::embedding::EmbeddingProvider>>,
+    /// Container runtime for sandbox bash. When `Some`, in-process bash is
+    /// replaced by a container-sandboxed equivalent.
+    #[cfg(feature = "container")]
+    pub sandbox_bash_runtime: Option<Arc<dyn crate::tools::container::ContainerRuntime>>,
 }
 
 /// Message sent to the session manager from the connector.
@@ -77,6 +81,8 @@ pub async fn session_manager(
                         db_pool: config.db_pool.clone(),
                         #[cfg(feature = "memory")]
                         embedder: config.embedder.clone(),
+                        #[cfg(feature = "container")]
+                        sandbox_bash_runtime: config.sandbox_bash_runtime.clone(),
                     };
                     let approval_tx = approval_tx.clone();
 
@@ -119,6 +125,12 @@ async fn chat_session(
     // Derive user identity from the Telegram chat ID (unique per chat channel).
     let user_id = chat_id.to_string();
 
+    // Should we replace in-process bash with container-sandboxed bash?
+    #[cfg(feature = "container")]
+    let skip_builtin_bash = config.sandbox_bash_runtime.is_some();
+    #[cfg(not(feature = "container"))]
+    let skip_builtin_bash = false;
+
     // Build ToolRegistry — attach memory store if available.
     // The store is Arc so it can be shared between the tool registry and injection.
     #[cfg(feature = "memory")]
@@ -131,14 +143,39 @@ async fn chat_session(
                 Some(embedder) => Arc::new(PgMemoryStore::with_embedder(pool.clone(), embedder)),
                 None => Arc::new(PgMemoryStore::new(pool.clone())),
             };
-            let registry = ToolRegistry::with_memory(Arc::clone(&store));
+            let registry = if skip_builtin_bash {
+                ToolRegistry::with_memory_no_bash(Arc::clone(&store))
+            } else {
+                ToolRegistry::with_memory(Arc::clone(&store))
+            };
             (registry, Some(store))
+        } else if skip_builtin_bash {
+            (ToolRegistry::new_without_bash(), None)
         } else {
             (ToolRegistry::new(), None)
         }
     };
     #[cfg(not(feature = "memory"))]
-    let registry = ToolRegistry::new();
+    let registry = if skip_builtin_bash {
+        ToolRegistry::new_without_bash()
+    } else {
+        ToolRegistry::new()
+    };
+
+    // Add container-sandboxed bash if runtime is available.
+    #[cfg(feature = "container")]
+    let (registry, _sandbox_bash_ipc_dir) = {
+        if let Some(ref rt) = config.sandbox_bash_runtime {
+            let workspace = std::env::current_dir().unwrap_or_else(|_| ".".into());
+            let (bash_tool, ipc_dir) =
+                crate::tools::container_bash::build(Arc::clone(rt), workspace);
+            let registry = registry.with_container(vec![bash_tool]);
+            info!(chat_id = %chat_id, "sandbox bash enabled for chat session");
+            (registry, Some(ipc_dir))
+        } else {
+            (registry, None)
+        }
+    };
 
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())

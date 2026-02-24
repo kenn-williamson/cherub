@@ -17,9 +17,14 @@
 #     and could read or exfiltrate them via shell commands (e.g., `cat .env`).
 #   - Untrusted workloads of any kind.
 #
-# For sandboxed bash in production, use a container tool (M9) instead.
-# Container tools run in an isolated filesystem with no access to the host
-# environment, process tree, or secrets.
+# For sandboxed bash, use `--sandbox-bash` (CLI) or `CHERUB_SANDBOX_BASH=1`
+# (Telegram). This replaces in-process bash with a container-sandboxed
+# equivalent that runs in an isolated filesystem with no access to the host
+# environment, process tree, secrets, or policy file. The agent's workspace
+# is bind-mounted at /workspace (read-write).
+#
+# Requires: Docker daemon + `cherub-sandbox-bash:latest` image.
+# Build:    docker build -t cherub-sandbox-bash:latest tools/container/sandbox-bash/
 
 [tools.bash]
 enabled = true

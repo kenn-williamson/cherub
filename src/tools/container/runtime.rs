@@ -32,6 +32,9 @@ pub struct ContainerConfig {
     pub memory_bytes: u64,
     /// CPU shares (relative weight; default: 512 — half of 1024 baseline).
     pub cpu_shares: u64,
+    /// Optional host directory bind-mounted at `/workspace` inside the container.
+    /// Used by the sandbox bash tool to give the agent read/write access to project files.
+    pub workspace_dir: Option<PathBuf>,
 }
 
 impl ContainerConfig {
@@ -47,7 +50,14 @@ impl ContainerConfig {
             ipc_dir,
             memory_bytes: Self::DEFAULT_MEMORY_BYTES,
             cpu_shares: Self::DEFAULT_CPU_SHARES,
+            workspace_dir: None,
         }
+    }
+
+    /// Set a host directory to bind-mount at `/workspace` inside the container.
+    pub fn with_workspace(mut self, dir: PathBuf) -> Self {
+        self.workspace_dir = Some(dir);
+        self
     }
 }
 
@@ -111,6 +121,34 @@ impl ContainerRuntime for BollardRuntime {
         // Unique container name to avoid conflicts on restart.
         let container_name = format!("{}-{}", config.name, &uuid::Uuid::now_v7().to_string()[..8]);
 
+        // Build mount list: always includes IPC, optionally includes workspace.
+        let mut mounts = vec![Mount {
+            target: Some("/ipc".to_owned()),
+            source: Some(ipc_dir),
+            typ: Some(MountTypeEnum::BIND),
+            read_only: Some(false), // socket connect only needs path traversal
+            ..Default::default()
+        }];
+
+        let working_dir = if let Some(ref workspace) = config.workspace_dir {
+            let ws_str = workspace
+                .to_str()
+                .ok_or_else(|| {
+                    CherubError::Container("workspace dir path is not valid UTF-8".to_owned())
+                })?
+                .to_owned();
+            mounts.push(Mount {
+                target: Some("/workspace".to_owned()),
+                source: Some(ws_str),
+                typ: Some(MountTypeEnum::BIND),
+                read_only: Some(false),
+                ..Default::default()
+            });
+            Some("/workspace".to_owned())
+        } else {
+            None
+        };
+
         let host_config = HostConfig {
             // No outbound network — tools call host functions for HTTP.
             network_mode: Some("none".to_owned()),
@@ -124,14 +162,8 @@ impl ContainerRuntime for BollardRuntime {
             memory: Some(config.memory_bytes as i64),
             // cgroup CPU weight.
             cpu_shares: Some(config.cpu_shares as i64),
-            // Bind-mount the IPC socket directory (container connects to /ipc/tool.sock).
-            mounts: Some(vec![Mount {
-                target: Some("/ipc".to_owned()),
-                source: Some(ipc_dir),
-                typ: Some(MountTypeEnum::BIND),
-                read_only: Some(false), // socket connect only needs path traversal
-                ..Default::default()
-            }]),
+            // Bind-mount IPC and optionally workspace.
+            mounts: Some(mounts),
             // tmpfs at /tmp: tool scratch space, inherently wiped between calls.
             tmpfs: Some(HashMap::from([(
                 "/tmp".to_owned(),
@@ -144,6 +176,7 @@ impl ContainerRuntime for BollardRuntime {
             image: Some(config.image.clone()),
             user: Some("1000:1000".to_owned()),
             env: Some(vec!["CHERUB_IPC_SOCKET=/ipc/tool.sock".to_owned()]),
+            working_dir,
             host_config: Some(host_config),
             ..Default::default()
         };

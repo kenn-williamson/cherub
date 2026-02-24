@@ -1,6 +1,8 @@
 pub mod bash;
 #[cfg(feature = "container")]
 pub mod container;
+#[cfg(feature = "container")]
+pub mod container_bash;
 #[cfg(feature = "credentials")]
 pub mod credential_broker;
 #[cfg(feature = "credentials")]
@@ -265,6 +267,14 @@ impl ToolRegistry {
         }
     }
 
+    /// Create a registry with no built-in tools.
+    ///
+    /// Used when bash is replaced by a container-sandboxed equivalent
+    /// (registered later via `with_container()`).
+    pub fn new_without_bash() -> Self {
+        Self { tools: vec![] }
+    }
+
     /// Create a registry with the memory tool attached.
     #[cfg(feature = "memory")]
     pub fn with_memory(store: std::sync::Arc<dyn crate::storage::MemoryStore>) -> Self {
@@ -273,6 +283,16 @@ impl ToolRegistry {
                 ToolImpl::Bash(BashTool::new()),
                 ToolImpl::Memory(MemoryTool::new(store)),
             ],
+        }
+    }
+
+    /// Create a registry with only the memory tool (no built-in bash).
+    ///
+    /// Used when bash is replaced by a container-sandboxed equivalent.
+    #[cfg(feature = "memory")]
+    pub fn with_memory_no_bash(store: std::sync::Arc<dyn crate::storage::MemoryStore>) -> Self {
+        Self {
+            tools: vec![ToolImpl::Memory(MemoryTool::new(store))],
         }
     }
 
