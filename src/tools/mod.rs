@@ -5,6 +5,8 @@ pub mod container;
 pub mod container_bash;
 #[cfg(feature = "credentials")]
 pub mod credential_broker;
+#[cfg(feature = "container")]
+pub mod dev_environment;
 #[cfg(feature = "credentials")]
 pub mod http;
 #[cfg(feature = "credentials")]
@@ -15,6 +17,8 @@ pub mod memory;
 pub mod wasm;
 
 use std::marker::PhantomData;
+#[cfg(feature = "container")]
+use std::sync::Arc;
 
 use serde_json::json;
 use uuid::Uuid;
@@ -26,6 +30,8 @@ use crate::providers::ToolDefinition;
 use bash::BashTool;
 #[cfg(feature = "container")]
 use container::ContainerTool;
+#[cfg(feature = "container")]
+use dev_environment::DevEnvironmentTool;
 #[cfg(feature = "credentials")]
 use http::HttpTool;
 #[cfg(feature = "memory")]
@@ -111,7 +117,9 @@ pub(crate) enum ToolImpl {
     #[cfg(feature = "wasm")]
     Wasm(WasmTool),
     #[cfg(feature = "container")]
-    Container(ContainerTool),
+    Container(Arc<ContainerTool>),
+    #[cfg(feature = "container")]
+    DevEnvironment(DevEnvironmentTool),
 }
 
 impl ToolImpl {
@@ -126,6 +134,8 @@ impl ToolImpl {
             Self::Wasm(t) => &t.module.name,
             #[cfg(feature = "container")]
             Self::Container(t) => &t.metadata.name,
+            #[cfg(feature = "container")]
+            Self::DevEnvironment(_) => "dev_environment",
         }
     }
 
@@ -147,6 +157,8 @@ impl ToolImpl {
             Self::Wasm(tool) => tool.execute(params, token, &_ctx.user_id).await,
             #[cfg(feature = "container")]
             Self::Container(tool) => tool.execute(params, token, _ctx).await,
+            #[cfg(feature = "container")]
+            Self::DevEnvironment(tool) => tool.execute(params, token).await,
         }
     }
 
@@ -250,6 +262,8 @@ impl ToolImpl {
                     input_schema: m.schema.clone(),
                 }
             }
+            #[cfg(feature = "container")]
+            Self::DevEnvironment(_) => dev_environment::tool_definition(),
         }
     }
 }
@@ -322,9 +336,16 @@ impl ToolRegistry {
     ///
     /// Call after `new()`, `with_memory()`, `with_credentials()`, or `with_wasm()`.
     #[cfg(feature = "container")]
-    pub fn with_container(mut self, tools: Vec<ContainerTool>) -> Self {
+    pub fn with_container(mut self, tools: Vec<Arc<ContainerTool>>) -> Self {
         self.tools
             .extend(tools.into_iter().map(ToolImpl::Container));
+        self
+    }
+
+    /// Add the dev_environment tool to the registry (builder pattern).
+    #[cfg(feature = "container")]
+    pub fn with_dev_environment(mut self, tool: DevEnvironmentTool) -> Self {
+        self.tools.push(ToolImpl::DevEnvironment(tool));
         self
     }
 

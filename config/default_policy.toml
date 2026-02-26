@@ -200,6 +200,22 @@ patterns = [
 #     "^delete:api\\.stripe\\.com$",
 # ]
 
+# ─── Dev environment tool (sandbox image builder) ────────────────────────────
+#
+# Allows the agent to build custom sandbox Docker images with specific
+# language toolchains (rust, node, go). Python 3 is always included.
+# Uses structured action matching: the action string is just "setup".
+#
+# Act tier: auto-allowed in CLI, requires human approval in Telegram.
+
+[tools.dev_environment]
+enabled = true
+match_source = "structured"
+
+[tools.dev_environment.actions.setup]
+tier = "act"
+patterns = ["^setup$"]
+
 # ─── Constraint operators ─────────────────────────────────────────────────────
 #
 #   eq          — exact match (string, number, bool)

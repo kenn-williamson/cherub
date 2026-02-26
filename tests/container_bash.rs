@@ -414,6 +414,7 @@ async fn registry_no_bash_then_container_bash() {
     let workspace = std::env::current_dir().expect("cwd");
     let (bash_tool, _ipc_dir) = cherub::tools::container_bash::build(runtime, workspace);
 
+    // build() now returns Arc<ContainerTool>
     let registry = ToolRegistry::new_without_bash().with_container(vec![bash_tool]);
 
     // Exactly one tool should be registered (the container bash, no duplicate built-in).

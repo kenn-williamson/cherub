@@ -57,6 +57,9 @@ pub struct ContainerToolMetadata {
 struct ContainerState {
     container_id: Option<String>,
     transport: Option<IpcTransport>,
+    /// Overrides the image from `ContainerToolMetadata`. Set by `DevEnvironmentTool`
+    /// when the agent requests a custom sandbox image with specific language toolchains.
+    image_override: Option<String>,
 }
 
 // ─── ContainerTool ────────────────────────────────────────────────────────────
@@ -107,6 +110,7 @@ impl ContainerTool {
             state: Mutex::new(ContainerState {
                 container_id: None,
                 transport: None,
+                image_override: None,
             }),
             next_id: AtomicU64::new(1),
             #[cfg(feature = "credentials")]
@@ -356,11 +360,11 @@ impl ContainerTool {
         })?;
 
         // Spawn the container (bind-mounts ipc_dir → /ipc/ in the container).
-        let mut config = ContainerConfig::new(
-            &self.metadata.image,
-            &self.metadata.name,
-            self.ipc_dir.clone(),
-        );
+        let image = state
+            .image_override
+            .as_deref()
+            .unwrap_or(&self.metadata.image);
+        let mut config = ContainerConfig::new(image, &self.metadata.name, self.ipc_dir.clone());
         if let Some(ref ws) = self.workspace_dir {
             config = config.with_workspace(ws.clone());
         }
@@ -433,6 +437,24 @@ impl ContainerTool {
             "container tool ready"
         );
         Ok(())
+    }
+
+    /// Reconfigure the container to use a different image.
+    ///
+    /// Gracefully shuts down any running container and sets the image override.
+    /// The next `execute()` call will start a fresh container from the new image.
+    pub(crate) async fn reconfigure_image(&self, image: &str) {
+        let mut state = self.state.lock().await;
+        // Gracefully shut down running container.
+        if let Some(ref mut transport) = state.transport {
+            let _ = transport.send(&RuntimeMessage::Shutdown).await;
+        }
+        state.transport = None;
+        if let Some(cid) = state.container_id.take() {
+            let _ = self.runtime.stop(&cid).await;
+            let _ = self.runtime.remove(&cid).await;
+        }
+        state.image_override = Some(image.to_owned());
     }
 
     /// Send `Shutdown` and remove the container. Called explicitly when unloading.

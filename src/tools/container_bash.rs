@@ -22,10 +22,16 @@ pub const IMAGE: &str = "cherub-sandbox-bash:latest";
 
 /// Build a container-sandboxed bash tool.
 ///
-/// Returns `(ContainerTool, PathBuf)`. The `PathBuf` is the IPC directory;
+/// Returns `(Arc<ContainerTool>, PathBuf)`. The `PathBuf` is the IPC directory;
 /// the caller must keep it alive for the lifetime of the tool (it is auto-cleaned
 /// on process exit since it lives under the OS temp dir).
-pub fn build(runtime: Arc<dyn ContainerRuntime>, workspace: PathBuf) -> (ContainerTool, PathBuf) {
+///
+/// The `Arc` allows sharing the `ContainerTool` with the `DevEnvironmentTool`,
+/// which needs to reconfigure the image at runtime.
+pub fn build(
+    runtime: Arc<dyn ContainerRuntime>,
+    workspace: PathBuf,
+) -> (Arc<ContainerTool>, PathBuf) {
     let ipc_dir =
         std::env::temp_dir().join(format!("cherub-sandbox-bash-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&ipc_dir).expect("failed to create IPC dir for sandbox bash");
@@ -56,5 +62,5 @@ pub fn build(runtime: Arc<dyn ContainerRuntime>, workspace: PathBuf) -> (Contain
         .without_tmpfs()
         .with_memory(4 * 1024 * 1024 * 1024); // 4 GiB — cargo/node builds need headroom
 
-    (tool, ipc_dir)
+    (Arc::new(tool), ipc_dir)
 }

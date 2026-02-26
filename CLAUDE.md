@@ -37,6 +37,7 @@ cherub/
 │   │   ├── mod.rs            # Tool trait, ToolRegistry, ToolImpl enum dispatch, ToolContext
 │   │   ├── bash.rs           # Bash execution tool (tokio::process::Command)
 │   │   ├── container_bash.rs # Factory: container-sandboxed bash replacement (feature = "container")
+│   │   ├── dev_environment.rs # Dev environment tool: build sandbox images with language toolchains (feature = "container")
 │   │   ├── memory.rs         # Memory tool: store/recall/search/update/forget (feature = "memory")
 │   │   ├── http.rs           # HTTP tool: GET/POST/PUT/PATCH/DELETE with broker injection (feature = "credentials")
 │   │   ├── credential_broker.rs  # CredentialBroker: name → inject into reqwest::RequestBuilder (feature = "credentials")
@@ -91,6 +92,7 @@ cherub/
 │   ├── memory_enforcement.rs # Memory tool enforcement tests, no DB needed (feature = "memory")
 │   ├── container_bash.rs     # Container-sandboxed bash tests (IPC format, registry, #[ignore] Docker e2e)
 │   ├── container_lifecycle.rs  # Container IPC interop tests (M9, Python subprocess mock + #[ignore] Docker)
+│   ├── dev_environment.rs    # Dev environment tool tests (validation, tagging, enforcement, #[ignore] Docker e2e)
 │   ├── memory_injection.rs   # Proactive injection integration tests (M6d, no DB needed)
 │   ├── memory_store.rs       # PgMemoryStore integration tests (M6b + M6c hybrid search)
 │   ├── redteam.rs            # Live model adversarial tests (#[ignore], requires API key)
@@ -395,8 +397,14 @@ cargo nextest run --features container --test container_bash
 # Test container bash + existing container lifecycle tests
 cargo nextest run --features container --test container_bash --test container_lifecycle
 
+# Test dev_environment tool (validation, tagging, enforcement — no Docker needed)
+cargo nextest run --features container --test dev_environment
+
 # Docker integration test (requires Docker + built images, skipped by default)
 cargo nextest run --features container --test container_bash -- --ignored
+
+# Docker dev_environment e2e (builds sandbox image with Rust, skipped by default)
+cargo nextest run --features container --test dev_environment -- --ignored
 ```
 
 ## Policy File Format (TOML)

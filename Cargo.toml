@@ -33,7 +33,7 @@ wasm = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:blake3", "dep:url"]
 # container: Docker/Podman container sandbox for heavy/polyglot tool execution (M9).
 # Independent feature — does not imply postgres or credentials.
 # Long-lived containers communicate via Unix domain socket IPC.
-container = ["dep:bollard", "dep:async-trait", "dep:url"]
+container = ["dep:bollard", "dep:async-trait", "dep:url", "dep:tempfile"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -78,6 +78,7 @@ blake3 = { version = "1.8", optional = true }
 
 # Container sandbox feature dependencies (M9)
 bollard = { version = "0.20", optional = true }
+tempfile = { version = "3", optional = true }
 
 [[bin]]
 name = "cherub"

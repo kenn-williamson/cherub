@@ -169,7 +169,11 @@ async fn chat_session(
             let workspace = std::env::current_dir().unwrap_or_else(|_| ".".into());
             let (bash_tool, ipc_dir) =
                 crate::tools::container_bash::build(Arc::clone(rt), workspace);
-            let registry = registry.with_container(vec![bash_tool]);
+            let dev_env =
+                crate::tools::dev_environment::DevEnvironmentTool::new(Arc::clone(&bash_tool));
+            let registry = registry
+                .with_container(vec![bash_tool])
+                .with_dev_environment(dev_env);
             info!(chat_id = %chat_id, "sandbox bash enabled for chat session");
             (registry, Some(ipc_dir))
         } else {

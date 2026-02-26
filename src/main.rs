@@ -719,6 +719,7 @@ async fn run_agent(
     let (registry, _sandbox_bash_ipc_dir) = {
         if sandbox_bash {
             use cherub::tools::container::BollardRuntime;
+            use cherub::tools::dev_environment::DevEnvironmentTool;
             use std::sync::Arc;
 
             let runtime = BollardRuntime::new()
@@ -733,7 +734,10 @@ async fn run_agent(
             let (bash_tool, ipc_dir) =
                 cherub::tools::container_bash::build(Arc::clone(&rt), workspace);
 
-            let registry = registry.with_container(vec![bash_tool]);
+            let dev_env = DevEnvironmentTool::new(Arc::clone(&bash_tool));
+            let registry = registry
+                .with_container(vec![bash_tool])
+                .with_dev_environment(dev_env);
             info!("sandbox bash enabled — bash commands run in isolated container");
             (registry, Some(ipc_dir))
         } else {

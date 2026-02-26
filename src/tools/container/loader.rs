@@ -87,8 +87,8 @@ fn toml_to_json(val: toml::Value) -> serde_json::Value {
 
 /// Result of loading a directory of container tools.
 pub struct ContainerLoadResult {
-    /// Successfully loaded tools.
-    pub tools: Vec<ContainerTool>,
+    /// Successfully loaded tools (wrapped in Arc for shared ownership).
+    pub tools: Vec<Arc<ContainerTool>>,
     /// Per-tool error messages for tools that failed to load.
     pub errors: Vec<String>,
 }
@@ -153,7 +153,7 @@ pub async fn load_from_dir(
                     image = %tool.metadata.image,
                     "loaded container tool"
                 );
-                tools.push(tool);
+                tools.push(Arc::new(tool));
             }
             Err(e) => {
                 tracing::warn!(tool = %name, error = %e, "failed to load container tool");
