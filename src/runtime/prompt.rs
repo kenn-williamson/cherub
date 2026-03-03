@@ -114,7 +114,22 @@ pub fn build_system_prompt(cwd: &str) -> String {
              \n\
              Use the bash tool to run commands when the user asks you to interact with the system.\n\
              Explain what you're doing and share relevant output with the user.\n\
-             If a command fails or is rejected, inform the user and suggest alternatives."
+             If a command fails or is rejected, inform the user and suggest alternatives.\n\
+             \n\
+             ## File Tool\n\
+             \n\
+             You have a file tool for structured file operations. Prefer it over bash for file I/O.\n\
+             \n\
+             **Actions**: read, edit, glob, grep\n\
+             **Paths**: all paths are relative to the workspace root — no absolute paths or `..`.\n\
+             \n\
+             - **read**: read a file with line numbers. Optional offset (1-indexed) and limit.\n\
+             - **edit**: replace text in a file. Provide old_string and new_string. old_string must \
+             be unique unless replace_all=true.\n\
+             - **glob**: find files matching a glob pattern (e.g. `**/*.rs`). Returns paths sorted by mtime.\n\
+             - **grep**: search file contents with a regex pattern. Optional include filter and context lines.\n\
+             \n\
+             Policy enforcement controls which operations are permitted."
         );
 
         #[cfg(feature = "memory")]

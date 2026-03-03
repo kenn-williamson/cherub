@@ -88,6 +88,37 @@ patterns = [
     "^cargo install",
 ]
 
+# ─── File tool ────────────────────────────────────────────────────────────────
+#
+# Structured file operations (read, edit, glob, grep) with workspace containment.
+# Uses match_source = "structured" — action string is "{action}:{path}" or "{action}".
+#
+# Tier assignment:
+#   Observe  — read-only operations (read, glob, grep)
+#   Act      — file modification (edit)
+
+[tools.file]
+enabled = true
+match_source = "structured"
+
+[tools.file.actions.read_ops]
+tier = "observe"
+patterns = [
+    "^read:",
+    "^read$",
+    "^glob:",
+    "^glob$",
+    "^grep:",
+    "^grep$",
+]
+
+[tools.file.actions.write_ops]
+tier = "act"
+patterns = [
+    "^edit:",
+    "^edit$",
+]
+
 # ─── Memory tool (M6b) ────────────────────────────────────────────────────────
 #
 # Patterns match "{action}" or "{action}:{path}" depending on whether a path

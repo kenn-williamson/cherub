@@ -7,6 +7,7 @@ pub mod container_bash;
 pub mod credential_broker;
 #[cfg(feature = "container")]
 pub mod dev_environment;
+pub mod file;
 #[cfg(feature = "credentials")]
 pub mod http;
 #[cfg(feature = "credentials")]
@@ -15,6 +16,7 @@ pub(crate) mod leak_detector;
 pub mod mcp;
 #[cfg(feature = "memory")]
 pub mod memory;
+pub(crate) mod path;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
@@ -34,6 +36,7 @@ use bash::BashTool;
 use container::ContainerTool;
 #[cfg(feature = "container")]
 use dev_environment::DevEnvironmentTool;
+use file::FileTool;
 #[cfg(feature = "credentials")]
 use http::HttpTool;
 #[cfg(feature = "mcp")]
@@ -114,6 +117,7 @@ pub struct ToolResult {
 /// Enum dispatch for tool implementations. Known variants at compile time.
 pub(crate) enum ToolImpl {
     Bash(BashTool),
+    File(FileTool),
     #[cfg(feature = "memory")]
     Memory(MemoryTool),
     #[cfg(feature = "credentials")]
@@ -132,6 +136,7 @@ impl ToolImpl {
     fn name(&self) -> &str {
         match self {
             Self::Bash(_) => "bash",
+            Self::File(_) => "file",
             #[cfg(feature = "memory")]
             Self::Memory(_) => "memory",
             #[cfg(feature = "credentials")]
@@ -157,6 +162,7 @@ impl ToolImpl {
     ) -> Result<ToolResult, CherubError> {
         match self {
             Self::Bash(tool) => tool.execute(params, token).await,
+            Self::File(tool) => tool.execute(params, token).await,
             #[cfg(feature = "memory")]
             Self::Memory(tool) => tool.execute(params, token, _ctx).await,
             #[cfg(feature = "credentials")]
@@ -190,6 +196,60 @@ impl ToolImpl {
                         }
                     },
                     "required": ["command"]
+                }),
+            },
+            Self::File(_) => ToolDefinition {
+                name: "file".to_owned(),
+                description: "Read, edit, search, and find files in the workspace. \
+                    All paths are relative to the workspace root. \
+                    Use this instead of bash for file operations."
+                    .to_owned(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["read", "edit", "glob", "grep"],
+                            "description": "Operation to perform"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Relative file path (required for read/edit; optional base dir for glob/grep)"
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "Start line (1-indexed, for read)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max lines to return (for read)"
+                        },
+                        "old_string": {
+                            "type": "string",
+                            "description": "Text to find and replace (for edit)"
+                        },
+                        "new_string": {
+                            "type": "string",
+                            "description": "Replacement text (for edit)"
+                        },
+                        "replace_all": {
+                            "type": "boolean",
+                            "description": "Replace all occurrences (for edit, default false)"
+                        },
+                        "pattern": {
+                            "type": "string",
+                            "description": "Glob pattern (for glob) or regex pattern (for grep)"
+                        },
+                        "include": {
+                            "type": "string",
+                            "description": "File name glob filter (for grep, e.g. '*.rs')"
+                        },
+                        "context": {
+                            "type": "integer",
+                            "description": "Context lines around matches (for grep, default 0)"
+                        }
+                    },
+                    "required": ["action"]
                 }),
             },
             #[cfg(feature = "memory")]
@@ -288,11 +348,19 @@ pub struct ToolRegistry {
     tools: Vec<ToolImpl>,
 }
 
+/// Returns the workspace root directory (current working directory).
+fn workspace_root() -> std::path::PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
 impl ToolRegistry {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
-            tools: vec![ToolImpl::Bash(BashTool::new())],
+            tools: vec![
+                ToolImpl::Bash(BashTool::new()),
+                ToolImpl::File(FileTool::new(workspace_root())),
+            ],
         }
     }
 
@@ -301,7 +369,9 @@ impl ToolRegistry {
     /// Used when bash is replaced by a container-sandboxed equivalent
     /// (registered later via `with_container()`).
     pub fn new_without_bash() -> Self {
-        Self { tools: vec![] }
+        Self {
+            tools: vec![ToolImpl::File(FileTool::new(workspace_root()))],
+        }
     }
 
     /// Create a registry with the memory tool attached.
@@ -310,6 +380,7 @@ impl ToolRegistry {
         Self {
             tools: vec![
                 ToolImpl::Bash(BashTool::new()),
+                ToolImpl::File(FileTool::new(workspace_root())),
                 ToolImpl::Memory(MemoryTool::new(store)),
             ],
         }
@@ -321,7 +392,10 @@ impl ToolRegistry {
     #[cfg(feature = "memory")]
     pub fn with_memory_no_bash(store: std::sync::Arc<dyn crate::storage::MemoryStore>) -> Self {
         Self {
-            tools: vec![ToolImpl::Memory(MemoryTool::new(store))],
+            tools: vec![
+                ToolImpl::File(FileTool::new(workspace_root())),
+                ToolImpl::Memory(MemoryTool::new(store)),
+            ],
         }
     }
 

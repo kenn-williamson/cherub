@@ -36,6 +36,8 @@ cherub/
 │   ├── tools/
 │   │   ├── mod.rs            # Tool trait, ToolRegistry, ToolImpl enum dispatch, ToolContext
 │   │   ├── bash.rs           # Bash execution tool (tokio::process::Command)
+│   │   ├── file.rs           # File tool: read/edit/glob/grep with workspace containment
+│   │   ├── path.rs           # Shared path validation: is_safe_relative_path, resolve_workspace_path, is_binary_content
 │   │   ├── container_bash.rs # Factory: container-sandboxed bash replacement (feature = "container")
 │   │   ├── dev_environment.rs # Dev environment tool: build sandbox images with language toolchains (feature = "container")
 │   │   ├── memory.rs         # Memory tool: store/recall/search/update/forget (feature = "memory")
@@ -95,6 +97,7 @@ cherub/
 │   ├── embedding_live.rs     # Live OpenAI embedding tests (#[ignore], requires OPENAI_API_KEY)
 │   ├── fixtures/
 │   │   └── mod.rs            # Shared test fixtures: TestContainer + MockEmbeddingProvider (M6c)
+│   ├── file_enforcement.rs   # File tool enforcement tests (observe/act tier, unknown action, injection)
 │   ├── memory_enforcement.rs # Memory tool enforcement tests, no DB needed (feature = "memory")
 │   ├── container_bash.rs     # Container-sandboxed bash tests (IPC format, registry, #[ignore] Docker e2e)
 │   ├── container_lifecycle.rs  # Container IPC interop tests (M9, Python subprocess mock + #[ignore] Docker)

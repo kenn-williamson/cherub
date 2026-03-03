@@ -12,7 +12,7 @@
 //!                                    ◄── leak scan ◄── response ◄─
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use url::Url;
@@ -275,34 +275,8 @@ impl HostState {
 
 // ─── Path safety helpers ─────────────────────────────────────────────────────
 
-/// Validate that `path` is safe for filesystem access.
-///
-/// Rejects:
-/// - Empty paths
-/// - Paths starting with `/` (absolute)
-/// - Paths containing `..` (directory traversal)
-/// - Paths containing null bytes
-pub(crate) fn is_safe_relative_path(path: &str) -> bool {
-    if path.is_empty() {
-        return false;
-    }
-    if path.starts_with('/') {
-        return false;
-    }
-    if path.contains('\0') {
-        return false;
-    }
-    // Reject any component that is exactly ".."
-    for component in Path::new(path).components() {
-        use std::path::Component;
-        match component {
-            Component::ParentDir => return false,
-            Component::RootDir => return false,
-            _ => {}
-        }
-    }
-    true
-}
+// Re-export from shared module for use within wasm host.
+pub(crate) use crate::tools::path::is_safe_relative_path;
 
 // ─── DNS rebinding protection ─────────────────────────────────────────────────
 

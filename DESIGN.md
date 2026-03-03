@@ -1,6 +1,6 @@
 # Secure Agent Runtime — Design Document
 
-**Status:** Draft — Milestone 10 Complete (Security hardening: DNS rebinding defense + no-redirect policy in HttpTool; audit log: append-only AuditStore + PgAuditStore + `cherub audit list` CLI)
+**Status:** Draft — Milestone 11 Complete (MCP server support + structured file tool: read/edit/glob/grep with workspace containment and enforcement)
 **Author:** Kenn Williamson  
 **Date:** February 2026
 

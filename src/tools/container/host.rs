@@ -20,7 +20,7 @@
 //! - `log(level, message)` — capped at 1000 entries, 4 KiB per message
 //! - `now_millis()` — wall-clock time
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use url::Url;
@@ -408,22 +408,8 @@ pub fn now_millis() -> u64 {
         .as_millis() as u64
 }
 
-/// Validate that `path` is safe for filesystem access.
-///
-/// Rejects empty paths, absolute paths, paths with `..`, and paths with null bytes.
-pub(crate) fn is_safe_relative_path(path: &str) -> bool {
-    if path.is_empty() || path.starts_with('/') || path.contains('\0') {
-        return false;
-    }
-    for component in Path::new(path).components() {
-        use std::path::Component;
-        match component {
-            Component::ParentDir | Component::RootDir => return false,
-            _ => {}
-        }
-    }
-    true
-}
+// Re-export from shared module for use within container host.
+pub(crate) use crate::tools::path::is_safe_relative_path;
 
 /// Reject URLs that resolve to private/loopback IP ranges (DNS rebinding protection).
 pub(crate) fn reject_private_ip(url: &str) -> Result<(), String> {
