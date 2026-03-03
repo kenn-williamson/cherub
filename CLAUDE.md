@@ -50,14 +50,20 @@ cherub/
 │   │   │   ├── host.rs       # HostState: log/now_millis/workspace_read/check_http_request host fns
 │   │   │   ├── wrapper.rs    # bindgen! bindings, StoreData, WasmTool, execute_in_sandbox
 │   │   │   └── loader.rs     # load_from_dir/load_one: directory scan, BLAKE3 hash, compilation
-│   │   └── container/        # Feature-gated: #[cfg(feature = "container")]
-│   │       ├── mod.rs        # Module declarations, 7-layer defense-in-depth doc
-│   │       ├── capabilities.rs  # ContainerCapabilities: workspace/http/secrets, parsed from TOML sidecar
-│   │       ├── ipc.rs        # Wire format (length-prefixed JSON), IpcTransport, RuntimeMessage/ToolMessage
-│   │       ├── runtime.rs    # ContainerRuntime trait + BollardRuntime (Docker/Podman via bollard)
-│   │       ├── host.rs       # ContainerHostState: async host function proxy (workspace/http/secrets/log)
-│   │       ├── wrapper.rs    # ContainerTool: lifecycle management, IPC execute loop, respawn-on-crash
-│   │       └── loader.rs     # load_from_dir/load_one: scan tool.toml + capabilities.toml per subdirectory
+│   │   ├── container/        # Feature-gated: #[cfg(feature = "container")]
+│   │   │   ├── mod.rs        # Module declarations, 7-layer defense-in-depth doc
+│   │   │   ├── capabilities.rs  # ContainerCapabilities: workspace/http/secrets, parsed from TOML sidecar
+│   │   │   ├── ipc.rs        # Wire format (length-prefixed JSON), IpcTransport, RuntimeMessage/ToolMessage
+│   │   │   ├── runtime.rs    # ContainerRuntime trait + BollardRuntime (Docker/Podman via bollard)
+│   │   │   ├── host.rs       # ContainerHostState: async host function proxy (workspace/http/secrets/log)
+│   │   │   ├── wrapper.rs    # ContainerTool: lifecycle management, IPC execute loop, respawn-on-crash
+│   │   │   └── loader.rs     # load_from_dir/load_one: scan tool.toml + capabilities.toml per subdirectory
+│   │   └── mcp/              # Feature-gated: #[cfg(feature = "mcp")]
+│   │       ├── mod.rs        # Module declarations
+│   │       ├── config.rs     # McpConfig, McpServerConfig (TOML, deny_unknown_fields, 64KiB limit)
+│   │       ├── client.rs     # McpClient: wraps rmcp RunningService, spawn/init/discover/call/shutdown
+│   │       ├── proxy.rs      # McpToolProxy: per-tool wrapper, composite naming, internal key stripping
+│   │       └── loader.rs     # load_from_config(): read config, spawn servers, discover tools, credential_env
 │   ├── providers/
 │   │   ├── mod.rs            # Provider trait, Message/UserContent/ContentBlock types (serde + Clone)
 │   │   ├── anthropic.rs      # Anthropic API provider (non-streaming)
@@ -100,11 +106,14 @@ cherub/
 │   ├── retry_integration.rs  # API retry integration tests (wiremock, no API key)
 │   ├── session_persistence.rs  # Session persistence integration tests (feature = "sessions", auto-starts DB)
 │   ├── telegram_approval.rs  # Telegram approval flow tests (feature-gated)
+│   ├── mcp_integration.rs   # MCP full flow tests: spawn → discover → enforce → execute (feature = "mcp", 12 tests)
 │   └── ui/
 │       ├── capability_token_private.rs      # Proves CapabilityToken can't be constructed outside enforcement
 │       └── capability_token_private.stderr  # Expected compiler error output
 ├── .config/
 │   └── nextest.toml          # cargo-nextest config: 4 slots, retries, slow-test detection
+├── examples/
+│   └── mock_mcp_server.rs    # Mock MCP server for integration tests (echo + add tools, rmcp ServerHandler)
 ├── config/
 │   └── default_policy.toml   # Example policy file
 ├── DESIGN.md
@@ -405,6 +414,18 @@ cargo nextest run --features container --test container_bash -- --ignored
 
 # Docker dev_environment e2e (builds sandbox image with Rust, skipped by default)
 cargo nextest run --features container --test dev_environment -- --ignored
+
+# Build with MCP support
+cargo build --features mcp
+
+# Run with MCP config
+ANTHROPIC_API_KEY=sk-... cargo run --features mcp -- --mcp-config config/mcp_servers.toml
+
+# Test MCP (build example first, then run integration tests)
+cargo build --example mock_mcp_server --features mcp && cargo nextest run --features mcp --test mcp_integration
+
+# Test all with MCP feature enabled (unit + integration)
+cargo build --example mock_mcp_server --features mcp && cargo test --features mcp
 ```
 
 ## Policy File Format (TOML)

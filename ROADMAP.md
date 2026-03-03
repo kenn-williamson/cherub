@@ -250,6 +250,41 @@ Everything else — connectors, credential brokering, audit logging, IPC plugins
 
 ---
 
+## Milestone 11: MCP Server Support ✓
+
+**Goal:** Support MCP (Model Context Protocol) servers as a tool source alongside WASM/container plugins. Any MCP-compliant server becomes available to the agent, with all calls routed through the enforcement layer.
+
+### MCP integration (complete)
+- [x] `MatchSource::McpStructured` — extracts `"{server}:{tool}"` from `__mcp_server`/`__mcp_tool` params for enforcement pattern matching
+- [x] `McpClient` — wraps `rmcp::RunningService`, handles spawn/init/discovery/call/shutdown over stdio transport
+- [x] `McpToolProxy` — one per discovered tool, fields: server_name, tool_name, composite_name (`"{server}__{tool}"`), description, input_schema, client
+- [x] `ToolImpl::Mcp(McpToolProxy)` variant with full enum dispatch (name/execute/definition)
+- [x] `ToolRegistry::enforcement_name()` — maps composite name to server name for policy lookup
+- [x] `ToolRegistry::enrich_params()` — injects `__mcp_server`/`__mcp_tool` metadata (always overwrites to prevent adversarial injection)
+- [x] `loader::load_from_config()` — reads TOML config, spawns servers, discovers tools, returns `McpLoadResult`
+- [x] `credential_env` support — decrypt credentials from vault at spawn time (feature-gated on `credentials`)
+- [x] `--mcp-config <path>` CLI flag wired into `run_agent()`
+- [x] `CherubError::Mcp(String)` error variant (feature-gated on `mcp`)
+- [x] Internal `__mcp_*` keys stripped before forwarding to MCP server
+- [x] Integration tests: mock MCP server binary (echo + add tools), 12 tests covering discovery, execution, enforcement, adversarial override prevention, error handling
+
+### Policy example
+```toml
+[tools.google-workspace]
+enabled = true
+match_source = "mcp_structured"
+
+[tools.google-workspace.actions.read]
+tier = "observe"
+patterns = ["^google-workspace:list_events$", "^google-workspace:search_emails$"]
+
+[tools.google-workspace.actions.send]
+tier = "commit"
+patterns = ["^google-workspace:send_email$"]
+```
+
+---
+
 ## Beyond MVP
 
 These are real goals but not blocking the thesis proof:
@@ -266,7 +301,7 @@ These are real goals but not blocking the thesis proof:
 - LLM cost tracking + budget enforcement: track token usage (model, input/output tokens, per-model cost rates) in PostgreSQL (V5 migration). Wire cost data into stateful constraints — per-session and per-day spend budgets. Budget exceeded → escalate or reject depending on policy. Subsumes "Token Usage Tracking" from ROADMAP_DEFERRED.md.
 - Multi-provider failover implementation: `FailoverProvider` wraps `Vec<Box<dyn Provider>>`, tries each in order. Start with Anthropic + OpenAI. Log which provider succeeded. Retry/fallback logic with structured tracing.
 - OpenTelemetry export: `tracing-opentelemetry` as optional subscriber. Feature-gated (`otel`). `OTEL_EXPORTER_OTLP_ENDPOINT` env var enables. Cherub already emits structured spans — OTEL export makes them visible in Grafana/Datadog/etc.
-- MCP tool protocol support: support MCP servers as a tool source alongside WASM/container plugins. Spawn server process, discover tools via `tools/list`, route calls through enforcement layer. Feature-gated (`mcp`). `tools/mcp/` module, MCP client (stdio transport), `MatchSource::McpStructured`, capability sidecar TOML.
+- MCP dynamic tool changes: handle `tools/list_changed` notifications from MCP servers to add/remove tools at runtime without restart.
 - Schedule triggers (cron/interval): `tokio-cron-scheduler` injects "scheduled wake" messages into agent loop at configured intervals. Enables periodic autonomous work within policy bounds. Feature-gated (`schedule`). CLI flag `--schedule`.
 
 ---

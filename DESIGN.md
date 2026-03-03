@@ -250,16 +250,17 @@ The enforcement layer decides *whether* a tool may run. The sandbox decides *wha
                    Enforcement layer
                   (policy eval, CapabilityToken)
                             │
-              ┌─────────────┼──────────────┐
-              │             │              │
-         In-process     WASM sandbox    Container
-         (trusted)      (untrusted,     (untrusted,
-                         needs I/O)      heavy/polyglot)
-              │             │              │
-          bash, file    API tools,      Python ML,
-          ops, memory   browser,        custom binaries,
-                        filesystem      language runtimes
-                        plugins
+              ┌─────────────┼──────────────┬──────────────┐
+              │             │              │              │
+         In-process     WASM sandbox    Container       MCP
+         (trusted)      (untrusted,     (untrusted,     (external
+                         needs I/O)      heavy/polyglot)  process)
+              │             │              │              │
+          bash, file    API tools,      Python ML,      Google
+          ops, memory   browser,        custom binaries, Workspace,
+                        filesystem      language         Fireflies,
+                        plugins         runtimes         any MCP
+                                                         server
 ```
 
 **In-process tools** are built-in to the runtime — bash, file operations, memory. These are our code, trusted by definition. The enforcement layer is their only guard. No sandbox overhead.
@@ -358,6 +359,31 @@ The protocol is the plugin interface. Any process that can open a Unix socket an
 The protocol specification is the contract. It is documented as a JSON schema with behavioral expectations for each message type. A plugin implementor reads the spec, implements message handling in their language of choice, and connects.
 
 Reference implementations of the plugin SDK will be provided in Rust (because the core runtime is Rust and the first plugins will be Rust). Community SDKs in other languages are welcome but not a project responsibility for v1. The protocol is simple enough that an SDK is a convenience, not a necessity — raw socket + JSON is sufficient.
+
+### 4.7 MCP Server Integration
+
+MCP (Model Context Protocol) servers are the fourth tool source — external processes that expose tools via the MCP JSON-RPC protocol over stdio. Feature-gated (`mcp`), uses the `rmcp` crate.
+
+**MCP is a transport, not a trust boundary.** The enforcement layer is the trust boundary. MCP tools follow the same policy-driven access control as bash, HTTP, and memory tools. The only difference is that MCP tools run in separate processes and communicate over JSON-RPC. Enforcement happens first. MCP execution happens second.
+
+**Architecture:**
+
+1. **Config** (`mcp_servers.toml`): TOML file listing servers with command, args, env, and optional `credential_env` (decrypted from vault at spawn time).
+2. **McpClient**: Wraps one `rmcp::RunningService` (stdio transport). Handles spawn, init handshake, tool discovery, tool calls, shutdown. `Arc<Mutex<>>` for sequential IPC.
+3. **McpToolProxy**: One per discovered tool. The LLM sees each tool with its native MCP schema — no wrapping layer. Composite name (`server__tool`) avoids cross-server collision.
+4. **Enforcement**: Policy is keyed by server name. `MatchSource::McpStructured` extracts `"{server}:{tool}"` from enriched params for pattern matching. The `__mcp_server`/`__mcp_tool` keys are always overwritten by the proxy to prevent adversarial injection by the model.
+5. **Credentials**: `credential_env` values are decrypted at process spawn. MCP servers receive credentials as env vars — same trust model as container images (operator-chosen software).
+
+**MCP vs. other tiers:**
+
+| Concern | In-process | WASM | Container | MCP |
+|---------|-----------|------|-----------|-----|
+| Isolation | None (trusted) | Application | Kernel | Process |
+| Startup | Instant | Microseconds | Seconds | Milliseconds |
+| Language | Rust only | Rust/C/Go | Any | Any |
+| Setup | Built-in | Compile to WASM | Docker image | Run binary |
+
+**Limitations (current):** Tool discovery is once at startup. `tools/list_changed` notifications are not handled.
 
 ---
 

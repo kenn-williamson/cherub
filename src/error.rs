@@ -49,4 +49,10 @@ pub enum CherubError {
     #[cfg(feature = "container")]
     #[error("container error: {0}")]
     Container(String),
+
+    /// MCP server errors (M11). Spawn, discovery, or tool call failures.
+    /// Never contains credential values or policy details.
+    #[cfg(feature = "mcp")]
+    #[error("mcp error: {0}")]
+    Mcp(String),
 }

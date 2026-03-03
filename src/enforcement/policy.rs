@@ -28,6 +28,8 @@ enum MatchSourceValue {
     Structured,
     /// For the `http` tool: extracts `"{method}:{host}"` from params.
     HttpStructured,
+    /// For MCP tools: extracts `"{server}:{tool}"` from params.
+    McpStructured,
 }
 
 impl From<MatchSourceValue> for MatchSource {
@@ -36,6 +38,7 @@ impl From<MatchSourceValue> for MatchSource {
             MatchSourceValue::Command => MatchSource::Command,
             MatchSourceValue::Structured => MatchSource::Structured,
             MatchSourceValue::HttpStructured => MatchSource::HttpStructured,
+            MatchSourceValue::McpStructured => MatchSource::McpStructured,
         }
     }
 }
@@ -832,6 +835,51 @@ constraints = [
 "#;
         let err = Policy::from_str(toml).unwrap_err();
         assert!(matches!(err, CherubError::PolicyValidation(_)));
+    }
+
+    #[test]
+    fn parse_mcp_structured_policy() {
+        let toml = r#"
+[tools.google-workspace]
+enabled = true
+match_source = "mcp_structured"
+
+[tools.google-workspace.actions.read]
+tier = "observe"
+patterns = ["^google-workspace:list_events$", "^google-workspace:search_emails$"]
+
+[tools.google-workspace.actions.write]
+tier = "act"
+patterns = ["^google-workspace:draft_email$"]
+
+[tools.google-workspace.actions.send]
+tier = "commit"
+patterns = ["^google-workspace:send_email$"]
+"#;
+        let policy = Policy::from_str(toml).expect("mcp_structured policy should parse");
+        let tool = policy
+            .find_tool("google-workspace")
+            .expect("google-workspace should exist");
+        assert!(tool.enabled());
+        assert_eq!(tool.match_source(), MatchSource::McpStructured);
+        assert_eq!(tool.actions.len(), 3);
+
+        // Verify tier matching via McpStructured extraction.
+        let params = json!({
+            "__mcp_server": "google-workspace",
+            "__mcp_tool": "list_events"
+        });
+        let actions = tool.match_source().extract(&params).unwrap();
+        assert_eq!(actions, vec!["google-workspace:list_events"]);
+        assert_eq!(
+            tool.match_tier("google-workspace:list_events"),
+            Some(Tier::Observe)
+        );
+        assert_eq!(
+            tool.match_tier("google-workspace:send_email"),
+            Some(Tier::Commit)
+        );
+        assert_eq!(tool.match_tier("google-workspace:unknown_tool"), None);
     }
 
     #[test]

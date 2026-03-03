@@ -36,6 +36,9 @@ enum Command {
         /// Replace in-process bash with a container-sandboxed equivalent.
         #[cfg(feature = "container")]
         sandbox_bash: bool,
+        /// Optional MCP servers config file (M11).
+        #[cfg(feature = "mcp")]
+        mcp_config: Option<PathBuf>,
     },
     /// Credential vault management (M7a).
     #[cfg(feature = "credentials")]
@@ -99,6 +102,8 @@ fn parse_args() -> Result<Command> {
     let mut container_tools_dir: Option<PathBuf> = None;
     #[cfg(feature = "container")]
     let mut sandbox_bash = false;
+    #[cfg(feature = "mcp")]
+    let mut mcp_config: Option<PathBuf> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -133,6 +138,13 @@ fn parse_args() -> Result<Command> {
             "--sandbox-bash" => {
                 sandbox_bash = true;
             }
+            #[cfg(feature = "mcp")]
+            "--mcp-config" => {
+                i += 1;
+                if i < args.len() {
+                    mcp_config = Some(PathBuf::from(&args[i]));
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -147,6 +159,8 @@ fn parse_args() -> Result<Command> {
         container_tools_dir,
         #[cfg(feature = "container")]
         sandbox_bash,
+        #[cfg(feature = "mcp")]
+        mcp_config,
     })
 }
 
@@ -503,6 +517,7 @@ async fn run_agent(
     #[cfg(feature = "wasm")] wasm_tools_dir: Option<PathBuf>,
     #[cfg(feature = "container")] container_tools_dir: Option<PathBuf>,
     #[cfg(feature = "container")] sandbox_bash: bool,
+    #[cfg(feature = "mcp")] mcp_config: Option<PathBuf>,
 ) -> Result<()> {
     let user_id = std::env::var("USER").unwrap_or_else(|_| "local".to_owned());
 
@@ -745,6 +760,36 @@ async fn run_agent(
         }
     };
 
+    // Load MCP servers if a config file was specified (M11).
+    #[cfg(feature = "mcp")]
+    let registry = {
+        if let Some(ref config_path) = mcp_config {
+            let result = cherub::tools::mcp::loader::load_from_config(
+                config_path,
+                #[cfg(feature = "credentials")]
+                None, // TODO: wire credential store for MCP credential_env
+                #[cfg(feature = "credentials")]
+                &user_id,
+            )
+            .await;
+            for err in &result.errors {
+                eprintln!("[warn] MCP: {err}");
+            }
+            if !result.tools.is_empty() {
+                info!(
+                    count = result.tools.len(),
+                    config = %config_path.display(),
+                    "MCP tools loaded"
+                );
+                registry.with_mcp(result.tools)
+            } else {
+                registry
+            }
+        } else {
+            registry
+        }
+    };
+
     let system_prompt = build_system_prompt(&cwd);
 
     let approval_gate = CliApprovalGate::new();
@@ -861,6 +906,8 @@ async fn main() -> Result<()> {
             container_tools_dir,
             #[cfg(feature = "container")]
             sandbox_bash,
+            #[cfg(feature = "mcp")]
+            mcp_config,
         } => {
             run_agent(
                 policy_path,
@@ -871,6 +918,8 @@ async fn main() -> Result<()> {
                 container_tools_dir,
                 #[cfg(feature = "container")]
                 sandbox_bash,
+                #[cfg(feature = "mcp")]
+                mcp_config,
             )
             .await
         }

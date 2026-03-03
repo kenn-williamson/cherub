@@ -11,6 +11,8 @@ pub mod dev_environment;
 pub mod http;
 #[cfg(feature = "credentials")]
 pub(crate) mod leak_detector;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 #[cfg(feature = "memory")]
 pub mod memory;
 #[cfg(feature = "wasm")]
@@ -34,6 +36,8 @@ use container::ContainerTool;
 use dev_environment::DevEnvironmentTool;
 #[cfg(feature = "credentials")]
 use http::HttpTool;
+#[cfg(feature = "mcp")]
+use mcp::proxy::McpToolProxy;
 #[cfg(feature = "memory")]
 use memory::MemoryTool;
 #[cfg(feature = "wasm")]
@@ -120,6 +124,8 @@ pub(crate) enum ToolImpl {
     Container(Arc<ContainerTool>),
     #[cfg(feature = "container")]
     DevEnvironment(DevEnvironmentTool),
+    #[cfg(feature = "mcp")]
+    Mcp(McpToolProxy),
 }
 
 impl ToolImpl {
@@ -136,6 +142,8 @@ impl ToolImpl {
             Self::Container(t) => &t.metadata.name,
             #[cfg(feature = "container")]
             Self::DevEnvironment(_) => "dev_environment",
+            #[cfg(feature = "mcp")]
+            Self::Mcp(t) => &t.composite_name,
         }
     }
 
@@ -159,6 +167,11 @@ impl ToolImpl {
             Self::Container(tool) => tool.execute(params, token, _ctx).await,
             #[cfg(feature = "container")]
             Self::DevEnvironment(tool) => tool.execute(params, token).await,
+            #[cfg(feature = "mcp")]
+            Self::Mcp(tool) => {
+                let _ = token; // Consume the capability token.
+                tool.execute(params).await
+            }
         }
     }
 
@@ -264,6 +277,8 @@ impl ToolImpl {
             }
             #[cfg(feature = "container")]
             Self::DevEnvironment(_) => dev_environment::tool_definition(),
+            #[cfg(feature = "mcp")]
+            Self::Mcp(t) => t.definition(),
         }
     }
 }
@@ -349,12 +364,88 @@ impl ToolRegistry {
         self
     }
 
+    /// Append MCP tools to the registry (builder pattern).
+    ///
+    /// Call after other `with_*` methods, before building the `AgentLoop`.
+    #[cfg(feature = "mcp")]
+    pub fn with_mcp(mut self, tools: Vec<McpToolProxy>) -> Self {
+        self.tools.extend(tools.into_iter().map(ToolImpl::Mcp));
+        self
+    }
+
     pub(crate) fn find(&self, name: &str) -> Option<&ToolImpl> {
         self.tools.iter().find(|t| t.name() == name)
     }
 
+    /// Return the enforcement policy name for a tool.
+    ///
+    /// For MCP tools, returns the server name (e.g., "google-workspace").
+    /// For all other tools, returns the tool name as-is.
+    pub fn enforcement_name<'a>(&'a self, tool_name: &'a str) -> &'a str {
+        match self.find(tool_name) {
+            #[cfg(feature = "mcp")]
+            Some(ToolImpl::Mcp(t)) => &t.server_name,
+            _ => tool_name,
+        }
+    }
+
+    /// Enrich params with MCP enforcement metadata.
+    ///
+    /// For MCP tools, injects `__mcp_server` and `__mcp_tool` keys for
+    /// `McpStructured` extraction. For all other tools, returns params unchanged.
+    pub fn enrich_params(&self, tool_name: &str, params: &serde_json::Value) -> serde_json::Value {
+        match self.find(tool_name) {
+            #[cfg(feature = "mcp")]
+            Some(ToolImpl::Mcp(t)) => {
+                let mut enriched = params.clone();
+                if let Some(obj) = enriched.as_object_mut() {
+                    // Always overwrite — prevents adversarial injection.
+                    obj.insert(
+                        "__mcp_server".to_owned(),
+                        serde_json::Value::String(t.server_name.clone()),
+                    );
+                    obj.insert(
+                        "__mcp_tool".to_owned(),
+                        serde_json::Value::String(t.tool_name.clone()),
+                    );
+                }
+                enriched
+            }
+            _ => params.clone(),
+        }
+    }
+
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.tools.iter().map(|t| t.definition()).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enforcement_name_non_mcp_returns_tool_name() {
+        let registry = ToolRegistry::new();
+        assert_eq!(registry.enforcement_name("bash"), "bash");
+        assert_eq!(registry.enforcement_name("unknown"), "unknown");
+    }
+
+    #[test]
+    fn enrich_params_non_mcp_returns_unchanged() {
+        let registry = ToolRegistry::new();
+        let params = json!({"command": "ls /tmp"});
+        let enriched = registry.enrich_params("bash", &params);
+        assert_eq!(enriched, params);
+    }
+
+    #[test]
+    fn enrich_params_non_mcp_no_mcp_keys() {
+        let registry = ToolRegistry::new();
+        let params = json!({"command": "ls"});
+        let enriched = registry.enrich_params("bash", &params);
+        assert!(enriched.get("__mcp_server").is_none());
+        assert!(enriched.get("__mcp_tool").is_none());
     }
 }
 

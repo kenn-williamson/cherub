@@ -34,6 +34,10 @@ wasm = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:blake3", "dep:url"]
 # Independent feature — does not imply postgres or credentials.
 # Long-lived containers communicate via Unix domain socket IPC.
 container = ["dep:bollard", "dep:async-trait", "dep:url", "dep:tempfile"]
+# mcp: MCP (Model Context Protocol) server support (M11).
+# Spawn MCP server processes, discover tools, route calls through enforcement.
+# Independent feature — does not imply postgres or credentials.
+mcp = ["dep:rmcp"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -80,6 +84,9 @@ blake3 = { version = "1.8", optional = true }
 bollard = { version = "0.20", optional = true }
 tempfile = { version = "3", optional = true }
 
+# MCP server support dependencies (M11)
+rmcp = { version = "0.17", features = ["client", "transport-child-process"], optional = true }
+
 [[bin]]
 name = "cherub"
 path = "src/main.rs"
@@ -94,3 +101,4 @@ trybuild = "1.0"
 testcontainers = { version = "0.27", features = ["reusable-containers"] }
 wiremock = "0.6"
 tempfile = "3"
+rmcp = { version = "0.17", features = ["server", "transport-async-rw", "transport-io"] }

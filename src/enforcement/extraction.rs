@@ -25,6 +25,10 @@ pub(super) enum MatchSource {
     /// Produces a single action string: `"{method}:{host}"`, e.g. `"get:api.stripe.com"`.
     /// Malformed URL → `None` → Reject.
     HttpStructured,
+    /// Extract `params["__mcp_server"]` + `params["__mcp_tool"]`.
+    /// Produces a single action string: `"{server}:{tool}"`, e.g. `"google-workspace:list_events"`.
+    /// Missing/empty fields → `None` → Reject.
+    McpStructured,
 }
 
 impl MatchSource {
@@ -74,6 +78,19 @@ impl MatchSource {
 
                 let host = extract_url_host(url_str)?;
                 Some(vec![format!("{action}:{host}")])
+            }
+            MatchSource::McpStructured => {
+                let server = params
+                    .get("__mcp_server")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())?;
+
+                let tool = params
+                    .get("__mcp_tool")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())?;
+
+                Some(vec![format!("{server}:{tool}")])
             }
         }
     }
@@ -281,5 +298,60 @@ mod tests {
     #[test]
     fn extract_host_no_scheme_returns_none() {
         assert_eq!(extract_url_host("api.example.com/path"), None);
+    }
+
+    // --- McpStructured extraction ---
+
+    #[test]
+    fn mcp_structured_basic() {
+        let params = json!({"__mcp_server": "google-workspace", "__mcp_tool": "list_events"});
+        assert_eq!(
+            MatchSource::McpStructured.extract(&params),
+            Some(vec!["google-workspace:list_events".to_owned()])
+        );
+    }
+
+    #[test]
+    fn mcp_structured_missing_server_returns_none() {
+        let params = json!({"__mcp_tool": "list_events"});
+        assert!(MatchSource::McpStructured.extract(&params).is_none());
+    }
+
+    #[test]
+    fn mcp_structured_missing_tool_returns_none() {
+        let params = json!({"__mcp_server": "google-workspace"});
+        assert!(MatchSource::McpStructured.extract(&params).is_none());
+    }
+
+    #[test]
+    fn mcp_structured_empty_server_returns_none() {
+        let params = json!({"__mcp_server": "", "__mcp_tool": "list_events"});
+        assert!(MatchSource::McpStructured.extract(&params).is_none());
+    }
+
+    #[test]
+    fn mcp_structured_empty_tool_returns_none() {
+        let params = json!({"__mcp_server": "google-workspace", "__mcp_tool": ""});
+        assert!(MatchSource::McpStructured.extract(&params).is_none());
+    }
+
+    #[test]
+    fn mcp_structured_non_string_returns_none() {
+        let params = json!({"__mcp_server": 42, "__mcp_tool": "list_events"});
+        assert!(MatchSource::McpStructured.extract(&params).is_none());
+    }
+
+    #[test]
+    fn mcp_structured_with_other_params() {
+        // Extra params should not interfere with extraction.
+        let params = json!({
+            "__mcp_server": "fireflies",
+            "__mcp_tool": "get_transcript",
+            "meeting_id": "abc-123"
+        });
+        assert_eq!(
+            MatchSource::McpStructured.extract(&params),
+            Some(vec!["fireflies:get_transcript".to_owned()])
+        );
     }
 }

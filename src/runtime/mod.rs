@@ -683,15 +683,26 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
 
             // Process tool calls through enforcement
             for (tool_use_id, name, input) in tool_uses {
-                // Build a display string that works for any tool type.
-                let display_str = input
-                    .get("command")
-                    .or_else(|| input.get("action"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("<no action>");
+                // Map composite tool name → enforcement policy name (MCP: server name).
+                let enforcement_name = self.registry.enforcement_name(&name);
+                // Enrich params with MCP metadata for McpStructured extraction.
+                let enriched = self.registry.enrich_params(&name, &input);
 
-                let proposal = ToolInvocation::<Proposed>::new(&name, "execute", input.clone());
-                let (evaluated, decision) = enforcement::evaluate(proposal, &self.policy);
+                // Build a display string that works for any tool type.
+                let display_str = enriched
+                    .get("command")
+                    .or_else(|| enriched.get("action"))
+                    .or_else(|| enriched.get("__mcp_tool"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<no action>")
+                    .to_owned();
+                let display_str = display_str.as_str();
+
+                let proposal =
+                    ToolInvocation::<Proposed>::new(enforcement_name, "execute", enriched);
+                let (mut evaluated, decision) = enforcement::evaluate(proposal, &self.policy);
+                // Restore original composite name for registry lookup.
+                evaluated.tool = name.clone();
 
                 match decision {
                     Decision::Allow(token) => {
