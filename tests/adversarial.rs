@@ -10,8 +10,11 @@ use std::sync::Mutex;
 
 use serde_json::json;
 
+use async_trait::async_trait;
+
 use cherub::enforcement::policy::Policy;
 use cherub::error::CherubError;
+use cherub::providers::pricing::ModelPricing;
 use cherub::providers::{ApiUsage, ContentBlock, Message, Provider, StopReason, ToolDefinition};
 use cherub::runtime::AgentLoop;
 use cherub::runtime::approval::{ApprovalGate, ApprovalResult, EscalationContext};
@@ -34,6 +37,7 @@ impl MockProvider {
     }
 }
 
+#[async_trait]
 impl Provider for MockProvider {
     async fn complete(
         &self,
@@ -51,6 +55,10 @@ impl Provider for MockProvider {
 
     fn max_output_tokens(&self) -> u32 {
         4096
+    }
+
+    fn pricing(&self) -> Option<ModelPricing> {
+        None
     }
 }
 
@@ -137,7 +145,7 @@ patterns = [
 fn make_agent(
     responses: Vec<Message>,
     approval_policy: MockApprovalPolicy,
-) -> AgentLoop<MockProvider, MockApprovalGate, NullSink> {
+) -> AgentLoop<MockApprovalGate, NullSink> {
     let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
     let provider = MockProvider::new(responses);
     let registry = ToolRegistry::new();
@@ -147,7 +155,7 @@ fn make_agent(
     };
     AgentLoop::new(
         policy,
-        provider,
+        Box::new(provider),
         registry,
         system_prompt,
         approval_gate,
@@ -525,7 +533,7 @@ fn make_http_agent(
     responses: Vec<Message>,
     extra_policy: &str,
     approval_policy: MockApprovalPolicy,
-) -> AgentLoop<MockProvider, MockApprovalGate, NullSink> {
+) -> AgentLoop<MockApprovalGate, NullSink> {
     let policy_str = format!(
         r#"
 [tools.bash]
@@ -548,7 +556,7 @@ patterns = ["^ls ", "^echo "]
     };
     AgentLoop::new(
         policy,
-        provider,
+        Box::new(provider),
         registry,
         system_prompt,
         approval_gate,
@@ -823,7 +831,7 @@ patterns = ["^get:api\\.example\\.com$"]
     };
     let mut agent = AgentLoop::new(
         policy,
-        provider,
+        Box::new(provider),
         registry,
         "test".to_owned(),
         approval_gate,
@@ -921,6 +929,7 @@ mod compaction_memory {
 
     use cherub::enforcement::policy::Policy;
     use cherub::error::CherubError;
+    use cherub::providers::pricing::ModelPricing;
     use cherub::providers::{
         ApiUsage, ContentBlock, Message, Provider, StopReason, ToolDefinition,
     };
@@ -953,6 +962,7 @@ mod compaction_memory {
         }
     }
 
+    #[async_trait]
     impl Provider for CompactionProvider {
         async fn complete(
             &self,
@@ -964,15 +974,9 @@ mod compaction_memory {
             let msg = queue.pop_front().unwrap_or_else(end_turn);
 
             let usage = if messages.len() > 10 {
-                Some(ApiUsage {
-                    input_tokens: 160_000,
-                    output_tokens: 100,
-                })
+                Some(ApiUsage::new(160_000, 100))
             } else {
-                Some(ApiUsage {
-                    input_tokens: 1_000,
-                    output_tokens: 100,
-                })
+                Some(ApiUsage::new(1_000, 100))
             };
 
             Ok((msg, usage))
@@ -984,6 +988,10 @@ mod compaction_memory {
 
         fn max_output_tokens(&self) -> u32 {
             4096
+        }
+
+        fn pricing(&self) -> Option<ModelPricing> {
+            None
         }
     }
 
@@ -1123,7 +1131,7 @@ patterns = ["^ls ", "^echo "]
         let registry = ToolRegistry::with_memory(Arc::clone(&store) as Arc<dyn MemoryStore>);
         let mut agent = AgentLoop::new(
             policy,
-            provider,
+            Box::new(provider),
             registry,
             "test".to_owned(),
             AutoApprove,

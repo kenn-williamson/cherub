@@ -325,6 +325,15 @@ Research findings:
 - **Gemini 2.5 Pro** is the best second cloud provider: 1M context, decent coding (63-74% benchmarks), 40-60% cheaper than Claude.
 - **Local models** (Qwen3-Coder-Next 70.6% SWE-bench, 3B active params) are good for bounded tasks but not autonomous multi-step reasoning.
 
+### M13-prep: Provider Trait Migration (complete)
+- [x] `async_trait` becomes non-optional dependency (was gated behind `postgres`/`container`)
+- [x] `Provider` trait gets `#[async_trait]` for object safety + `fn pricing() -> Option<ModelPricing>`
+- [x] `AgentLoop` drops generic `P: Provider`, stores `Box<dyn Provider>` instead
+- [x] `ApiUsage` extended with `cache_creation_tokens` and `cache_read_tokens` (Anthropic cache pricing)
+- [x] `ModelPricing` extended with `cache_write_per_mtok` and `cache_read_per_mtok`
+- [x] Each provider owns its pricing via `pricing()` method — central `lookup_pricing()` deleted
+- [x] `WireUsage` parses `cache_creation_input_tokens` / `cache_read_input_tokens` from Anthropic responses
+
 ### M13a: OpenAI-Compatible Provider
 - [ ] `OpenAiProvider` implementing `Provider` trait — covers OpenAI, Azure OpenAI, Gemini (via compatible endpoint), Ollama, vLLM, LM Studio, Groq
 - [ ] Constructor takes `base_url` parameter (defaults to OpenAI, configurable for local/alternative)

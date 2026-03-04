@@ -2,8 +2,7 @@ pub mod anthropic;
 pub mod pricing;
 pub(crate) mod wire;
 
-use std::future::Future;
-
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::error::CherubError;
@@ -13,23 +12,44 @@ use crate::error::CherubError;
 pub struct ApiUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Tokens written to cache (Anthropic). Premium rate.
+    pub cache_creation_tokens: u32,
+    /// Tokens read from cache (Anthropic). Discount rate.
+    pub cache_read_tokens: u32,
 }
 
-/// Abstraction over LLM providers. `dyn Provider` is a legitimate extension boundary
-/// per project convention — multiple LLM backends will implement this trait.
+impl ApiUsage {
+    /// Construct with just input/output (backward compat for providers without caching).
+    pub fn new(input_tokens: u32, output_tokens: u32) -> Self {
+        Self {
+            input_tokens,
+            output_tokens,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+        }
+    }
+}
+
+/// Abstraction over LLM providers. Object-safe via `async_trait` to enable
+/// `Box<dyn Provider>` (composite providers, failover, runtime selection).
+/// `dyn Provider` is a legitimate extension boundary per project convention.
+#[async_trait]
 pub trait Provider: Send + Sync {
-    fn complete(
+    async fn complete(
         &self,
         system: &str,
         messages: &[Message],
         tools: &[ToolDefinition],
-    ) -> impl Future<Output = Result<(Message, Option<ApiUsage>), CherubError>> + Send;
+    ) -> Result<(Message, Option<ApiUsage>), CherubError>;
 
     /// The model identifier string (e.g. "claude-sonnet-4-20250514").
     fn model_name(&self) -> &str;
 
     /// Maximum output tokens configured for this provider.
     fn max_output_tokens(&self) -> u32;
+
+    /// Provider-owned pricing. Returns `None` for unknown/unpriced models.
+    fn pricing(&self) -> Option<pricing::ModelPricing>;
 }
 
 /// Content within a user message. Supports text and images for multimodal input.

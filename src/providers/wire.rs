@@ -80,6 +80,10 @@ pub(crate) struct ResponseBody {
 pub(crate) struct WireUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u32,
+    #[serde(default)]
+    pub cache_read_input_tokens: u32,
 }
 
 #[derive(Deserialize)]
@@ -209,6 +213,8 @@ pub(crate) fn response_to_message(resp: ResponseBody) -> (Message, Option<ApiUsa
     let usage = resp.usage.map(|u| ApiUsage {
         input_tokens: u.input_tokens,
         output_tokens: u.output_tokens,
+        cache_creation_tokens: u.cache_creation_input_tokens,
+        cache_read_tokens: u.cache_read_input_tokens,
     });
 
     let content = resp
@@ -556,5 +562,42 @@ mod tests {
         );
         assert!(!error_msg.contains("sk-ant-"));
         assert!(!error_msg.contains("sk-"));
+    }
+
+    // --- Cache token deserialization ---
+
+    #[test]
+    fn usage_with_cache_tokens_parsed() {
+        let json_str = r#"{
+            "content": [{"type": "text", "text": "hi"}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cache_creation_input_tokens": 2000,
+                "cache_read_input_tokens": 5000
+            }
+        }"#;
+        let resp: ResponseBody = serde_json::from_str(json_str).unwrap();
+        let (_, usage) = response_to_message(resp);
+        let usage = usage.expect("usage should be present");
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 50);
+        assert_eq!(usage.cache_creation_tokens, 2000);
+        assert_eq!(usage.cache_read_tokens, 5000);
+    }
+
+    #[test]
+    fn usage_without_cache_tokens_defaults_to_zero() {
+        let json_str = r#"{
+            "content": [{"type": "text", "text": "hi"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 100, "output_tokens": 50}
+        }"#;
+        let resp: ResponseBody = serde_json::from_str(json_str).unwrap();
+        let (_, usage) = response_to_message(resp);
+        let usage = usage.expect("usage should be present");
+        assert_eq!(usage.cache_creation_tokens, 0);
+        assert_eq!(usage.cache_read_tokens, 0);
     }
 }

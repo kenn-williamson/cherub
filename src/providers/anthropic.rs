@@ -4,6 +4,9 @@ use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use tracing::{Instrument, info, info_span, warn};
 
+use async_trait::async_trait;
+
+use super::pricing::ModelPricing;
 use super::wire::{self, RequestBody};
 use super::{ApiUsage, Message, Provider, ToolDefinition};
 use crate::error::CherubError;
@@ -48,6 +51,7 @@ impl AnthropicProvider {
     }
 }
 
+#[async_trait]
 impl Provider for AnthropicProvider {
     /// Send a non-streaming completion request to the Anthropic API.
     /// Retries on transient errors (429, 5xx) with exponential backoff.
@@ -167,6 +171,73 @@ impl Provider for AnthropicProvider {
     fn max_output_tokens(&self) -> u32 {
         self.max_tokens
     }
+
+    fn pricing(&self) -> Option<ModelPricing> {
+        // Cache rates: write = 125% of input, read = 10% of input.
+        if self.model.starts_with("claude-opus-4") {
+            Some(ModelPricing {
+                input_per_mtok: 15.0,
+                output_per_mtok: 75.0,
+                cache_write_per_mtok: 18.75,
+                cache_read_per_mtok: 1.50,
+            })
+        } else if self.model.starts_with("claude-sonnet-4") {
+            Some(ModelPricing {
+                input_per_mtok: 3.0,
+                output_per_mtok: 15.0,
+                cache_write_per_mtok: 3.75,
+                cache_read_per_mtok: 0.30,
+            })
+        } else if self.model.starts_with("claude-haiku-4") {
+            Some(ModelPricing {
+                input_per_mtok: 0.80,
+                output_per_mtok: 4.0,
+                cache_write_per_mtok: 1.0,
+                cache_read_per_mtok: 0.08,
+            })
+        } else if self.model.starts_with("claude-3-5-sonnet")
+            || self.model.starts_with("claude-3.5-sonnet")
+        {
+            Some(ModelPricing {
+                input_per_mtok: 3.0,
+                output_per_mtok: 15.0,
+                cache_write_per_mtok: 3.75,
+                cache_read_per_mtok: 0.30,
+            })
+        } else if self.model.starts_with("claude-3-5-haiku")
+            || self.model.starts_with("claude-3.5-haiku")
+        {
+            Some(ModelPricing {
+                input_per_mtok: 0.80,
+                output_per_mtok: 4.0,
+                cache_write_per_mtok: 1.0,
+                cache_read_per_mtok: 0.08,
+            })
+        } else if self.model.starts_with("claude-3-opus") {
+            Some(ModelPricing {
+                input_per_mtok: 15.0,
+                output_per_mtok: 75.0,
+                cache_write_per_mtok: 18.75,
+                cache_read_per_mtok: 1.50,
+            })
+        } else if self.model.starts_with("claude-3-sonnet") {
+            Some(ModelPricing {
+                input_per_mtok: 3.0,
+                output_per_mtok: 15.0,
+                cache_write_per_mtok: 3.75,
+                cache_read_per_mtok: 0.30,
+            })
+        } else if self.model.starts_with("claude-3-haiku") {
+            Some(ModelPricing {
+                input_per_mtok: 0.25,
+                output_per_mtok: 1.25,
+                cache_write_per_mtok: 0.3125,
+                cache_read_per_mtok: 0.025,
+            })
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -208,5 +279,32 @@ mod tests {
         assert_eq!(json["stream"], false);
         assert!(json["tools"].is_array());
         assert_eq!(json["tools"][0]["name"], "bash");
+    }
+
+    #[test]
+    fn pricing_known_claude_models() {
+        let key = SecretString::from("test-key");
+
+        let sonnet = AnthropicProvider::new(key.clone(), "claude-sonnet-4-20250514", 4096).unwrap();
+        let p = sonnet.pricing().expect("sonnet-4 should have pricing");
+        assert!((p.input_per_mtok - 3.0).abs() < 1e-10);
+        assert!((p.output_per_mtok - 15.0).abs() < 1e-10);
+        assert!((p.cache_write_per_mtok - 3.75).abs() < 1e-10);
+        assert!((p.cache_read_per_mtok - 0.30).abs() < 1e-10);
+
+        let opus = AnthropicProvider::new(key.clone(), "claude-opus-4-20250514", 4096).unwrap();
+        let p = opus.pricing().expect("opus-4 should have pricing");
+        assert!((p.input_per_mtok - 15.0).abs() < 1e-10);
+        assert!((p.output_per_mtok - 75.0).abs() < 1e-10);
+
+        let haiku = AnthropicProvider::new(key.clone(), "claude-haiku-4-20250514", 4096).unwrap();
+        assert!(haiku.pricing().is_some());
+    }
+
+    #[test]
+    fn pricing_unknown_model_returns_none() {
+        let key = SecretString::from("test-key");
+        let provider = AnthropicProvider::new(key, "llama-3-70b", 4096).unwrap();
+        assert!(provider.pricing().is_none());
     }
 }

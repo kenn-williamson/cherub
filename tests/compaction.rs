@@ -11,8 +11,11 @@ use std::sync::Mutex;
 
 use serde_json::json;
 
+use async_trait::async_trait;
+
 use cherub::enforcement::policy::Policy;
 use cherub::error::CherubError;
+use cherub::providers::pricing::ModelPricing;
 use cherub::providers::{ApiUsage, ContentBlock, Message, Provider, StopReason, ToolDefinition};
 use cherub::runtime::AgentLoop;
 use cherub::runtime::approval::{ApprovalGate, ApprovalResult, EscalationContext};
@@ -36,6 +39,7 @@ impl MockProvider {
     }
 }
 
+#[async_trait]
 impl Provider for MockProvider {
     async fn complete(
         &self,
@@ -54,6 +58,10 @@ impl Provider for MockProvider {
     fn max_output_tokens(&self) -> u32 {
         4096
     }
+
+    fn pricing(&self) -> Option<ModelPricing> {
+        None
+    }
 }
 
 /// A provider that reports high usage to trigger compaction.
@@ -69,6 +77,7 @@ impl HighUsageProvider {
     }
 }
 
+#[async_trait]
 impl Provider for HighUsageProvider {
     async fn complete(
         &self,
@@ -81,15 +90,9 @@ impl Provider for HighUsageProvider {
 
         // Report high usage when conversation is long enough to trigger compaction.
         let usage = if messages.len() > 10 {
-            Some(ApiUsage {
-                input_tokens: 160_000, // Above 75% of 200k
-                output_tokens: 100,
-            })
+            Some(ApiUsage::new(160_000, 100)) // Above 75% of 200k
         } else {
-            Some(ApiUsage {
-                input_tokens: 1_000,
-                output_tokens: 100,
-            })
+            Some(ApiUsage::new(1_000, 100))
         };
 
         Ok((msg, usage))
@@ -101,6 +104,10 @@ impl Provider for HighUsageProvider {
 
     fn max_output_tokens(&self) -> u32 {
         4096
+    }
+
+    fn pricing(&self) -> Option<ModelPricing> {
+        None
     }
 }
 
@@ -426,7 +433,7 @@ async fn no_compaction_when_below_threshold() {
     let policy = Policy::from_str(POLICY).unwrap();
     let mut agent = AgentLoop::new(
         policy,
-        provider,
+        Box::new(provider),
         ToolRegistry::new(),
         "test".to_owned(),
         AutoApprove,
@@ -462,7 +469,7 @@ async fn compaction_triggers_with_high_usage() {
     let policy = Policy::from_str(POLICY).unwrap();
     let mut agent = AgentLoop::new(
         policy,
-        provider,
+        Box::new(provider),
         ToolRegistry::new(),
         "test".to_owned(),
         AutoApprove,
@@ -517,6 +524,7 @@ mod memory_flush {
 
     use cherub::enforcement::policy::Policy;
     use cherub::error::CherubError;
+    use cherub::providers::pricing::ModelPricing;
     use cherub::providers::{
         ApiUsage, ContentBlock, Message, Provider, StopReason, ToolDefinition,
     };
@@ -552,6 +560,7 @@ mod memory_flush {
         }
     }
 
+    #[async_trait]
     impl Provider for CompactionProvider {
         async fn complete(
             &self,
@@ -564,15 +573,9 @@ mod memory_flush {
 
             // Report high usage when conversation is long enough to trigger compaction.
             let usage = if messages.len() > 10 {
-                Some(ApiUsage {
-                    input_tokens: 160_000,
-                    output_tokens: 100,
-                })
+                Some(ApiUsage::new(160_000, 100))
             } else {
-                Some(ApiUsage {
-                    input_tokens: 1_000,
-                    output_tokens: 100,
-                })
+                Some(ApiUsage::new(1_000, 100))
             };
 
             Ok((msg, usage))
@@ -584,6 +587,10 @@ mod memory_flush {
 
         fn max_output_tokens(&self) -> u32 {
             4096
+        }
+
+        fn pricing(&self) -> Option<ModelPricing> {
+            None
         }
     }
 
@@ -752,7 +759,7 @@ patterns = ["^store:instructions/", "^store:identity/"]
         let registry = ToolRegistry::with_memory(Arc::clone(&store) as Arc<dyn MemoryStore>);
         let mut agent = AgentLoop::new(
             policy,
-            provider,
+            Box::new(provider),
             registry,
             "test".to_owned(),
             AutoApprove,
@@ -823,7 +830,7 @@ patterns = ["^store:instructions/", "^store:identity/"]
         let registry = ToolRegistry::with_memory(Arc::clone(&store) as Arc<dyn MemoryStore>);
         let mut agent = AgentLoop::new(
             policy,
-            provider,
+            Box::new(provider),
             registry,
             "test".to_owned(),
             AutoApprove,
@@ -910,7 +917,7 @@ patterns = ["^store:instructions/", "^store:identity/"]
         let registry = ToolRegistry::with_memory(Arc::clone(&store) as Arc<dyn MemoryStore>);
         let mut agent = AgentLoop::new(
             policy,
-            provider,
+            Box::new(provider),
             registry,
             "test".to_owned(),
             AutoApprove,

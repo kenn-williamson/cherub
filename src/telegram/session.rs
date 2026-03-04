@@ -191,7 +191,7 @@ async fn chat_session(
 
     let mut agent = AgentLoop::new(
         config.policy,
-        provider,
+        Box::new(provider),
         registry,
         system_prompt,
         approval_gate,

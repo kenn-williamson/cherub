@@ -950,7 +950,7 @@ async fn run_agent(
     let output = StdoutSink;
     let mut agent = AgentLoop::new(
         policy,
-        provider,
+        Box::new(provider),
         registry,
         system_prompt,
         approval_gate,

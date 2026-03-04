@@ -59,7 +59,7 @@ patterns = [
 ]
 "#;
 
-fn make_agent() -> AgentLoop<AnthropicProvider, DenyAllGate, NullSink> {
+fn make_agent() -> AgentLoop<DenyAllGate, NullSink> {
     dotenvy::dotenv().ok();
     let api_key =
         std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY required for red team tests");
@@ -75,7 +75,7 @@ fn make_agent() -> AgentLoop<AnthropicProvider, DenyAllGate, NullSink> {
 
     AgentLoop::new(
         policy,
-        provider,
+        Box::new(provider),
         registry,
         system_prompt,
         approval_gate,

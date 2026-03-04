@@ -1,6 +1,6 @@
 # Secure Agent Runtime — Design Document
 
-**Status:** Draft — Milestone 12 Complete (cost tracking + budget enforcement via append-only token usage log, model pricing, and policy-gated budget limits)
+**Status:** Draft — M13-prep Complete (Provider trait migrated to async_trait + Box\<dyn Provider\>, provider-owned pricing, cache token support)
 **Author:** Kenn Williamson  
 **Date:** February 2026
 

@@ -67,11 +67,12 @@ fn extract_user_text(content: &[UserContent]) -> String {
 }
 
 /// The agent loop. Owns session state and orchestrates model <-> tool interaction.
-/// Generic over provider, approval gate, and output sink for testability.
-pub struct AgentLoop<P: Provider, A: ApprovalGate, O: OutputSink> {
+/// Generic over approval gate and output sink for testability. Provider is
+/// `Box<dyn Provider>` — object-safe via `async_trait` (M13-prep).
+pub struct AgentLoop<A: ApprovalGate, O: OutputSink> {
     session: Session,
     policy: Policy,
-    provider: P,
+    provider: Box<dyn Provider>,
     registry: ToolRegistry,
     system_prompt: String,
     tool_definitions: Vec<ToolDefinition>,
@@ -96,10 +97,10 @@ pub struct AgentLoop<P: Provider, A: ApprovalGate, O: OutputSink> {
     cost_store: Option<std::sync::Arc<dyn CostStore>>,
 }
 
-impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
+impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
     pub fn new(
         policy: Policy,
-        provider: P,
+        provider: Box<dyn Provider>,
         registry: ToolRegistry,
         system_prompt: String,
         approval_gate: A,
@@ -218,7 +219,9 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
         use crate::providers::pricing;
 
         if let Some(ref store) = self.cost_store {
-            let cost_usd = pricing::lookup_pricing(self.provider.model_name())
+            let cost_usd = self
+                .provider
+                .pricing()
                 .map_or(0.0, |p| pricing::compute_cost(&usage, &p));
             if let Err(e) = store
                 .record(NewTokenUsage {

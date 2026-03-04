@@ -21,6 +21,7 @@ use uuid::{NoContext, Timestamp, Uuid};
 
 use cherub::enforcement::policy::Policy;
 use cherub::error::CherubError;
+use cherub::providers::pricing::ModelPricing;
 use cherub::providers::{ApiUsage, ContentBlock, Message, Provider, StopReason, ToolDefinition};
 use cherub::runtime::AgentLoop;
 use cherub::runtime::approval::{ApprovalGate, ApprovalResult, EscalationContext};
@@ -54,6 +55,7 @@ impl CapturingProvider {
     }
 }
 
+#[async_trait]
 impl Provider for CapturingProvider {
     async fn complete(
         &self,
@@ -72,6 +74,10 @@ impl Provider for CapturingProvider {
 
     fn max_output_tokens(&self) -> u32 {
         4096
+    }
+
+    fn pricing(&self) -> Option<ModelPricing> {
+        None
     }
 }
 
@@ -246,7 +252,7 @@ async fn relevant_memories_injected_into_system_prompt() {
     let registry = ToolRegistry::with_memory(Arc::clone(&store) as Arc<dyn MemoryStore>);
     let mut agent = AgentLoop::new(
         policy,
-        provider,
+        Box::new(provider),
         registry,
         "base system prompt".to_owned(),
         AutoApprove,
@@ -289,7 +295,7 @@ async fn no_matching_memories_no_injection() {
     let registry = ToolRegistry::with_memory(Arc::clone(&store) as Arc<dyn MemoryStore>);
     let mut agent = AgentLoop::new(
         policy,
-        provider,
+        Box::new(provider),
         registry,
         "base system prompt".to_owned(),
         AutoApprove,
@@ -320,7 +326,7 @@ async fn no_store_no_injection() {
     // No with_memory_injection() call — agent has no store.
     let mut agent = AgentLoop::new(
         policy,
-        provider,
+        Box::new(provider),
         registry,
         "base system prompt".to_owned(),
         AutoApprove,
@@ -349,7 +355,7 @@ async fn short_query_skips_injection() {
     let registry = ToolRegistry::with_memory(Arc::clone(&store) as Arc<dyn MemoryStore>);
     let mut agent = AgentLoop::new(
         policy,
-        provider,
+        Box::new(provider),
         registry,
         "base system prompt".to_owned(),
         AutoApprove,
@@ -395,7 +401,7 @@ async fn injection_consistent_across_iterations() {
     let registry = ToolRegistry::with_memory(Arc::clone(&store) as Arc<dyn MemoryStore>);
     let mut agent = AgentLoop::new(
         policy,
-        provider,
+        Box::new(provider),
         registry,
         "base system prompt".to_owned(),
         AutoApprove,
@@ -438,7 +444,7 @@ async fn inferred_memory_has_confidence_label() {
     let registry = ToolRegistry::with_memory(Arc::clone(&store) as Arc<dyn MemoryStore>);
     let mut agent = AgentLoop::new(
         policy,
-        provider,
+        Box::new(provider),
         registry,
         "base system prompt".to_owned(),
         AutoApprove,
@@ -491,7 +497,7 @@ async fn agent_cannot_suppress_injection() {
     let registry = ToolRegistry::with_memory(Arc::clone(&store) as Arc<dyn MemoryStore>);
     let mut agent = AgentLoop::new(
         policy,
-        provider,
+        Box::new(provider),
         registry,
         "base system prompt".to_owned(),
         AutoApprove,

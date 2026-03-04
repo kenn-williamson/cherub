@@ -13,8 +13,11 @@ use std::sync::Mutex;
 
 use serde_json::json;
 
+use async_trait::async_trait;
+
 use cherub::enforcement::policy::Policy;
 use cherub::error::CherubError;
+use cherub::providers::pricing::ModelPricing;
 use cherub::providers::{ApiUsage, ContentBlock, Message, Provider, StopReason, ToolDefinition};
 use cherub::runtime::AgentLoop;
 use cherub::runtime::approval::{ApprovalGate, ApprovalResult, EscalationContext};
@@ -37,6 +40,7 @@ impl MockProvider {
     }
 }
 
+#[async_trait]
 impl Provider for MockProvider {
     async fn complete(
         &self,
@@ -54,6 +58,10 @@ impl Provider for MockProvider {
 
     fn max_output_tokens(&self) -> u32 {
         4096
+    }
+
+    fn pricing(&self) -> Option<ModelPricing> {
+        None
     }
 }
 
@@ -143,7 +151,7 @@ patterns = [
 fn make_agent(
     responses: Vec<Message>,
     approval_policy: MockApprovalPolicy,
-) -> AgentLoop<MockProvider, MockApprovalGate, NullSink> {
+) -> AgentLoop<MockApprovalGate, NullSink> {
     let policy = Policy::from_str(FILE_POLICY).unwrap();
     let provider = MockProvider::new(responses);
     let registry = ToolRegistry::new();
@@ -152,7 +160,7 @@ fn make_agent(
     };
     AgentLoop::new(
         policy,
-        provider,
+        Box::new(provider),
         registry,
         "test".to_owned(),
         approval_gate,
@@ -278,7 +286,7 @@ patterns = ["^ls "]
     };
     let mut agent = AgentLoop::new(
         policy,
-        provider,
+        Box::new(provider),
         registry,
         "test".to_owned(),
         approval_gate,
