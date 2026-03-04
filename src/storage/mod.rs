@@ -1,5 +1,6 @@
 pub mod embedding;
 pub mod pg_audit_store;
+pub mod pg_cost_store;
 pub mod pg_memory_store;
 pub mod pg_session_store;
 pub mod search;
@@ -447,6 +448,84 @@ pub trait AuditStore: Send + Sync {
     /// Results are ordered by `created_at DESC` (most recent first).
     /// Defaults to the last 100 events if `filter.limit` is not set.
     async fn list(&self, filter: AuditFilter) -> Result<Vec<AuditEvent>, CherubError>;
+}
+
+// ─── Cost tracking types (M12) ────────────────────────────────────────────────
+
+/// What kind of LLM API call was made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallType {
+    /// Main agent loop inference.
+    Inference,
+    /// Context compaction summarization.
+    Summarization,
+    /// Pre-compaction memory extraction.
+    Extraction,
+}
+
+impl CallType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CallType::Inference => "inference",
+            CallType::Summarization => "summarization",
+            CallType::Extraction => "extraction",
+        }
+    }
+}
+
+/// Input for recording a token usage event.
+#[derive(Debug)]
+pub struct NewTokenUsage {
+    pub session_id: Option<Uuid>,
+    pub user_id: String,
+    pub turn_number: Option<i32>,
+    pub model_name: String,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cost_usd: f64,
+    pub call_type: CallType,
+}
+
+/// Aggregate cost summary over a time period or session.
+#[derive(Debug, Clone)]
+pub struct CostSummary {
+    pub total_cost_usd: f64,
+    pub total_input_tokens: i64,
+    pub total_output_tokens: i64,
+    pub call_count: i64,
+}
+
+/// Per-day cost breakdown for history display.
+#[derive(Debug, Clone)]
+pub struct DailyCost {
+    pub date: chrono::NaiveDate,
+    pub total_cost_usd: f64,
+    pub total_input_tokens: i64,
+    pub total_output_tokens: i64,
+    pub call_count: i64,
+}
+
+/// Storage backend for token usage and cost tracking (M12).
+///
+/// Implementations: `PgCostStore` (PostgreSQL, M12).
+/// This is a true `dyn Trait` boundary — backend selected at runtime.
+#[async_trait]
+pub trait CostStore: Send + Sync {
+    /// Record a token usage event. Returns the DB-assigned UUID.
+    async fn record(&self, usage: NewTokenUsage) -> Result<Uuid, CherubError>;
+
+    /// Get the aggregate cost for a session.
+    async fn session_cost(&self, session_id: Uuid) -> Result<CostSummary, CherubError>;
+
+    /// Get the aggregate cost for a user since a given timestamp.
+    async fn period_cost(
+        &self,
+        user_id: &str,
+        since: DateTime<Utc>,
+    ) -> Result<CostSummary, CherubError>;
+
+    /// Get daily cost breakdown for a user over the last N days.
+    async fn daily_costs(&self, user_id: &str, days: u32) -> Result<Vec<DailyCost>, CherubError>;
 }
 
 /// Connect to PostgreSQL, run pending migrations, and return a connection pool.

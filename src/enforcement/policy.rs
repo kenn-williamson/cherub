@@ -19,6 +19,21 @@ const MAX_POLICY_FILE_SIZE: u64 = 64 * 1024; // 64 KiB
 struct PolicyFile {
     #[serde(default)]
     tools: HashMap<String, ToolConfig>,
+    #[serde(default)]
+    budget: Option<BudgetConfig>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BudgetConfig {
+    session_limit_usd: Option<f64>,
+    daily_limit_usd: Option<f64>,
+    #[serde(default = "default_on_exceeded")]
+    on_exceeded: OnConstraintFailureValue,
+}
+
+fn default_on_exceeded() -> OnConstraintFailureValue {
+    OnConstraintFailureValue::Escalate
 }
 
 #[derive(Deserialize)]
@@ -118,15 +133,25 @@ impl From<TierValue> for Tier {
 
 // --- Compiled policy structs (internal representation) ---
 
+/// Compiled budget limits from the `[budget]` section.
+#[derive(Debug, Clone)]
+pub struct CompiledBudget {
+    pub(crate) session_limit_usd: Option<f64>,
+    pub(crate) daily_limit_usd: Option<f64>,
+    pub(crate) on_exceeded: OnConstraintFailure,
+}
+
 #[derive(Clone)]
 pub struct Policy {
     tools: Vec<CompiledTool>,
+    pub(crate) budget: Option<CompiledBudget>,
 }
 
 impl std::fmt::Debug for Policy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Policy")
             .field("tool_count", &self.tools.len())
+            .field("has_budget", &self.budget.is_some())
             .finish()
     }
 }
@@ -169,7 +194,7 @@ enum Predicate {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum OnConstraintFailure {
+pub(crate) enum OnConstraintFailure {
     Reject,
     Escalate,
 }
@@ -188,7 +213,16 @@ impl FromStr for Policy {
             .map(|(name, config)| compile_tool(name, config))
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(Self { tools })
+        let budget = file.budget.map(|b| CompiledBudget {
+            session_limit_usd: b.session_limit_usd,
+            daily_limit_usd: b.daily_limit_usd,
+            on_exceeded: match b.on_exceeded {
+                OnConstraintFailureValue::Reject => OnConstraintFailure::Reject,
+                OnConstraintFailureValue::Escalate => OnConstraintFailure::Escalate,
+            },
+        });
+
+        Ok(Self { tools, budget })
     }
 }
 
@@ -947,5 +981,93 @@ patterns = ["^ls "]
     #[test]
     fn policy_file_size_limit_constant() {
         assert_eq!(MAX_POLICY_FILE_SIZE, 64 * 1024);
+    }
+
+    // --- Budget config parsing tests (M12) ---
+
+    #[test]
+    fn parse_budget_section() {
+        let toml = r#"
+[tools.bash]
+enabled = true
+
+[tools.bash.actions.read]
+tier = "observe"
+patterns = ["^ls "]
+
+[budget]
+session_limit_usd = 5.0
+daily_limit_usd = 25.0
+on_exceeded = "escalate"
+"#;
+        let policy = Policy::from_str(toml).expect("budget policy should parse");
+        let budget = policy.budget.as_ref().expect("budget should be present");
+        assert!((budget.session_limit_usd.unwrap() - 5.0).abs() < 1e-10);
+        assert!((budget.daily_limit_usd.unwrap() - 25.0).abs() < 1e-10);
+        assert_eq!(budget.on_exceeded, OnConstraintFailure::Escalate);
+    }
+
+    #[test]
+    fn parse_budget_reject_mode() {
+        let toml = r#"
+[tools.bash]
+enabled = true
+
+[tools.bash.actions.read]
+tier = "observe"
+patterns = ["^ls "]
+
+[budget]
+session_limit_usd = 1.0
+on_exceeded = "reject"
+"#;
+        let policy = Policy::from_str(toml).expect("budget policy should parse");
+        let budget = policy.budget.as_ref().expect("budget should be present");
+        assert!((budget.session_limit_usd.unwrap() - 1.0).abs() < 1e-10);
+        assert!(budget.daily_limit_usd.is_none());
+        assert_eq!(budget.on_exceeded, OnConstraintFailure::Reject);
+    }
+
+    #[test]
+    fn parse_budget_default_on_exceeded() {
+        let toml = r#"
+[tools.bash]
+enabled = true
+
+[tools.bash.actions.read]
+tier = "observe"
+patterns = ["^ls "]
+
+[budget]
+daily_limit_usd = 10.0
+"#;
+        let policy = Policy::from_str(toml).expect("budget policy should parse");
+        let budget = policy.budget.as_ref().expect("budget should be present");
+        // Default on_exceeded is "escalate"
+        assert_eq!(budget.on_exceeded, OnConstraintFailure::Escalate);
+    }
+
+    #[test]
+    fn no_budget_section_is_none() {
+        let policy = Policy::from_str(DEFAULT_POLICY).expect("default policy should parse");
+        assert!(policy.budget.is_none());
+    }
+
+    #[test]
+    fn budget_unknown_field_rejected() {
+        let toml = r#"
+[tools.bash]
+enabled = true
+
+[tools.bash.actions.read]
+tier = "observe"
+patterns = ["^ls "]
+
+[budget]
+session_limit_usd = 5.0
+unknown_field = "surprise"
+"#;
+        let err = Policy::from_str(toml).unwrap_err();
+        assert!(matches!(err, CherubError::PolicyLoad(_)));
     }
 }

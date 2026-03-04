@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-#[cfg(any(feature = "memory", feature = "container"))]
+#[cfg(any(feature = "postgres", feature = "memory", feature = "container"))]
 use std::sync::Arc;
 
 use teloxide::prelude::*;
@@ -204,6 +204,21 @@ async fn chat_session(
     if let Some(store) = memory_store_for_injection {
         agent.with_memory_injection(store);
         info!(chat_id = %chat_id, "proactive memory injection enabled");
+    }
+
+    // Attach audit log + cost tracking if a pool is available (M10, M12).
+    #[cfg(feature = "postgres")]
+    if let Some(ref pool) = config.db_pool {
+        use crate::storage::pg_audit_store::PgAuditStore;
+        use crate::storage::pg_cost_store::PgCostStore;
+
+        let audit_store: Arc<dyn crate::storage::AuditStore> =
+            Arc::new(PgAuditStore::new(pool.clone()));
+        agent.with_audit_log(audit_store);
+
+        let cost_store: Arc<dyn crate::storage::CostStore> =
+            Arc::new(PgCostStore::new(pool.clone()));
+        agent.with_cost_tracking(cost_store);
     }
 
     // Attach session persistence per chat if a pool is available.

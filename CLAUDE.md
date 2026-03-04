@@ -69,9 +69,10 @@ cherub/
 │   ├── providers/
 │   │   ├── mod.rs            # Provider trait, Message/UserContent/ContentBlock types (serde + Clone)
 │   │   ├── anthropic.rs      # Anthropic API provider (non-streaming)
+│   │   ├── pricing.rs        # Model pricing table, compute_cost(), lookup_pricing() (M12)
 │   │   └── wire.rs           # Serde structs for Anthropic API JSON (private, supports images)
 │   ├── storage/              # Feature-gated: #[cfg(feature = "postgres")]
-│   │   ├── mod.rs            # SessionStore + MemoryStore + CredentialStore + AuditStore traits, connect(), migration runner
+│   │   ├── mod.rs            # SessionStore + MemoryStore + CredentialStore + AuditStore + CostStore traits, connect(), migration runner
 │   │   ├── embedding.rs      # EmbeddingProvider trait + OpenAiEmbeddingProvider (M6c)
 │   │   ├── search.rs         # Reciprocal Rank Fusion algorithm (M6c, pure/no-DB)
 │   │   ├── pg_session_store.rs  # PgSessionStore: PostgreSQL SessionStore impl
@@ -80,11 +81,13 @@ cherub/
 │   │   ├── credential_types.rs  # Credential/CredentialRef/DecryptedCredential/CredentialLocation (feature = "credentials")
 │   │   ├── pg_credential_store.rs  # PgCredentialStore: PostgreSQL CredentialStore impl (feature = "credentials")
 │   │   ├── pg_audit_store.rs    # PgAuditStore: PostgreSQL AuditStore impl, append-only event log (M10)
+│   │   ├── pg_cost_store.rs     # PgCostStore: PostgreSQL CostStore impl, append-only token usage (M12)
 │   │   └── migrations/
 │   │       ├── V1__initial_schema.sql  # Sessions + messages + memory schema (UUIDv7, scope column)
 │   │       ├── V2__vector_indexes.sql  # HNSW indexes for embedding columns (M6c)
 │   │       ├── V3__credentials.sql     # Encrypted credential vault table (M7a)
-│   │       └── V4__audit_log.sql       # Audit event log table (M10)
+│   │       ├── V4__audit_log.sql       # Audit event log table (M10)
+│   │       └── V5__cost_tracking.sql   # Token usage log table (M12)
 │   └── telegram/             # Feature-gated: #[cfg(feature = "telegram")]
 │       ├── mod.rs             # Module declarations
 │       ├── approval.rs        # TelegramApprovalGate (inline keyboard + oneshot channels)
@@ -106,6 +109,7 @@ cherub/
 │   ├── memory_store.rs       # PgMemoryStore integration tests (M6b + M6c hybrid search)
 │   ├── redteam.rs            # Live model adversarial tests (#[ignore], requires API key)
 │   ├── compaction.rs         # Context compaction integration tests (mock provider, no API key)
+│   ├── cost_store.rs         # PgCostStore integration tests (M12, feature = "sessions", auto-starts DB)
 │   ├── retry_integration.rs  # API retry integration tests (wiremock, no API key)
 │   ├── session_persistence.rs  # Session persistence integration tests (feature = "sessions", auto-starts DB)
 │   ├── telegram_approval.rs  # Telegram approval flow tests (feature-gated)
@@ -178,7 +182,7 @@ fn process(msg: &Message) {
 }
 ```
 
-Use `enum` when variants are known at compile time. Use `dyn Trait` only at true extension boundaries (plugins loaded at runtime). In this project, the legitimate `dyn Trait` boundaries are: `Provider` (multiple LLM backends), `Tool` (plugin tools over IPC), `SessionStore`, `MemoryStore`, and `EmbeddingProvider` (all storage/embedding backends selected at runtime). Everything else should be an enum.
+Use `enum` when variants are known at compile time. Use `dyn Trait` only at true extension boundaries (plugins loaded at runtime). In this project, the legitimate `dyn Trait` boundaries are: `Provider` (multiple LLM backends), `Tool` (plugin tools over IPC), `SessionStore`, `MemoryStore`, `EmbeddingProvider`, `AuditStore`, and `CostStore` (all storage/embedding backends selected at runtime). Everything else should be an enum.
 
 ### Use the typestate pattern for capability tokens
 
@@ -294,7 +298,7 @@ These enforce Cherub-specific guarantees the compiler alone can't catch.
 
 Specific patterns to catch and correct — based on what LLMs commonly get wrong when writing Rust.
 
-- **Enum over trait objects** — If variants are known at compile time, use `enum` + `match`. Legitimate `dyn Trait` boundaries in this project: `Provider` (LLM backends), `Tool` (plugin boundaries), `SessionStore`, `MemoryStore`, `EmbeddingProvider` (all storage backends selected at runtime).
+- **Enum over trait objects** — If variants are known at compile time, use `enum` + `match`. Legitimate `dyn Trait` boundaries in this project: `Provider` (LLM backends), `Tool` (plugin boundaries), `SessionStore`, `MemoryStore`, `EmbeddingProvider`, `AuditStore`, `CostStore` (all storage backends selected at runtime).
 - **`&str` in, `String` out** — Function parameters take `&str` or `impl AsRef<str>`. Return `String` only when transferring ownership. Never `fn foo(s: String)` when `fn foo(s: &str)` works.
 - **Iterator chains over mutation** — Prefer `.iter().map().collect()` over `let mut v = Vec::new(); for x in ... { v.push(...) }`.
 - **`?` propagation, never `.unwrap()`** — `.unwrap()` only in tests and code paths that are provably infallible (with a comment explaining why). Use `thiserror` enums in the enforcement layer, `anyhow` at the application/CLI boundary.
@@ -396,6 +400,9 @@ cargo nextest run --features memory --test memory_store
 
 # Test with session persistence only
 cargo nextest run --features sessions --test session_persistence
+
+# Test PgCostStore (M12 cost tracking, auto-starts PostgreSQL via testcontainers)
+cargo nextest run --features sessions --test cost_store
 
 # Non-DB memory tests (enforcement + injection + RRF) — also work with cargo test
 cargo nextest run --features memory --test memory_enforcement --test memory_injection

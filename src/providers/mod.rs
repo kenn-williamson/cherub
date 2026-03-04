@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod pricing;
 pub(crate) mod wire;
 
 use std::future::Future;

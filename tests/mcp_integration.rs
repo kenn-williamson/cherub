@@ -185,7 +185,7 @@ async fn enforcement_allows_permitted_mcp_tool() {
     let enforcement_name = registry.enforcement_name("mock__echo");
     let enriched = registry.enrich_params("mock__echo", &json!({"message": "hi"}));
     let proposal = ToolInvocation::new(enforcement_name, "execute", enriched);
-    let (_, decision) = enforcement::evaluate(proposal, &policy);
+    let (_, decision) = enforcement::evaluate(proposal, &policy, None);
     match decision {
         enforcement::Decision::Allow(_) => {} // expected
         _ => panic!("expected Allow for echo tool"),
@@ -195,7 +195,7 @@ async fn enforcement_allows_permitted_mcp_tool() {
     let enforcement_name = registry.enforcement_name("mock__add");
     let enriched = registry.enrich_params("mock__add", &json!({"a": 1, "b": 2}));
     let proposal = ToolInvocation::new(enforcement_name, "execute", enriched);
-    let (_, decision) = enforcement::evaluate(proposal, &policy);
+    let (_, decision) = enforcement::evaluate(proposal, &policy, None);
     match decision {
         enforcement::Decision::Allow(_) => {} // expected
         _ => panic!("expected Allow for add tool"),
@@ -223,7 +223,7 @@ patterns = ["^ls "]
     let enforcement_name = registry.enforcement_name("mock__echo");
     let enriched = registry.enrich_params("mock__echo", &json!({"message": "hi"}));
     let proposal = ToolInvocation::new(enforcement_name, "execute", enriched);
-    let (_, decision) = enforcement::evaluate(proposal, &policy);
+    let (_, decision) = enforcement::evaluate(proposal, &policy, None);
     match decision {
         enforcement::Decision::Reject => {} // expected
         _ => panic!("expected Reject for unregistered server"),
@@ -261,7 +261,7 @@ patterns = ["^mock:"]
     let enforcement_name = registry.enforcement_name("mock__echo");
     let enriched = registry.enrich_params("mock__echo", &json!({"message": "integration test"}));
     let proposal = ToolInvocation::new(enforcement_name, "execute", enriched);
-    let (evaluated, decision) = enforcement::evaluate(proposal, &policy);
+    let (evaluated, decision) = enforcement::evaluate(proposal, &policy, None);
 
     match decision {
         enforcement::Decision::Allow(token) => {

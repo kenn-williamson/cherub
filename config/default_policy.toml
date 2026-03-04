@@ -247,6 +247,26 @@ match_source = "structured"
 tier = "act"
 patterns = ["^setup$"]
 
+# ─── Budget limits (M12) ──────────────────────────────────────────────────────
+#
+# Enforce cost ceilings on LLM API usage. When a limit is exceeded, the
+# behavior depends on `on_exceeded`:
+#   "escalate" (default) — human decides whether to continue
+#   "reject"             — hard stop, no tool execution
+#
+# Limits are checked before each tool execution. Costs are tracked per-call
+# using model-specific pricing. Unknown models are tracked by token count
+# but not priced (cost = 0).
+#
+# Requires: PostgreSQL + `sessions` feature.
+#
+# Example (uncomment to enable):
+#
+# [budget]
+# session_limit_usd = 5.00
+# daily_limit_usd = 25.00
+# on_exceeded = "escalate"
+
 # ─── Constraint operators ─────────────────────────────────────────────────────
 #
 #   eq          — exact match (string, number, bool)

@@ -568,7 +568,7 @@ patterns = ["^edit:", "^edit$"]
             "execute",
             json!({"action": "read", "path": "test.txt"}),
         );
-        let (_, decision) = enforcement::evaluate(proposal, &policy);
+        let (_, decision) = enforcement::evaluate(proposal, &policy, None);
         match decision {
             enforcement::Decision::Allow(token) => token,
             _ => panic!("expected Allow"),

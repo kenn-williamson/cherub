@@ -28,8 +28,7 @@ use testcontainers::{
 /// concurrent test is using the data. Use `cargo nextest run` (not `cargo test`)
 /// for DB integration tests, or tests in the same slot will interfere.
 /// CASCADE handles FK constraints (memory_chunks → memories, session_messages → sessions).
-const RESET_SQL: &str =
-    "TRUNCATE TABLE memory_chunks, memories, session_messages, sessions CASCADE;";
+const RESET_SQL: &str = "TRUNCATE TABLE token_usage, audit_events, memory_chunks, memories, session_messages, sessions CASCADE;";
 
 /// Holds a running PostgreSQL container and a connected pool.
 ///

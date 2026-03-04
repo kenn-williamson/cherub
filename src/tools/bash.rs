@@ -143,7 +143,7 @@ patterns = ["^echo ", "^false$", "^sh "]
         let policy = Policy::from_str(policy_str).unwrap();
         let proposal =
             ToolInvocation::<Proposed>::new("bash", "execute", json!({"command": "echo test"}));
-        let (_, decision) = enforcement::evaluate(proposal, &policy);
+        let (_, decision) = enforcement::evaluate(proposal, &policy, None);
         match decision {
             enforcement::Decision::Allow(token) => token,
             _ => panic!("expected Allow"),

@@ -21,7 +21,9 @@ use output::{OutputEvent, OutputSink};
 use session::Session;
 
 #[cfg(feature = "postgres")]
-use crate::storage::{AuditDecision, AuditStore, NewAuditEvent};
+use crate::storage::{
+    AuditDecision, AuditStore, CallType, CostStore, NewAuditEvent, NewTokenUsage,
+};
 
 const MAX_ITERATIONS: usize = 25;
 
@@ -87,6 +89,11 @@ pub struct AgentLoop<P: Provider, A: ApprovalGate, O: OutputSink> {
     /// Failures are non-fatal — logged and skipped; they never block tool execution.
     #[cfg(feature = "postgres")]
     audit_store: Option<std::sync::Arc<dyn AuditStore>>,
+    /// Optional cost tracking store (M12).
+    /// When set, every LLM API call is recorded with token counts and cost.
+    /// Failures are non-fatal — logged and skipped; they never block inference.
+    #[cfg(feature = "postgres")]
+    cost_store: Option<std::sync::Arc<dyn CostStore>>,
 }
 
 impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
@@ -114,6 +121,8 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
             memory_store: None,
             #[cfg(feature = "postgres")]
             audit_store: None,
+            #[cfg(feature = "postgres")]
+            cost_store: None,
         }
     }
 
@@ -142,6 +151,18 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
     #[cfg(feature = "postgres")]
     pub fn with_audit_log(&mut self, store: std::sync::Arc<dyn AuditStore>) {
         self.audit_store = Some(store);
+    }
+
+    /// Attach a cost tracking store (M12).
+    ///
+    /// When attached, every LLM API call (inference, summarization, extraction) is
+    /// recorded with token counts and computed cost. Failures are non-fatal —
+    /// they are logged and execution continues normally.
+    ///
+    /// Call this once after `new()` and before the first `run_turn()`.
+    #[cfg(feature = "postgres")]
+    pub fn with_cost_tracking(&mut self, store: std::sync::Arc<dyn CostStore>) {
+        self.cost_store = Some(store);
     }
 
     /// Attach a PostgreSQL session store. Resumes the previous session for the given
@@ -187,6 +208,33 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
             && let Err(e) = store.append(event).await
         {
             warn!(error = %e, "audit log append failed (non-fatal)");
+        }
+    }
+
+    /// Record a cost event non-fatally. Logs a warning on failure; never panics.
+    /// Cost recording failures must never block inference — the runtime continues regardless.
+    #[cfg(feature = "postgres")]
+    async fn record_cost(&self, usage: ApiUsage, call_type: CallType) {
+        use crate::providers::pricing;
+
+        if let Some(ref store) = self.cost_store {
+            let cost_usd = pricing::lookup_pricing(self.provider.model_name())
+                .map_or(0.0, |p| pricing::compute_cost(&usage, &p));
+            if let Err(e) = store
+                .record(NewTokenUsage {
+                    session_id: Some(self.session.id),
+                    user_id: self.session.user_id.clone(),
+                    turn_number: Some(self.session.next_ordinal),
+                    model_name: self.provider.model_name().to_owned(),
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    cost_usd,
+                    call_type,
+                })
+                .await
+            {
+                warn!(error = %e, "cost recording failed (non-fatal)");
+            }
         }
     }
 
@@ -301,7 +349,7 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
 
         let summary_messages = vec![Message::user_text(&summarize_prompt)];
 
-        let (response, usage) = self
+        let (response, _usage) = self
             .provider
             .complete(
                 "You are a concise summarizer.",
@@ -310,8 +358,9 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
             )
             .await?;
 
-        if usage.is_some() {
-            // Don't store — summarization usage shouldn't influence compaction threshold.
+        #[cfg(feature = "postgres")]
+        if let Some(u) = _usage {
+            self.record_cost(u, CallType::Summarization).await;
         }
 
         // Extract text from the response.
@@ -377,13 +426,18 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
             .complete(effective_system, &extraction_messages, &[])
             .await;
 
-        let (response, _) = match result {
+        let (response, extraction_usage) = match result {
             Ok(r) => r,
             Err(e) => {
                 warn!(error = %e, "memory flush extraction failed (non-fatal)");
                 return;
             }
         };
+
+        #[cfg(feature = "postgres")]
+        if let Some(u) = extraction_usage {
+            self.record_cost(u, CallType::Extraction).await;
+        }
 
         // Parse the response as a JSON array of facts.
         let text = match response {
@@ -482,7 +536,7 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
             });
 
             let proposal = ToolInvocation::<Proposed>::new("memory", "execute", params);
-            let (evaluated, decision) = enforcement::evaluate(proposal, &self.policy);
+            let (evaluated, decision) = enforcement::evaluate(proposal, &self.policy, None);
 
             match decision {
                 Decision::Allow(token) => {
@@ -626,8 +680,10 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                 )
                 .await?;
 
-            if usage.is_some() {
-                self.last_usage = usage;
+            if let Some(u) = usage {
+                self.last_usage = Some(u);
+                #[cfg(feature = "postgres")]
+                self.record_cost(u, CallType::Inference).await;
             }
 
             let (content, stop_reason) = match assistant_msg {
@@ -681,6 +737,47 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
                 turn_number: self.session.next_ordinal,
             };
 
+            // Build budget context for enforcement (M12).
+            // Only queries costs that are actually configured in the budget.
+            #[cfg(feature = "postgres")]
+            let budget_ctx = {
+                use crate::enforcement::BudgetContext;
+
+                if let (Some(store), Some(budget)) = (&self.cost_store, &self.policy.budget) {
+                    let session_cost = if budget.session_limit_usd.is_some() {
+                        store
+                            .session_cost(self.session.id)
+                            .await
+                            .map(|s| s.total_cost_usd)
+                            .unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+                    let daily_cost = if budget.daily_limit_usd.is_some() {
+                        let today = chrono::Utc::now()
+                            .date_naive()
+                            .and_hms_opt(0, 0, 0)
+                            .unwrap()
+                            .and_utc();
+                        store
+                            .period_cost(&ctx.user_id, today)
+                            .await
+                            .map(|s| s.total_cost_usd)
+                            .unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+                    Some(BudgetContext {
+                        session_cost_usd: session_cost,
+                        daily_cost_usd: daily_cost,
+                    })
+                } else {
+                    None
+                }
+            };
+            #[cfg(not(feature = "postgres"))]
+            let budget_ctx: Option<crate::enforcement::BudgetContext> = None;
+
             // Process tool calls through enforcement
             for (tool_use_id, name, input) in tool_uses {
                 // Map composite tool name → enforcement policy name (MCP: server name).
@@ -700,7 +797,8 @@ impl<P: Provider, A: ApprovalGate, O: OutputSink> AgentLoop<P, A, O> {
 
                 let proposal =
                     ToolInvocation::<Proposed>::new(enforcement_name, "execute", enriched);
-                let (mut evaluated, decision) = enforcement::evaluate(proposal, &self.policy);
+                let (mut evaluated, decision) =
+                    enforcement::evaluate(proposal, &self.policy, budget_ctx.as_ref());
                 // Restore original composite name for registry lookup.
                 evaluated.tool = name.clone();
 

@@ -1,6 +1,6 @@
 # Secure Agent Runtime — Design Document
 
-**Status:** Draft — Milestone 11 Complete (MCP server support + structured file tool: read/edit/glob/grep with workspace containment and enforcement)
+**Status:** Draft — Milestone 12 Complete (cost tracking + budget enforcement via append-only token usage log, model pricing, and policy-gated budget limits)
 **Author:** Kenn Williamson  
 **Date:** February 2026
 

@@ -46,6 +46,9 @@ enum Command {
     /// Audit log queries (M10).
     #[cfg(feature = "postgres")]
     Audit(AuditSubcommand),
+    /// Cost tracking queries (M12).
+    #[cfg(feature = "postgres")]
+    Cost(CostSubcommand),
 }
 
 /// Audit log subcommands.
@@ -59,6 +62,15 @@ enum AuditSubcommand {
         session_id: Option<String>,
         limit: Option<i64>,
     },
+}
+
+/// Cost tracking subcommands.
+#[cfg(feature = "postgres")]
+enum CostSubcommand {
+    /// Show cost summary (session, today, this month).
+    Summary,
+    /// Show daily cost breakdown for the last N days.
+    History { days: u32 },
 }
 
 #[cfg(feature = "credentials")]
@@ -91,6 +103,12 @@ fn parse_args() -> Result<Command> {
     #[cfg(feature = "postgres")]
     if args.get(1).map(|s| s.as_str()) == Some("audit") {
         return parse_audit_args(&args[2..]);
+    }
+
+    // Check for cost subcommand.
+    #[cfg(feature = "postgres")]
+    if args.get(1).map(|s| s.as_str()) == Some("cost") {
+        return parse_cost_args(&args[2..]);
     }
 
     // Default: agent REPL.
@@ -509,6 +527,142 @@ async fn run_audit_command(sub: AuditSubcommand) -> Result<()> {
     Ok(())
 }
 
+// ─── Cost subcommand ──────────────────────────────────────────────────────
+
+#[cfg(feature = "postgres")]
+fn parse_cost_args(args: &[String]) -> Result<Command> {
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("");
+    match sub {
+        "summary" => Ok(Command::Cost(CostSubcommand::Summary)),
+        "history" => {
+            let mut days: u32 = 7;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--days" => {
+                        i += 1;
+                        if let Some(v) = args.get(i) {
+                            days = v.parse().context("--days must be a positive number")?;
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            Ok(Command::Cost(CostSubcommand::History { days }))
+        }
+        _ => anyhow::bail!(
+            "unknown cost subcommand '{}'. Available: summary, history",
+            sub
+        ),
+    }
+}
+
+#[cfg(feature = "postgres")]
+async fn run_cost_command(sub: CostSubcommand) -> Result<()> {
+    use cherub::storage::CostStore;
+    use cherub::storage::pg_cost_store::PgCostStore;
+    use chrono::Datelike;
+    use std::sync::Arc;
+
+    let db_url =
+        std::env::var("DATABASE_URL").context("DATABASE_URL must be set for cost queries")?;
+    let user_id = std::env::var("USER").unwrap_or_else(|_| "local".to_owned());
+
+    let pool = cherub::storage::connect(SecretString::from(db_url))
+        .await
+        .context("failed to connect to PostgreSQL")?;
+
+    let store: Arc<dyn CostStore> = Arc::new(PgCostStore::new(pool));
+
+    match sub {
+        CostSubcommand::Summary => {
+            let today_start = chrono::Utc::now()
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc();
+            let month_start = chrono::Utc::now()
+                .date_naive()
+                .with_day(1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc();
+
+            let today = store
+                .period_cost(&user_id, today_start)
+                .await
+                .context("failed to query today's cost")?;
+            let month = store
+                .period_cost(&user_id, month_start)
+                .await
+                .context("failed to query this month's cost")?;
+
+            println!("Cost summary for user '{user_id}':");
+            println!(
+                "  Today:         ${:.2}  ({} input + {} output tokens, {} calls)",
+                today.total_cost_usd,
+                format_tokens(today.total_input_tokens),
+                format_tokens(today.total_output_tokens),
+                today.call_count,
+            );
+            println!(
+                "  This month:    ${:.2}  ({} input + {} output tokens, {} calls)",
+                month.total_cost_usd,
+                format_tokens(month.total_input_tokens),
+                format_tokens(month.total_output_tokens),
+                month.call_count,
+            );
+        }
+        CostSubcommand::History { days } => {
+            let daily = store
+                .daily_costs(&user_id, days)
+                .await
+                .context("failed to query daily costs")?;
+
+            if daily.is_empty() {
+                println!("No cost data found for the last {days} days.");
+            } else {
+                println!(
+                    "{:<12}  {:>5}  {:>14}  {:>14}  {:>10}",
+                    "Date", "Calls", "Input Tokens", "Output Tokens", "Cost USD"
+                );
+                println!("{}", "-".repeat(62));
+                for d in &daily {
+                    println!(
+                        "{:<12}  {:>5}  {:>14}  {:>14}  ${:>9.2}",
+                        d.date,
+                        d.call_count,
+                        format_tokens(d.total_input_tokens),
+                        format_tokens(d.total_output_tokens),
+                        d.total_cost_usd,
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Format token counts with comma separators for readability.
+#[cfg(feature = "postgres")]
+fn format_tokens(n: i64) -> String {
+    if n < 1_000 {
+        return n.to_string();
+    }
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
+}
+
 // ─── Agent REPL ───────────────────────────────────────────────────────────────
 
 async fn run_agent(
@@ -825,6 +979,20 @@ async fn run_agent(
         }
     }
 
+    // Attach cost tracking if DB is available (M12).
+    #[cfg(feature = "postgres")]
+    {
+        use cherub::storage::pg_cost_store::PgCostStore;
+        use std::sync::Arc;
+
+        if let Some(ref pool) = db_pool {
+            let cost_store: Arc<dyn cherub::storage::CostStore> =
+                Arc::new(PgCostStore::new(pool.clone()));
+            agent.with_cost_tracking(cost_store);
+            info!("cost tracking enabled");
+        }
+    }
+
     // Attach session persistence if available.
     #[cfg(feature = "sessions")]
     {
@@ -927,5 +1095,7 @@ async fn main() -> Result<()> {
         Command::Credential(sub) => run_credential_command(sub).await,
         #[cfg(feature = "postgres")]
         Command::Audit(sub) => run_audit_command(sub).await,
+        #[cfg(feature = "postgres")]
+        Command::Cost(sub) => run_cost_command(sub).await,
     }
 }

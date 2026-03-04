@@ -8,8 +8,16 @@ use tracing::{info, info_span};
 
 use crate::tools::{Evaluated, Proposed, ToolInvocation};
 use capability::CapabilityToken;
-use policy::{OnConstraintFailure, Policy};
+use policy::{CompiledBudget, OnConstraintFailure, Policy};
 use tier::Tier;
+
+/// Runtime budget state passed into enforcement from the agent loop.
+/// The enforcement layer does not own this data — it receives it as context.
+#[derive(Debug)]
+pub struct BudgetContext {
+    pub session_cost_usd: f64,
+    pub daily_cost_usd: f64,
+}
 
 /// Result of enforcement evaluation.
 pub enum Decision {
@@ -29,6 +37,7 @@ pub fn approve_escalation(tier: Tier) -> CapabilityToken {
 /// Returns the transitioned invocation (now `Evaluated`) and the decision.
 ///
 /// Flow:
+/// 0. Budget check (if configured and context provided) — runs first
 /// 1. Find tool in policy, check enabled
 /// 2. Tool-level constraints → hard reject on failure
 /// 3. Extract action strings via the tool's MatchSource strategy
@@ -37,8 +46,19 @@ pub fn approve_escalation(tier: Tier) -> CapabilityToken {
 pub fn evaluate(
     proposal: ToolInvocation<Proposed>,
     policy: &Policy,
+    budget: Option<&BudgetContext>,
 ) -> (ToolInvocation<Evaluated>, Decision) {
     let _span = info_span!("evaluate", tool = %proposal.tool).entered();
+
+    // Budget check runs first, before tool lookup. If exceeded, the response
+    // depends on on_exceeded policy: escalate (human decides) or reject.
+    // Policy opacity preserved — the agent sees "action not permitted", nothing more.
+    if let Some(budget_ctx) = budget
+        && let Some(ref compiled_budget) = policy.budget
+        && let Some(decision) = check_budget(budget_ctx, compiled_budget)
+    {
+        return (proposal.transition(), decision);
+    }
 
     let decision = match policy.find_tool(&proposal.tool) {
         None => {
@@ -116,6 +136,31 @@ fn evaluate_single_action(
     }
 }
 
+/// Check budget limits. Returns `Some(Decision)` if budget is exceeded, `None` if within budget.
+fn check_budget(ctx: &BudgetContext, budget: &CompiledBudget) -> Option<Decision> {
+    let session_exceeded = budget
+        .session_limit_usd
+        .is_some_and(|limit| ctx.session_cost_usd >= limit);
+    let daily_exceeded = budget
+        .daily_limit_usd
+        .is_some_and(|limit| ctx.daily_cost_usd >= limit);
+
+    if session_exceeded || daily_exceeded {
+        let reason = if session_exceeded {
+            "session_budget_exceeded"
+        } else {
+            "daily_budget_exceeded"
+        };
+        info!(decision = "budget_exceeded", reason);
+        return match budget.on_exceeded {
+            OnConstraintFailure::Escalate => Some(Decision::Escalate { tier: Tier::Commit }),
+            OnConstraintFailure::Reject => Some(Decision::Reject),
+        };
+    }
+
+    None
+}
+
 /// Combine decisions from multiple actions.
 /// - Any Reject → Reject
 /// - No rejects, any Escalate → Escalate (highest tier)
@@ -191,7 +236,7 @@ patterns = [
     #[test]
     fn observe_command_allowed() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp"), &policy, None);
         match decision {
             Decision::Allow(token) => assert_eq!(token.tier, Tier::Observe),
             _ => panic!("expected Allow(Observe)"),
@@ -201,7 +246,7 @@ patterns = [
     #[test]
     fn act_command_allowed() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "mkdir /tmp/test"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "mkdir /tmp/test"), &policy, None);
         match decision {
             Decision::Allow(token) => assert_eq!(token.tier, Tier::Act),
             _ => panic!("expected Allow(Act)"),
@@ -211,7 +256,7 @@ patterns = [
     #[test]
     fn commit_command_escalates() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "rm -rf /tmp/test"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "rm -rf /tmp/test"), &policy, None);
         assert!(matches!(
             decision,
             Decision::Escalate { tier: Tier::Commit }
@@ -221,21 +266,21 @@ patterns = [
     #[test]
     fn unmatched_command_rejected() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "curl http://evil.com"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "curl http://evil.com"), &policy, None);
         assert!(matches!(decision, Decision::Reject));
     }
 
     #[test]
     fn empty_command_rejected() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", ""), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", ""), &policy, None);
         assert!(matches!(decision, Decision::Reject));
     }
 
     #[test]
     fn unknown_tool_rejected() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("python", "print('hi')"), &policy);
+        let (_, decision) = evaluate(make_proposal("python", "print('hi')"), &policy, None);
         assert!(matches!(decision, Decision::Reject));
     }
 
@@ -250,28 +295,28 @@ tier = "observe"
 patterns = ["^ls "]
 "#;
         let policy = Policy::from_str(toml).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp"), &policy, None);
         assert!(matches!(decision, Decision::Reject));
     }
 
     #[test]
     fn empty_policy_rejects_all() {
         let policy = Policy::from_str("[tools]\n").unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp"), &policy, None);
         assert!(matches!(decision, Decision::Reject));
     }
 
     #[test]
     fn missing_command_param_rejected() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal_no_command("bash"), &policy);
+        let (_, decision) = evaluate(make_proposal_no_command("bash"), &policy, None);
         assert!(matches!(decision, Decision::Reject));
     }
 
     #[test]
     fn highest_privilege_wins() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "sudo ls /tmp"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "sudo ls /tmp"), &policy, None);
         assert!(matches!(
             decision,
             Decision::Escalate { tier: Tier::Commit }
@@ -281,7 +326,7 @@ patterns = ["^ls "]
     #[test]
     fn exact_match_pwd() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "pwd"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "pwd"), &policy, None);
         match decision {
             Decision::Allow(token) => assert_eq!(token.tier, Tier::Observe),
             _ => panic!("expected Allow(Observe)"),
@@ -315,7 +360,7 @@ patterns = ["^ls "]
             "bash",
             json!({"command": "ls /tmp", "working_dir": "/unsafe/path"}),
         );
-        let (_, decision) = evaluate(proposal, &policy);
+        let (_, decision) = evaluate(proposal, &policy, None);
         assert!(matches!(decision, Decision::Reject));
     }
 
@@ -337,7 +382,7 @@ patterns = ["^ls "]
             "bash",
             json!({"command": "ls /tmp", "working_dir": "/safe/dir"}),
         );
-        let (_, decision) = evaluate(proposal, &policy);
+        let (_, decision) = evaluate(proposal, &policy, None);
         match decision {
             Decision::Allow(token) => assert_eq!(token.tier, Tier::Observe),
             _ => panic!("expected Allow(Observe)"),
@@ -360,7 +405,7 @@ on_constraint_failure = "reject"
 "#;
         let policy = Policy::from_str(toml).unwrap();
         let proposal = make_proposal("bash", "mkdir ../escape");
-        let (_, decision) = evaluate(proposal, &policy);
+        let (_, decision) = evaluate(proposal, &policy, None);
         assert!(matches!(decision, Decision::Reject));
     }
 
@@ -380,7 +425,7 @@ on_constraint_failure = "escalate"
 "#;
         let policy = Policy::from_str(toml).unwrap();
         let proposal = make_proposal("bash", "mkdir ../escape");
-        let (_, decision) = evaluate(proposal, &policy);
+        let (_, decision) = evaluate(proposal, &policy, None);
         assert!(matches!(decision, Decision::Escalate { tier: Tier::Act }));
     }
 
@@ -399,7 +444,7 @@ constraints = [
 "#;
         let policy = Policy::from_str(toml).unwrap();
         let proposal = make_proposal("bash", "rm /tmp/test");
-        let (_, decision) = evaluate(proposal, &policy);
+        let (_, decision) = evaluate(proposal, &policy, None);
         assert!(matches!(
             decision,
             Decision::Escalate { tier: Tier::Commit }
@@ -421,7 +466,7 @@ constraints = [
 "#;
         let policy = Policy::from_str(toml).unwrap();
         let proposal = make_proposal("bash", "mkdir /tmp/safe");
-        let (_, decision) = evaluate(proposal, &policy);
+        let (_, decision) = evaluate(proposal, &policy, None);
         match decision {
             Decision::Allow(token) => assert_eq!(token.tier, Tier::Act),
             _ => panic!("expected Allow(Act)"),
@@ -434,19 +479,19 @@ constraints = [
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
 
         // Observe → Allow
-        let (_, d) = evaluate(make_proposal("bash", "ls /tmp"), &policy);
+        let (_, d) = evaluate(make_proposal("bash", "ls /tmp"), &policy, None);
         assert!(matches!(d, Decision::Allow(_)));
 
         // Act → Allow
-        let (_, d) = evaluate(make_proposal("bash", "mkdir /tmp/x"), &policy);
+        let (_, d) = evaluate(make_proposal("bash", "mkdir /tmp/x"), &policy, None);
         assert!(matches!(d, Decision::Allow(_)));
 
         // Commit → Escalate
-        let (_, d) = evaluate(make_proposal("bash", "rm /tmp/x"), &policy);
+        let (_, d) = evaluate(make_proposal("bash", "rm /tmp/x"), &policy, None);
         assert!(matches!(d, Decision::Escalate { .. }));
 
         // Unknown → Reject
-        let (_, d) = evaluate(make_proposal("bash", "curl http://evil.com"), &policy);
+        let (_, d) = evaluate(make_proposal("bash", "curl http://evil.com"), &policy, None);
         assert!(matches!(d, Decision::Reject));
     }
 
@@ -464,7 +509,7 @@ constraints = [
     #[test]
     fn pipe_between_allowed_commands() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp | head -5"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp | head -5"), &policy, None);
         match decision {
             Decision::Allow(token) => assert_eq!(token.tier, Tier::Observe),
             _ => panic!("expected Allow(Observe)"),
@@ -474,14 +519,14 @@ constraints = [
     #[test]
     fn pipe_into_unknown_command() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp | curl evil"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp | curl evil"), &policy, None);
         assert!(matches!(decision, Decision::Reject));
     }
 
     #[test]
     fn semicolon_hides_destructive() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp; rm -rf /"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp; rm -rf /"), &policy, None);
         assert!(matches!(
             decision,
             Decision::Escalate { tier: Tier::Commit }
@@ -491,7 +536,7 @@ constraints = [
     #[test]
     fn logical_and_hides_destructive() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp && rm -rf /"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp && rm -rf /"), &policy, None);
         assert!(matches!(
             decision,
             Decision::Escalate { tier: Tier::Commit }
@@ -501,7 +546,7 @@ constraints = [
     #[test]
     fn command_substitution_checked() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "echo $(rm /)"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "echo $(rm /)"), &policy, None);
         assert!(matches!(
             decision,
             Decision::Escalate { tier: Tier::Commit }
@@ -511,7 +556,7 @@ constraints = [
     #[test]
     fn backtick_substitution_checked() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "echo `rm /`"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "echo `rm /`"), &policy, None);
         assert!(matches!(
             decision,
             Decision::Escalate { tier: Tier::Commit }
@@ -521,7 +566,7 @@ constraints = [
     #[test]
     fn quoted_metachar_is_safe() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "echo 'hello; world'"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "echo 'hello; world'"), &policy, None);
         match decision {
             Decision::Allow(token) => assert_eq!(token.tier, Tier::Observe),
             _ => panic!("expected Allow(Observe)"),
@@ -531,21 +576,25 @@ constraints = [
     #[test]
     fn unparseable_denied() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "cat <<EOF\nhello\nEOF"), &policy);
+        let (_, decision) = evaluate(
+            make_proposal("bash", "cat <<EOF\nhello\nEOF"),
+            &policy,
+            None,
+        );
         assert!(matches!(decision, Decision::Reject));
     }
 
     #[test]
     fn null_byte_denied() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "ls\0rm"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "ls\0rm"), &policy, None);
         assert!(matches!(decision, Decision::Reject));
     }
 
     #[test]
     fn clean_observe_still_allowed() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "ls -la /tmp"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "ls -la /tmp"), &policy, None);
         match decision {
             Decision::Allow(token) => assert_eq!(token.tier, Tier::Observe),
             _ => panic!("expected Allow(Observe)"),
@@ -555,7 +604,7 @@ constraints = [
     #[test]
     fn clean_act_still_allowed() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "mkdir /tmp/newdir"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "mkdir /tmp/newdir"), &policy, None);
         match decision {
             Decision::Allow(token) => assert_eq!(token.tier, Tier::Act),
             _ => panic!("expected Allow(Act)"),
@@ -565,7 +614,7 @@ constraints = [
     #[test]
     fn clean_commit_still_escalates() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "rm /tmp/file"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "rm /tmp/file"), &policy, None);
         assert!(matches!(
             decision,
             Decision::Escalate { tier: Tier::Commit }
@@ -578,7 +627,7 @@ constraints = [
     fn unicode_lookalike_ls_rejected() {
         // Fullwidth 'l' (\u{FF4C}) followed by 's' — not ASCII 'ls'.
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "\u{FF4C}s /tmp"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "\u{FF4C}s /tmp"), &policy, None);
         assert!(matches!(decision, Decision::Reject));
     }
 
@@ -586,7 +635,7 @@ constraints = [
     fn unicode_homoglyph_rm_rejected() {
         // Cyrillic 'р' (\u{0440}) + 'm' — not ASCII 'rm'.
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "\u{0440}m /tmp/file"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "\u{0440}m /tmp/file"), &policy, None);
         assert!(matches!(decision, Decision::Reject));
     }
 
@@ -594,7 +643,7 @@ constraints = [
     fn tab_instead_of_space_rejected() {
         // Pattern "^ls " requires literal space; tab won't match.
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "ls\t/tmp"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "ls\t/tmp"), &policy, None);
         assert!(matches!(decision, Decision::Reject));
     }
 
@@ -603,7 +652,7 @@ constraints = [
         // Shell parser trims segments, so " ls /tmp" evaluates as "ls /tmp".
         // This matches what bash -c would actually execute.
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", " ls /tmp"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", " ls /tmp"), &policy, None);
         match decision {
             Decision::Allow(token) => assert_eq!(token.tier, Tier::Observe),
             _ => panic!("expected Allow(Observe) — parser trims leading whitespace"),
@@ -614,7 +663,7 @@ constraints = [
     fn multiple_spaces_still_matches() {
         // Pattern "^ls " matches — first space is present. Extra spaces are fine.
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "ls  /tmp"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "ls  /tmp"), &policy, None);
         match decision {
             Decision::Allow(token) => assert_eq!(token.tier, Tier::Observe),
             _ => panic!("expected Allow(Observe)"),
@@ -625,14 +674,14 @@ constraints = [
     fn uppercase_command_rejected() {
         // Patterns are lowercase; "LS" won't match "^ls ".
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "LS /tmp"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "LS /tmp"), &policy, None);
         assert!(matches!(decision, Decision::Reject));
     }
 
     #[test]
     fn mixed_case_command_rejected() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "Ls /tmp"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "Ls /tmp"), &policy, None);
         assert!(matches!(decision, Decision::Reject));
     }
 
@@ -642,7 +691,7 @@ constraints = [
         // "ls /tmp\r" doesn't match any pattern (trailing \r), so the whole thing is handled safely.
         // The "\r\n" splits into "ls /tmp\r" and "rm -rf /" — rm escalates.
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp\r\nrm -rf /"), &policy);
+        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp\r\nrm -rf /"), &policy, None);
         assert!(matches!(
             decision,
             Decision::Escalate { tier: Tier::Commit }
@@ -655,7 +704,7 @@ constraints = [
     fn non_object_params_rejected() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
         let proposal = make_proposal_with_params("bash", json!("just a string"));
-        let (_, decision) = evaluate(proposal, &policy);
+        let (_, decision) = evaluate(proposal, &policy, None);
         assert!(matches!(decision, Decision::Reject));
     }
 
@@ -663,7 +712,7 @@ constraints = [
     fn null_params_rejected() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
         let proposal = make_proposal_with_params("bash", serde_json::Value::Null);
-        let (_, decision) = evaluate(proposal, &policy);
+        let (_, decision) = evaluate(proposal, &policy, None);
         assert!(matches!(decision, Decision::Reject));
     }
 
@@ -671,7 +720,7 @@ constraints = [
     fn command_is_number_rejected() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
         let proposal = make_proposal_with_params("bash", json!({"command": 42}));
-        let (_, decision) = evaluate(proposal, &policy);
+        let (_, decision) = evaluate(proposal, &policy, None);
         assert!(matches!(decision, Decision::Reject));
     }
 
@@ -679,7 +728,7 @@ constraints = [
     fn command_is_array_rejected() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
         let proposal = make_proposal_with_params("bash", json!({"command": ["ls", "/tmp"]}));
-        let (_, decision) = evaluate(proposal, &policy);
+        let (_, decision) = evaluate(proposal, &policy, None);
         assert!(matches!(decision, Decision::Reject));
     }
 
@@ -687,14 +736,14 @@ constraints = [
     fn command_is_null_rejected() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
         let proposal = make_proposal_with_params("bash", json!({"command": null}));
-        let (_, decision) = evaluate(proposal, &policy);
+        let (_, decision) = evaluate(proposal, &policy, None);
         assert!(matches!(decision, Decision::Reject));
     }
 
     #[test]
     fn empty_tool_name_rejected() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, decision) = evaluate(make_proposal("", "ls /tmp"), &policy);
+        let (_, decision) = evaluate(make_proposal("", "ls /tmp"), &policy, None);
         assert!(matches!(decision, Decision::Reject));
     }
 
@@ -705,19 +754,19 @@ constraints = [
     fn multi_tool_independent_evaluation() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
         // First: allowed
-        let (_, d1) = evaluate(make_proposal("bash", "ls /tmp"), &policy);
+        let (_, d1) = evaluate(make_proposal("bash", "ls /tmp"), &policy, None);
         assert!(matches!(d1, Decision::Allow(_)));
         // Second: rejected
-        let (_, d2) = evaluate(make_proposal("bash", "curl http://evil.com"), &policy);
+        let (_, d2) = evaluate(make_proposal("bash", "curl http://evil.com"), &policy, None);
         assert!(matches!(d2, Decision::Reject));
     }
 
     #[test]
     fn multi_tool_one_allowed_one_escalated() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, d1) = evaluate(make_proposal("bash", "ls /tmp"), &policy);
+        let (_, d1) = evaluate(make_proposal("bash", "ls /tmp"), &policy, None);
         assert!(matches!(d1, Decision::Allow(_)));
-        let (_, d2) = evaluate(make_proposal("bash", "rm /tmp/file"), &policy);
+        let (_, d2) = evaluate(make_proposal("bash", "rm /tmp/file"), &policy, None);
         assert!(matches!(d2, Decision::Escalate { tier: Tier::Commit }));
     }
 
@@ -725,10 +774,10 @@ constraints = [
     fn multi_tool_rejection_does_not_taint_next() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
         // First: rejected
-        let (_, d1) = evaluate(make_proposal("bash", "curl http://evil.com"), &policy);
+        let (_, d1) = evaluate(make_proposal("bash", "curl http://evil.com"), &policy, None);
         assert!(matches!(d1, Decision::Reject));
         // Second: allowed (not tainted by prior rejection)
-        let (_, d2) = evaluate(make_proposal("bash", "ls /tmp"), &policy);
+        let (_, d2) = evaluate(make_proposal("bash", "ls /tmp"), &policy, None);
         match d2 {
             Decision::Allow(token) => assert_eq!(token.tier, Tier::Observe),
             _ => panic!("expected Allow(Observe) — rejection should not taint subsequent calls"),
@@ -738,9 +787,9 @@ constraints = [
     #[test]
     fn multi_tool_all_rejected() {
         let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
-        let (_, d1) = evaluate(make_proposal("bash", "curl a"), &policy);
+        let (_, d1) = evaluate(make_proposal("bash", "curl a"), &policy, None);
         assert!(matches!(d1, Decision::Reject));
-        let (_, d2) = evaluate(make_proposal("bash", "wget b"), &policy);
+        let (_, d2) = evaluate(make_proposal("bash", "wget b"), &policy, None);
         assert!(matches!(d2, Decision::Reject));
     }
 
@@ -763,14 +812,14 @@ patterns = ["^ls "]
             "bash",
             json!({"command": "ls /tmp", "working_dir": "/safe/dir"}),
         );
-        let (_, d1) = evaluate(p1, &policy);
+        let (_, d1) = evaluate(p1, &policy, None);
         assert!(matches!(d1, Decision::Allow(_)));
         // Second: constraint fails (independent evaluation)
         let p2 = make_proposal_with_params(
             "bash",
             json!({"command": "ls /tmp", "working_dir": "/unsafe"}),
         );
-        let (_, d2) = evaluate(p2, &policy);
+        let (_, d2) = evaluate(p2, &policy, None);
         assert!(matches!(d2, Decision::Reject));
     }
 
@@ -810,7 +859,7 @@ patterns = ["^forget"]
     #[test]
     fn structured_recall_allowed_observe() {
         let policy = Policy::from_str(MEMORY_POLICY).unwrap();
-        let (_, decision) = evaluate(make_memory_proposal("recall", None), &policy);
+        let (_, decision) = evaluate(make_memory_proposal("recall", None), &policy, None);
         match decision {
             Decision::Allow(token) => assert_eq!(token.tier, Tier::Observe),
             _ => panic!("expected Allow(Observe)"),
@@ -823,6 +872,7 @@ patterns = ["^forget"]
         let (_, decision) = evaluate(
             make_memory_proposal("store", Some("preferences/food")),
             &policy,
+            None,
         );
         match decision {
             Decision::Allow(token) => assert_eq!(token.tier, Tier::Act),
@@ -836,6 +886,7 @@ patterns = ["^forget"]
         let (_, decision) = evaluate(
             make_memory_proposal("store", Some("identity/values")),
             &policy,
+            None,
         );
         assert!(matches!(
             decision,
@@ -846,7 +897,7 @@ patterns = ["^forget"]
     #[test]
     fn structured_forget_escalates() {
         let policy = Policy::from_str(MEMORY_POLICY).unwrap();
-        let (_, decision) = evaluate(make_memory_proposal("forget", None), &policy);
+        let (_, decision) = evaluate(make_memory_proposal("forget", None), &policy, None);
         assert!(matches!(
             decision,
             Decision::Escalate { tier: Tier::Commit }
@@ -857,14 +908,14 @@ patterns = ["^forget"]
     fn structured_missing_action_rejected() {
         let policy = Policy::from_str(MEMORY_POLICY).unwrap();
         let proposal = ToolInvocation::new("memory", "execute", json!({"path": "preferences/x"}));
-        let (_, decision) = evaluate(proposal, &policy);
+        let (_, decision) = evaluate(proposal, &policy, None);
         assert!(matches!(decision, Decision::Reject));
     }
 
     #[test]
     fn structured_unmatched_action_rejected() {
         let policy = Policy::from_str(MEMORY_POLICY).unwrap();
-        let (_, decision) = evaluate(make_memory_proposal("inject_persona", None), &policy);
+        let (_, decision) = evaluate(make_memory_proposal("inject_persona", None), &policy, None);
         assert!(matches!(decision, Decision::Reject));
     }
 
@@ -873,7 +924,182 @@ patterns = ["^forget"]
         // Bash uses default match_source = "command"; should be unaffected.
         let policy = Policy::from_str(MEMORY_POLICY).unwrap();
         // bash tool is not in this policy → rejected
-        let (_, d) = evaluate(make_proposal("bash", "ls /tmp"), &policy);
+        let (_, d) = evaluate(make_proposal("bash", "ls /tmp"), &policy, None);
         assert!(matches!(d, Decision::Reject));
+    }
+
+    // --- Budget enforcement tests (M12) ---
+
+    const BUDGET_POLICY: &str = r#"
+[tools.bash]
+enabled = true
+
+[tools.bash.actions.read]
+tier = "observe"
+patterns = ["^ls "]
+
+[budget]
+session_limit_usd = 1.00
+daily_limit_usd = 10.00
+on_exceeded = "escalate"
+"#;
+
+    #[test]
+    fn budget_under_limit_passes_through() {
+        let policy = Policy::from_str(BUDGET_POLICY).unwrap();
+        let ctx = BudgetContext {
+            session_cost_usd: 0.50,
+            daily_cost_usd: 5.0,
+        };
+        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp"), &policy, Some(&ctx));
+        match decision {
+            Decision::Allow(token) => assert_eq!(token.tier, Tier::Observe),
+            _ => panic!("expected Allow(Observe) when under budget"),
+        }
+    }
+
+    #[test]
+    fn budget_session_exceeded_escalates() {
+        let policy = Policy::from_str(BUDGET_POLICY).unwrap();
+        let ctx = BudgetContext {
+            session_cost_usd: 1.50,
+            daily_cost_usd: 5.0,
+        };
+        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp"), &policy, Some(&ctx));
+        assert!(matches!(
+            decision,
+            Decision::Escalate { tier: Tier::Commit }
+        ));
+    }
+
+    #[test]
+    fn budget_daily_exceeded_escalates() {
+        let policy = Policy::from_str(BUDGET_POLICY).unwrap();
+        let ctx = BudgetContext {
+            session_cost_usd: 0.50,
+            daily_cost_usd: 10.0,
+        };
+        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp"), &policy, Some(&ctx));
+        assert!(matches!(
+            decision,
+            Decision::Escalate { tier: Tier::Commit }
+        ));
+    }
+
+    #[test]
+    fn budget_exceeded_reject_mode() {
+        let toml = r#"
+[tools.bash]
+enabled = true
+
+[tools.bash.actions.read]
+tier = "observe"
+patterns = ["^ls "]
+
+[budget]
+session_limit_usd = 1.00
+on_exceeded = "reject"
+"#;
+        let policy = Policy::from_str(toml).unwrap();
+        let ctx = BudgetContext {
+            session_cost_usd: 1.50,
+            daily_cost_usd: 0.0,
+        };
+        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp"), &policy, Some(&ctx));
+        assert!(matches!(decision, Decision::Reject));
+    }
+
+    #[test]
+    fn budget_exactly_at_limit_escalates() {
+        let policy = Policy::from_str(BUDGET_POLICY).unwrap();
+        let ctx = BudgetContext {
+            session_cost_usd: 1.00,
+            daily_cost_usd: 5.0,
+        };
+        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp"), &policy, Some(&ctx));
+        // >= limit → escalates
+        assert!(matches!(
+            decision,
+            Decision::Escalate { tier: Tier::Commit }
+        ));
+    }
+
+    #[test]
+    fn no_budget_config_passes_through() {
+        // Default policy has no [budget] section.
+        let policy = Policy::from_str(DEFAULT_POLICY).unwrap();
+        let ctx = BudgetContext {
+            session_cost_usd: 999.0,
+            daily_cost_usd: 999.0,
+        };
+        // Budget context present but no budget configured → normal evaluation.
+        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp"), &policy, Some(&ctx));
+        match decision {
+            Decision::Allow(token) => assert_eq!(token.tier, Tier::Observe),
+            _ => panic!("expected Allow(Observe) with no budget configured"),
+        }
+    }
+
+    #[test]
+    fn budget_none_context_passes_through() {
+        let policy = Policy::from_str(BUDGET_POLICY).unwrap();
+        // Budget configured but no context provided → normal evaluation.
+        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp"), &policy, None);
+        match decision {
+            Decision::Allow(token) => assert_eq!(token.tier, Tier::Observe),
+            _ => panic!("expected Allow(Observe) with None budget context"),
+        }
+    }
+
+    #[test]
+    fn budget_only_session_limit() {
+        let toml = r#"
+[tools.bash]
+enabled = true
+
+[tools.bash.actions.read]
+tier = "observe"
+patterns = ["^ls "]
+
+[budget]
+session_limit_usd = 1.00
+"#;
+        let policy = Policy::from_str(toml).unwrap();
+        // Daily cost is irrelevant when daily_limit_usd is not set.
+        let ctx = BudgetContext {
+            session_cost_usd: 0.50,
+            daily_cost_usd: 9999.0,
+        };
+        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp"), &policy, Some(&ctx));
+        match decision {
+            Decision::Allow(token) => assert_eq!(token.tier, Tier::Observe),
+            _ => panic!("expected Allow — only session limit configured, not exceeded"),
+        }
+    }
+
+    #[test]
+    fn budget_only_daily_limit() {
+        let toml = r#"
+[tools.bash]
+enabled = true
+
+[tools.bash.actions.read]
+tier = "observe"
+patterns = ["^ls "]
+
+[budget]
+daily_limit_usd = 10.00
+"#;
+        let policy = Policy::from_str(toml).unwrap();
+        // Session cost is irrelevant when session_limit_usd is not set.
+        let ctx = BudgetContext {
+            session_cost_usd: 9999.0,
+            daily_cost_usd: 5.0,
+        };
+        let (_, decision) = evaluate(make_proposal("bash", "ls /tmp"), &policy, Some(&ctx));
+        match decision {
+            Decision::Allow(token) => assert_eq!(token.tier, Tier::Observe),
+            _ => panic!("expected Allow — only daily limit configured, not exceeded"),
+        }
     }
 }

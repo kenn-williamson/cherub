@@ -285,24 +285,147 @@ patterns = ["^google-workspace:send_email$"]
 
 ---
 
-## Beyond MVP
+## Milestone 12: Cost Tracking + Budget Enforcement ✓
 
-These are real goals but not blocking the thesis proof:
+**Goal:** No autonomous work without a budget ceiling. Track every token, enforce spend limits through the existing constraint system. Safety net before the agent operates independently.
 
-- Discord connector
-- Slack connector
-- Policy hot-reload (file watch + re-evaluate)
-- Multi-provider failover (try primary → fallback on failure; Anthropic + OpenAI + Ollama)
-- Session persistence (JSONL)
+### M12a: Token Usage Tracking (complete)
+- [x] V5 migration: `token_usage` table (user_id, session_id, model_name, input_tokens, output_tokens, cost_usd, call_type, timestamp)
+- [x] `CostStore` trait: `record()`, `session_cost()`, `period_cost(user_id, since)`, `daily_costs(user_id, days)`
+- [x] `PgCostStore` implementation (append-only, same pattern as `PgAuditStore`)
+- [x] Wire into agent loop: record `ApiUsage` after every `provider.complete()` call (inference, summarization, extraction)
+
+### M12b: Model Pricing Configuration (complete)
+- [x] `ModelPricing { input_per_mtok: f64, output_per_mtok: f64 }` keyed by model name prefix
+- [x] Hard-coded pricing table for known models (Claude 3/3.5/4, GPT-4o, Gemini 1.5)
+- [x] `compute_cost(usage: &ApiUsage, pricing: &ModelPricing) -> f64` pure function
+- [x] `lookup_pricing(model: &str) -> Option<ModelPricing>` with prefix matching
+
+### M12c: Budget Constraints in Enforcement (complete)
+- [x] `BudgetContext` struct: session cost, daily cost
+- [x] Extend `evaluate()` signature: `evaluate(proposal, policy, budget: Option<&BudgetContext>)` — backward compatible
+- [x] Budget exceeded → `Decision::Escalate` or `Decision::Reject` (configurable via `on_exceeded`)
+- [x] Policy TOML `[budget]` section: `session_limit_usd`, `daily_limit_usd`, `on_exceeded = "escalate" | "reject"`
+- [x] Budget context loaded from `CostStore` before tool evaluation each turn
+
+### M12d: CLI Cost Visibility (complete)
+- [x] `cherub cost summary` — current session, today, this month
+- [x] `cherub cost history --days 7` — daily breakdown
+- [x] Reuse existing CLI subcommand pattern (`cherub credential`, `cherub audit`)
+
+---
+
+## Milestone 13: Multi-Provider Architecture
+
+**Goal:** Multiple LLM providers for failover, cost optimization, and task-appropriate model routing. Cloud providers first, local model support second.
+
+Research findings:
+- **Anchoring bias is real** in draft+review patterns. Cascade-with-gating (local tries → test gate → frontier only if local fails) saves more money with less risk than naive "draft then review."
+- **Aider's architect/editor split** is well-validated: strong model reasons, weaker model formats edits. The inverse (cheap drafts, expensive reviews) risks rubber-stamping flawed approaches.
+- **Gemini 2.5 Pro** is the best second cloud provider: 1M context, decent coding (63-74% benchmarks), 40-60% cheaper than Claude.
+- **Local models** (Qwen3-Coder-Next 70.6% SWE-bench, 3B active params) are good for bounded tasks but not autonomous multi-step reasoning.
+
+### M13a: OpenAI-Compatible Provider
+- [ ] `OpenAiProvider` implementing `Provider` trait — covers OpenAI, Azure OpenAI, Gemini (via compatible endpoint), Ollama, vLLM, LM Studio, Groq
+- [ ] Constructor takes `base_url` parameter (defaults to OpenAI, configurable for local/alternative)
+- [ ] Own wire types in `openai_wire.rs` (private, like `wire.rs` for Anthropic)
+- [ ] Same retry logic pattern as `AnthropicProvider` (provider-local `RetryConfig`)
+
+### M13b: Provider Configuration
+- [ ] TOML config for provider definitions (type, model, base_url, api_key_env)
+- [ ] `ProviderConfig` struct with `#[serde(deny_unknown_fields)]`
+- [ ] `--providers` CLI flag
+- [ ] Provider instantiation from config at startup
+
+### M13c: Failover Provider
+- [ ] `FailoverProvider` wraps `Vec<Box<dyn Provider>>` — legitimate `dyn Provider` boundary
+- [ ] `complete()` tries providers in order; on transient `CherubError::Provider`, tries next
+- [ ] Circuit breaker per provider: N consecutive failures → skip for cooldown period, auto-recover
+- [ ] Structured tracing: which provider tried, succeeded, failed and why
+- [ ] Cost tracking integration: record correct model name for each provider's `ApiUsage`
+
+### M13d: Cascade Provider (Test-Gated)
+- [ ] `CascadeProvider` wraps a `draft_provider` (cheap/local) and a `review_provider` (frontier)
+- [ ] Draft provider tries first → run validation (compilation, tests, lints) → if passes, return draft directly (frontier never called)
+- [ ] If validation fails: call frontier with **original messages** (not the draft) to avoid anchoring bias. Optionally include draft's error output as context.
+- [ ] Configuration: `type = "cascade"`, `draft = "local"`, `review = "claude"`, `validation = "compile_and_test" | "none"`
+- [ ] Optional — users who don't want cascade complexity just use failover
+
+### M13e: Architect/Editor Split (Future, Design Only)
+Not implemented in M13. Forward-compatible provider config for Aider's architect/editor pattern (strong model reasons, cheaper model formats edits). Requires agent loop awareness (two-phase turn) — M15+ territory.
+
+---
+
+## Milestone 14: Output Patterns + Extended Thinking
+
+**Goal:** The agent communicates clearly during autonomous work: recapitulates understanding, shows heartbeat during execution, presents clean results. Extended thinking enables complex code reasoning.
+
+### M14a: Extended Thinking Support
+- [ ] Add `Thinking { thinking: String }` to wire `ResponseContentBlock` (currently only `Text` and `ToolUse`)
+- [ ] Add `ContentBlock::Thinking` to internal types
+- [ ] Enable extended thinking in Anthropic API request when configured (`anthropic-beta` header)
+- [ ] Thinking blocks logged via tracing but NOT emitted to OutputSink by default — available in debug/verbose mode
+- [ ] Feature-gated or config-gated (not all providers support thinking blocks)
+
+### M14b: Recapitulation Pattern
+- [ ] System prompt instruction: model begins each response by briefly restating its understanding of the task (1-2 sentences), then proceeds with execution
+- [ ] `OutputEvent::Recapitulation(&'a str)` for sinks that want to style it differently
+- [ ] Prompt-level pattern, not structural — model naturally produces recapitulation before tool calls
+
+### M14c: Heartbeat / Progress Indicator
+- [ ] `OutputEvent::Progress { tool: &'a str, status: &'a str }` — emitted when a tool starts executing
+- [ ] CLI sink: spinner line (`[working] running tests...`) overwritten by next event
+- [ ] Telegram sink: edit last message to show current status (avoids message spam)
+- [ ] Periodic `Progress` events during long tool executions
+
+### M14d: Turn-Level Output Batching (Telegram)
+- [ ] `TelegramSink` collects events during a turn instead of sending each immediately
+- [ ] At turn end: single message with recapitulation at top, tool summary (collapsed), final result
+- [ ] Uses `edit_message` to update a single status message during the turn
+- [ ] Falls back to current behavior in debug/verbose mode
+- [ ] Subsumes "Telegram output verbosity modes" from ROADMAP_DEFERRED.md
+
+---
+
+## Milestone Dependencies
+
+```
+M12a (token tracking) ──┐
+M12b (pricing config) ──┼── M12c (budget constraints) ── M12d (CLI)
+                         │
+                         └── M13a (OpenAI provider) ── M13b (provider config) ──┐
+                                                                                 ├── M13c (failover)
+                                                                                 └── M13d (cascade)
+
+M14a-c are independent — can parallel with M12/M13
+M14d depends on M14c
+```
+
+---
+
+## Unfinished from Earlier Milestones
+
+### M6: Contradiction Detection
+- [ ] On memory write, query semantically similar existing memories
+- [ ] Surface conflicts to user via existing escalation mechanism
+- [ ] `superseded_by` chain for memory history (no silent overwrites)
+
+---
+
+## Beyond M14
+
+These are real goals but not yet planned into milestones:
+
+- Schedule triggers (cron/interval): `tokio-cron-scheduler` injects "scheduled wake" messages into agent loop. Feature-gated (`schedule`). CLI flag `--schedule`.
+- Policy hot-reload (file watch + re-evaluate). Design exists in DESIGN.md Section 9.4.
 - Multi-agent routing (different policies per channel)
 - Per-task dynamic constraints (session-scoped, user-confirmed via approval gate — see DESIGN.md Section 3.5)
-- Stateful constraints (cumulative tracking: daily spend limits, action rate limits, time-windowed budgets — first application: LLM cost budget enforcement)
+- Architect/editor split (M13e design, requires agent loop two-phase turn)
+- OpenTelemetry export: `tracing-opentelemetry` as optional subscriber. Feature-gated (`otel`).
+- MCP dynamic tool changes: handle `tools/list_changed` notifications at runtime
 - Policy generation tooling (analyze a tool's actions, suggest tier classifications)
-- LLM cost tracking + budget enforcement: track token usage (model, input/output tokens, per-model cost rates) in PostgreSQL (V5 migration). Wire cost data into stateful constraints — per-session and per-day spend budgets. Budget exceeded → escalate or reject depending on policy. Subsumes "Token Usage Tracking" from ROADMAP_DEFERRED.md.
-- Multi-provider failover implementation: `FailoverProvider` wraps `Vec<Box<dyn Provider>>`, tries each in order. Start with Anthropic + OpenAI. Log which provider succeeded. Retry/fallback logic with structured tracing.
-- OpenTelemetry export: `tracing-opentelemetry` as optional subscriber. Feature-gated (`otel`). `OTEL_EXPORTER_OTLP_ENDPOINT` env var enables. Cherub already emits structured spans — OTEL export makes them visible in Grafana/Datadog/etc.
-- MCP dynamic tool changes: handle `tools/list_changed` notifications from MCP servers to add/remove tools at runtime without restart.
-- Schedule triggers (cron/interval): `tokio-cron-scheduler` injects "scheduled wake" messages into agent loop at configured intervals. Enables periodic autonomous work within policy bounds. Feature-gated (`schedule`). CLI flag `--schedule`.
+- Discord connector
+- Slack connector
 
 ---
 
