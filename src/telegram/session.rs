@@ -9,6 +9,7 @@ use tracing::{info, warn};
 use crate::enforcement::policy::Policy;
 use crate::providers::UserContent;
 use crate::providers::anthropic::AnthropicProvider;
+use crate::providers::openai::OpenAiProvider;
 use crate::runtime::AgentLoop;
 use crate::runtime::prompt::build_system_prompt;
 use crate::tools::ToolRegistry;
@@ -27,7 +28,11 @@ pub struct SessionConfig {
     pub policy: Policy,
     pub model: String,
     pub max_tokens: u32,
-    pub api_key: secrecy::SecretString,
+    pub api_key: Option<secrecy::SecretString>,
+    /// Provider backend: "anthropic" or "openai".
+    pub provider_type: String,
+    /// Custom base URL for OpenAI-compatible endpoints.
+    pub base_url: Option<String>,
     /// PostgreSQL connection pool for session persistence and/or memory.
     /// Present when `sessions` or `memory` feature is enabled.
     #[cfg(any(feature = "sessions", feature = "memory"))]
@@ -77,6 +82,8 @@ pub async fn session_manager(
                         model: config.model.clone(),
                         max_tokens: config.max_tokens,
                         api_key: config.api_key.clone(),
+                        provider_type: config.provider_type.clone(),
+                        base_url: config.base_url.clone(),
                         #[cfg(any(feature = "sessions", feature = "memory"))]
                         db_pool: config.db_pool.clone(),
                         #[cfg(feature = "memory")]
@@ -114,11 +121,35 @@ async fn chat_session(
     config: SessionConfig,
     approval_tx: mpsc::Sender<ApprovalMessage>,
 ) {
-    let provider = match AnthropicProvider::new(config.api_key, &config.model, config.max_tokens) {
-        Ok(p) => p,
-        Err(e) => {
-            warn!(chat_id = %chat_id, error = %e, "failed to create provider");
-            return;
+    let provider: Box<dyn crate::providers::Provider> = match config.provider_type.as_str() {
+        "openai" => match OpenAiProvider::new(config.api_key, &config.model, config.max_tokens) {
+            Ok(mut p) => {
+                if let Some(url) = config.base_url {
+                    p = p.with_base_url(url);
+                }
+                Box::new(p)
+            }
+            Err(e) => {
+                warn!(chat_id = %chat_id, error = %e, "failed to create OpenAI provider");
+                return;
+            }
+        },
+        _ => {
+            // Default to Anthropic. api_key is required for Anthropic.
+            let api_key = match config.api_key {
+                Some(k) => k,
+                None => {
+                    warn!(chat_id = %chat_id, "ANTHROPIC_API_KEY required for anthropic provider");
+                    return;
+                }
+            };
+            match AnthropicProvider::new(api_key, &config.model, config.max_tokens) {
+                Ok(p) => Box::new(p),
+                Err(e) => {
+                    warn!(chat_id = %chat_id, error = %e, "failed to create Anthropic provider");
+                    return;
+                }
+            }
         }
     };
 
@@ -191,7 +222,7 @@ async fn chat_session(
 
     let mut agent = AgentLoop::new(
         config.policy,
-        Box::new(provider),
+        provider,
         registry,
         system_prompt,
         approval_gate,
@@ -206,11 +237,13 @@ async fn chat_session(
         info!(chat_id = %chat_id, "proactive memory injection enabled");
     }
 
-    // Attach audit log + cost tracking if a pool is available (M10, M12).
+    // Attach audit log + cost tracking + pricing table if a pool is available (M10, M12).
     #[cfg(feature = "postgres")]
     if let Some(ref pool) = config.db_pool {
+        use crate::storage::PricingStore;
         use crate::storage::pg_audit_store::PgAuditStore;
         use crate::storage::pg_cost_store::PgCostStore;
+        use crate::storage::pg_pricing_store::PgPricingStore;
 
         let audit_store: Arc<dyn crate::storage::AuditStore> =
             Arc::new(PgAuditStore::new(pool.clone()));
@@ -219,6 +252,19 @@ async fn chat_session(
         let cost_store: Arc<dyn crate::storage::CostStore> =
             Arc::new(PgCostStore::new(pool.clone()));
         agent.with_cost_tracking(cost_store);
+
+        let pricing_store = PgPricingStore::new(pool.clone());
+        let pricing_table = pricing_store
+            .list()
+            .await
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .map(|e| (e.model_pattern.clone(), e.to_model_pricing()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        agent.with_pricing_table(pricing_table);
     }
 
     // Attach session persistence per chat if a pool is available.

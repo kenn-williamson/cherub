@@ -1,4 +1,6 @@
 pub mod anthropic;
+pub mod openai;
+pub(crate) mod openai_wire;
 pub mod pricing;
 pub(crate) mod wire;
 
@@ -47,9 +49,6 @@ pub trait Provider: Send + Sync {
 
     /// Maximum output tokens configured for this provider.
     fn max_output_tokens(&self) -> u32;
-
-    /// Provider-owned pricing. Returns `None` for unknown/unpriced models.
-    fn pricing(&self) -> Option<pricing::ModelPricing>;
 }
 
 /// Content within a user message. Supports text and images for multimodal input.

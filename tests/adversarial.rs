@@ -14,7 +14,6 @@ use async_trait::async_trait;
 
 use cherub::enforcement::policy::Policy;
 use cherub::error::CherubError;
-use cherub::providers::pricing::ModelPricing;
 use cherub::providers::{ApiUsage, ContentBlock, Message, Provider, StopReason, ToolDefinition};
 use cherub::runtime::AgentLoop;
 use cherub::runtime::approval::{ApprovalGate, ApprovalResult, EscalationContext};
@@ -55,10 +54,6 @@ impl Provider for MockProvider {
 
     fn max_output_tokens(&self) -> u32 {
         4096
-    }
-
-    fn pricing(&self) -> Option<ModelPricing> {
-        None
     }
 }
 
@@ -929,7 +924,6 @@ mod compaction_memory {
 
     use cherub::enforcement::policy::Policy;
     use cherub::error::CherubError;
-    use cherub::providers::pricing::ModelPricing;
     use cherub::providers::{
         ApiUsage, ContentBlock, Message, Provider, StopReason, ToolDefinition,
     };
@@ -988,10 +982,6 @@ mod compaction_memory {
 
         fn max_output_tokens(&self) -> u32 {
             4096
-        }
-
-        fn pricing(&self) -> Option<ModelPricing> {
-            None
         }
     }
 

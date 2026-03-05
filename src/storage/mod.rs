@@ -2,6 +2,7 @@ pub mod embedding;
 pub mod pg_audit_store;
 pub mod pg_cost_store;
 pub mod pg_memory_store;
+pub mod pg_pricing_store;
 pub mod pg_session_store;
 pub mod search;
 
@@ -526,6 +527,46 @@ pub trait CostStore: Send + Sync {
 
     /// Get daily cost breakdown for a user over the last N days.
     async fn daily_costs(&self, user_id: &str, days: u32) -> Result<Vec<DailyCost>, CherubError>;
+}
+
+// ─── Model pricing types (DB-backed pricing table) ───────────────────────────
+
+/// A row from the `model_pricing` table. Maps a model prefix to per-MTok rates.
+#[derive(Debug, Clone)]
+pub struct PricingEntry {
+    pub model_pattern: String,
+    pub input_per_mtok: f64,
+    pub output_per_mtok: f64,
+    pub cache_write_per_mtok: f64,
+    pub cache_read_per_mtok: f64,
+}
+
+impl PricingEntry {
+    /// Convert to the provider-level `ModelPricing` struct used by `compute_cost()`.
+    pub fn to_model_pricing(&self) -> crate::providers::pricing::ModelPricing {
+        crate::providers::pricing::ModelPricing {
+            input_per_mtok: self.input_per_mtok,
+            output_per_mtok: self.output_per_mtok,
+            cache_write_per_mtok: self.cache_write_per_mtok,
+            cache_read_per_mtok: self.cache_read_per_mtok,
+        }
+    }
+}
+
+/// Storage backend for model pricing rates.
+///
+/// Implementations: `PgPricingStore` (PostgreSQL).
+/// This is a true `dyn Trait` boundary — backend selected at runtime.
+#[async_trait]
+pub trait PricingStore: Send + Sync {
+    /// List all pricing entries.
+    async fn list(&self) -> Result<Vec<PricingEntry>, CherubError>;
+
+    /// Upsert a pricing entry (insert or update by model_pattern).
+    async fn set(&self, entry: PricingEntry) -> Result<(), CherubError>;
+
+    /// Delete a pricing entry. Returns `true` if a row was deleted.
+    async fn delete(&self, model_pattern: &str) -> Result<bool, CherubError>;
 }
 
 /// Connect to PostgreSQL, run pending migrations, and return a connection pool.

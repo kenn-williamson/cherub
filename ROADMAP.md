@@ -296,10 +296,13 @@ patterns = ["^google-workspace:send_email$"]
 - [x] Wire into agent loop: record `ApiUsage` after every `provider.complete()` call (inference, summarization, extraction)
 
 ### M12b: Model Pricing Configuration (complete)
-- [x] `ModelPricing { input_per_mtok: f64, output_per_mtok: f64 }` keyed by model name prefix
-- [x] Hard-coded pricing table for known models (Claude 3/3.5/4, GPT-4o, Gemini 1.5)
+- [x] `ModelPricing { input_per_mtok: f64, output_per_mtok: f64, cache_write_per_mtok, cache_read_per_mtok }` keyed by model name prefix
+- [x] DB-backed pricing: `model_pricing` table (V6 migration), `PricingStore` trait + `PgPricingStore`
+- [x] `PricingTable` (in-memory `HashMap`) loaded from DB at startup, empty = $0.00
+- [x] `lookup_pricing(table, model_name)` with longest-prefix matching
 - [x] `compute_cost(usage: &ApiUsage, pricing: &ModelPricing) -> f64` pure function
-- [x] `lookup_pricing(model: &str) -> Option<ModelPricing>` with prefix matching
+- [x] `cherub pricing list/set/delete` CLI subcommands
+- [x] No hardcoded pricing — users populate via CLI; no stale rates shipped
 
 ### M12c: Budget Constraints in Enforcement (complete)
 - [x] `BudgetContext` struct: session cost, daily cost
@@ -327,18 +330,18 @@ Research findings:
 
 ### M13-prep: Provider Trait Migration (complete)
 - [x] `async_trait` becomes non-optional dependency (was gated behind `postgres`/`container`)
-- [x] `Provider` trait gets `#[async_trait]` for object safety + `fn pricing() -> Option<ModelPricing>`
+- [x] `Provider` trait gets `#[async_trait]` for object safety
 - [x] `AgentLoop` drops generic `P: Provider`, stores `Box<dyn Provider>` instead
 - [x] `ApiUsage` extended with `cache_creation_tokens` and `cache_read_tokens` (Anthropic cache pricing)
 - [x] `ModelPricing` extended with `cache_write_per_mtok` and `cache_read_per_mtok`
-- [x] Each provider owns its pricing via `pricing()` method — central `lookup_pricing()` deleted
 - [x] `WireUsage` parses `cache_creation_input_tokens` / `cache_read_input_tokens` from Anthropic responses
+- [x] `Provider::pricing()` removed — pricing decoupled from providers, now DB-backed (M12b)
 
-### M13a: OpenAI-Compatible Provider
-- [ ] `OpenAiProvider` implementing `Provider` trait — covers OpenAI, Azure OpenAI, Gemini (via compatible endpoint), Ollama, vLLM, LM Studio, Groq
-- [ ] Constructor takes `base_url` parameter (defaults to OpenAI, configurable for local/alternative)
-- [ ] Own wire types in `openai_wire.rs` (private, like `wire.rs` for Anthropic)
-- [ ] Same retry logic pattern as `AnthropicProvider` (provider-local `RetryConfig`)
+### M13a: OpenAI-Compatible Provider (complete)
+- [x] `OpenAiProvider` implementing `Provider` trait — covers OpenAI, Azure OpenAI, Gemini (via compatible endpoint), Ollama, vLLM, LM Studio, Groq
+- [x] Constructor takes `base_url` parameter (defaults to OpenAI, configurable for local/alternative)
+- [x] Own wire types in `openai_wire.rs` (private, like `wire.rs` for Anthropic)
+- [x] Same retry logic pattern as `AnthropicProvider` (provider-local `RetryConfig`)
 
 ### M13b: Provider Configuration
 - [ ] TOML config for provider definitions (type, model, base_url, api_key_env)

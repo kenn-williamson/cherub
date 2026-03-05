@@ -95,6 +95,11 @@ pub struct AgentLoop<A: ApprovalGate, O: OutputSink> {
     /// Failures are non-fatal — logged and skipped; they never block inference.
     #[cfg(feature = "postgres")]
     cost_store: Option<std::sync::Arc<dyn CostStore>>,
+    /// In-memory pricing table loaded from DB at startup.
+    /// Used by `record_cost()` to look up per-model rates.
+    /// Empty map = all costs recorded as $0.00 (no DB or no pricing configured).
+    #[cfg(feature = "postgres")]
+    pricing_table: crate::providers::pricing::PricingTable,
 }
 
 impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
@@ -124,6 +129,8 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
             audit_store: None,
             #[cfg(feature = "postgres")]
             cost_store: None,
+            #[cfg(feature = "postgres")]
+            pricing_table: std::collections::HashMap::new(),
         }
     }
 
@@ -164,6 +171,15 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
     #[cfg(feature = "postgres")]
     pub fn with_cost_tracking(&mut self, store: std::sync::Arc<dyn CostStore>) {
         self.cost_store = Some(store);
+    }
+
+    /// Set the in-memory pricing table for cost computation.
+    ///
+    /// The table is loaded from `model_pricing` at startup. If empty (no DB or
+    /// no pricing rows), all costs are recorded as $0.00.
+    #[cfg(feature = "postgres")]
+    pub fn with_pricing_table(&mut self, table: crate::providers::pricing::PricingTable) {
+        self.pricing_table = table;
     }
 
     /// Attach a PostgreSQL session store. Resumes the previous session for the given
@@ -219,9 +235,7 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
         use crate::providers::pricing;
 
         if let Some(ref store) = self.cost_store {
-            let cost_usd = self
-                .provider
-                .pricing()
+            let cost_usd = pricing::lookup_pricing(&self.pricing_table, self.provider.model_name())
                 .map_or(0.0, |p| pricing::compute_cost(&usage, &p));
             if let Err(e) = store
                 .record(NewTokenUsage {

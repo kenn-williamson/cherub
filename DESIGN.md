@@ -1,6 +1,6 @@
 # Secure Agent Runtime — Design Document
 
-**Status:** Draft — M13-prep Complete (Provider trait migrated to async_trait + Box\<dyn Provider\>, provider-owned pricing, cache token support)
+**Status:** Draft — M13a Complete (OpenAI-compatible provider, DB-backed pricing table, cache token support)
 **Author:** Kenn Williamson  
 **Date:** February 2026
 

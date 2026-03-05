@@ -32,13 +32,24 @@ async fn main() -> Result<()> {
     }
     // Note: teloxide Bot::new() requires a plain String; SecretString cannot be used here.
 
-    // Load API key
-    let api_key_raw = std::env::var("ANTHROPIC_API_KEY")
-        .context("ANTHROPIC_API_KEY environment variable not set")?;
-    if api_key_raw.is_empty() {
-        bail!("ANTHROPIC_API_KEY is empty");
-    }
-    let api_key = SecretString::from(api_key_raw);
+    // Determine provider type.
+    let provider_type = std::env::var("CHERUB_PROVIDER").unwrap_or_else(|_| "anthropic".to_owned());
+    let base_url = std::env::var("CHERUB_BASE_URL").ok();
+
+    // Load API key — required for Anthropic, optional for OpenAI (local providers).
+    let api_key: Option<SecretString> = if provider_type == "openai" {
+        std::env::var("OPENAI_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty())
+            .map(SecretString::from)
+    } else {
+        let api_key_raw = std::env::var("ANTHROPIC_API_KEY")
+            .context("ANTHROPIC_API_KEY environment variable not set")?;
+        if api_key_raw.is_empty() {
+            bail!("ANTHROPIC_API_KEY is empty");
+        }
+        Some(SecretString::from(api_key_raw))
+    };
 
     // Load policy
     let policy_path = std::env::var("CHERUB_POLICY")
@@ -76,7 +87,13 @@ async fn main() -> Result<()> {
         Some(ids)
     };
 
-    let model = std::env::var("CHERUB_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_owned());
+    let model = std::env::var("CHERUB_MODEL").unwrap_or_else(|_| {
+        if provider_type == "openai" {
+            "gpt-4o".to_owned()
+        } else {
+            DEFAULT_MODEL.to_owned()
+        }
+    });
 
     // Connect to PostgreSQL if DATABASE_URL is set (sessions and/or memory).
     #[cfg(any(feature = "sessions", feature = "memory"))]
@@ -160,6 +177,8 @@ async fn main() -> Result<()> {
         model,
         max_tokens: DEFAULT_MAX_TOKENS,
         api_key,
+        provider_type,
+        base_url,
         #[cfg(any(feature = "sessions", feature = "memory"))]
         db_pool,
         #[cfg(feature = "memory")]

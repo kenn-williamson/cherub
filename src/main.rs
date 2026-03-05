@@ -9,6 +9,7 @@ use tracing_subscriber::EnvFilter;
 
 use cherub::enforcement::policy::Policy;
 use cherub::providers::anthropic::AnthropicProvider;
+use cherub::providers::openai::OpenAiProvider;
 use cherub::runtime::AgentLoop;
 use cherub::runtime::approval::CliApprovalGate;
 use cherub::runtime::output::StdoutSink;
@@ -27,6 +28,10 @@ enum Command {
     Agent {
         policy_path: PathBuf,
         model: String,
+        /// Provider backend: "anthropic" or "openai".
+        provider: String,
+        /// Custom base URL for OpenAI-compatible endpoints (Ollama, vLLM, etc.).
+        base_url: Option<String>,
         /// Optional directory of WASM tools to load (M8).
         #[cfg(feature = "wasm")]
         wasm_tools_dir: Option<PathBuf>,
@@ -49,6 +54,9 @@ enum Command {
     /// Cost tracking queries (M12).
     #[cfg(feature = "postgres")]
     Cost(CostSubcommand),
+    /// Model pricing management (DB-backed pricing table).
+    #[cfg(feature = "postgres")]
+    Pricing(PricingSubcommand),
 }
 
 /// Audit log subcommands.
@@ -71,6 +79,23 @@ enum CostSubcommand {
     Summary,
     /// Show daily cost breakdown for the last N days.
     History { days: u32 },
+}
+
+/// Model pricing subcommands.
+#[cfg(feature = "postgres")]
+enum PricingSubcommand {
+    /// List all pricing entries.
+    List,
+    /// Upsert a pricing entry.
+    Set {
+        pattern: String,
+        input: f64,
+        output: f64,
+        cache_write: f64,
+        cache_read: f64,
+    },
+    /// Delete a pricing entry.
+    Delete { pattern: String },
 }
 
 #[cfg(feature = "credentials")]
@@ -111,9 +136,17 @@ fn parse_args() -> Result<Command> {
         return parse_cost_args(&args[2..]);
     }
 
+    // Check for pricing subcommand.
+    #[cfg(feature = "postgres")]
+    if args.get(1).map(|s| s.as_str()) == Some("pricing") {
+        return parse_pricing_args(&args[2..]);
+    }
+
     // Default: agent REPL.
     let mut policy_path = PathBuf::from(DEFAULT_POLICY_PATH);
-    let mut model = DEFAULT_MODEL.to_owned();
+    let mut model: Option<String> = None;
+    let mut provider = "anthropic".to_owned();
+    let mut base_url: Option<String> = None;
     #[cfg(feature = "wasm")]
     let mut wasm_tools_dir: Option<PathBuf> = None;
     #[cfg(feature = "container")]
@@ -135,7 +168,19 @@ fn parse_args() -> Result<Command> {
             "--model" => {
                 i += 1;
                 if i < args.len() {
-                    model = args[i].clone();
+                    model = Some(args[i].clone());
+                }
+            }
+            "--provider" => {
+                i += 1;
+                if i < args.len() {
+                    provider = args[i].clone();
+                }
+            }
+            "--base-url" => {
+                i += 1;
+                if i < args.len() {
+                    base_url = Some(args[i].clone());
                 }
             }
             #[cfg(feature = "wasm")]
@@ -168,9 +213,20 @@ fn parse_args() -> Result<Command> {
         i += 1;
     }
 
+    // Default model depends on provider.
+    let model = model.unwrap_or_else(|| {
+        if provider == "openai" {
+            "gpt-4o".to_owned()
+        } else {
+            DEFAULT_MODEL.to_owned()
+        }
+    });
+
     Ok(Command::Agent {
         policy_path,
         model,
+        provider,
+        base_url,
         #[cfg(feature = "wasm")]
         wasm_tools_dir,
         #[cfg(feature = "container")]
@@ -663,11 +719,169 @@ fn format_tokens(n: i64) -> String {
     result.chars().rev().collect()
 }
 
+// ─── Pricing subcommand ──────────────────────────────────────────────────
+
+#[cfg(feature = "postgres")]
+fn parse_pricing_args(args: &[String]) -> Result<Command> {
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("");
+    match sub {
+        "list" => Ok(Command::Pricing(PricingSubcommand::List)),
+        "set" => {
+            let pattern = args
+                .get(1)
+                .cloned()
+                .context("usage: cherub pricing set <pattern> --input <f> --output <f> [--cache-write <f>] [--cache-read <f>]")?;
+            let mut input: Option<f64> = None;
+            let mut output: Option<f64> = None;
+            let mut cache_write: f64 = 0.0;
+            let mut cache_read: f64 = 0.0;
+
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--input" => {
+                        i += 1;
+                        if let Some(v) = args.get(i) {
+                            input = Some(v.parse().context("--input must be a number")?);
+                        }
+                    }
+                    "--output" => {
+                        i += 1;
+                        if let Some(v) = args.get(i) {
+                            output = Some(v.parse().context("--output must be a number")?);
+                        }
+                    }
+                    "--cache-write" => {
+                        i += 1;
+                        if let Some(v) = args.get(i) {
+                            cache_write = v.parse().context("--cache-write must be a number")?;
+                        }
+                    }
+                    "--cache-read" => {
+                        i += 1;
+                        if let Some(v) = args.get(i) {
+                            cache_read = v.parse().context("--cache-read must be a number")?;
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+
+            let input = input.context("--input is required")?;
+            let output = output.context("--output is required")?;
+
+            Ok(Command::Pricing(PricingSubcommand::Set {
+                pattern,
+                input,
+                output,
+                cache_write,
+                cache_read,
+            }))
+        }
+        "delete" => {
+            let pattern = args
+                .get(1)
+                .cloned()
+                .context("usage: cherub pricing delete <pattern>")?;
+            Ok(Command::Pricing(PricingSubcommand::Delete { pattern }))
+        }
+        _ => anyhow::bail!(
+            "unknown pricing subcommand '{}'. Available: list, set, delete",
+            sub
+        ),
+    }
+}
+
+#[cfg(feature = "postgres")]
+async fn run_pricing_command(sub: PricingSubcommand) -> Result<()> {
+    use cherub::storage::pg_pricing_store::PgPricingStore;
+    use cherub::storage::{PricingEntry, PricingStore};
+
+    let db_url =
+        std::env::var("DATABASE_URL").context("DATABASE_URL must be set for pricing management")?;
+
+    let pool = cherub::storage::connect(SecretString::from(db_url))
+        .await
+        .context("failed to connect to PostgreSQL")?;
+
+    let store = PgPricingStore::new(pool);
+
+    match sub {
+        PricingSubcommand::List => {
+            let entries = store
+                .list()
+                .await
+                .context("failed to list pricing entries")?;
+            if entries.is_empty() {
+                println!("No pricing entries configured.");
+                println!(
+                    "Use 'cherub pricing set <pattern> --input <f> --output <f>' to add rates."
+                );
+            } else {
+                println!(
+                    "{:<30}  {:>10}  {:>10}  {:>12}  {:>12}",
+                    "Model Pattern", "Input/MTok", "Output/MTok", "CacheWr/MTok", "CacheRd/MTok"
+                );
+                println!("{}", "-".repeat(80));
+                for e in &entries {
+                    println!(
+                        "{:<30}  ${:>9.4}  ${:>9.4}  ${:>11.4}  ${:>11.4}",
+                        e.model_pattern,
+                        e.input_per_mtok,
+                        e.output_per_mtok,
+                        e.cache_write_per_mtok,
+                        e.cache_read_per_mtok,
+                    );
+                }
+                println!("\n{} entry/entries.", entries.len());
+            }
+        }
+        PricingSubcommand::Set {
+            pattern,
+            input,
+            output,
+            cache_write,
+            cache_read,
+        } => {
+            store
+                .set(PricingEntry {
+                    model_pattern: pattern.clone(),
+                    input_per_mtok: input,
+                    output_per_mtok: output,
+                    cache_write_per_mtok: cache_write,
+                    cache_read_per_mtok: cache_read,
+                })
+                .await
+                .context("failed to set pricing entry")?;
+            println!(
+                "Set pricing for '{}': input=${}/MTok, output=${}/MTok, cache_write=${}/MTok, cache_read=${}/MTok",
+                pattern, input, output, cache_write, cache_read
+            );
+        }
+        PricingSubcommand::Delete { pattern } => {
+            let deleted = store
+                .delete(&pattern)
+                .await
+                .context("failed to delete pricing entry")?;
+            if deleted {
+                println!("Deleted pricing for '{pattern}'.");
+            } else {
+                println!("No pricing entry found for '{pattern}'.");
+            }
+        }
+    }
+
+    Ok(())
+}
+
 // ─── Agent REPL ───────────────────────────────────────────────────────────────
 
 async fn run_agent(
     policy_path: PathBuf,
     model: String,
+    provider_type: String,
+    base_url: Option<String>,
     #[cfg(feature = "wasm")] wasm_tools_dir: Option<PathBuf>,
     #[cfg(feature = "container")] container_tools_dir: Option<PathBuf>,
     #[cfg(feature = "container")] sandbox_bash: bool,
@@ -675,22 +889,44 @@ async fn run_agent(
 ) -> Result<()> {
     let user_id = std::env::var("USER").unwrap_or_else(|_| "local".to_owned());
 
-    // Load API key.
-    let api_key_raw = std::env::var("ANTHROPIC_API_KEY")
-        .context("ANTHROPIC_API_KEY environment variable not set")?;
-    if api_key_raw.is_empty() {
-        bail!("ANTHROPIC_API_KEY is empty");
-    }
-    let api_key = SecretString::from(api_key_raw);
-
     // Load policy.
     let policy = Policy::load(&policy_path).map_err(|e| {
         anyhow::anyhow!("failed to load policy from {}: {e}", policy_path.display())
     })?;
     info!(policy = %policy_path.display(), "policy loaded");
 
-    let provider = AnthropicProvider::new(api_key, &model, DEFAULT_MAX_TOKENS)
-        .map_err(|e| anyhow::anyhow!("failed to create provider: {e}"))?;
+    // Create provider based on --provider flag.
+    let provider: Box<dyn cherub::providers::Provider> = match provider_type.as_str() {
+        "openai" => {
+            // OPENAI_API_KEY is optional for local providers (Ollama, etc.).
+            let api_key = std::env::var("OPENAI_API_KEY").ok().and_then(|k| {
+                if k.is_empty() {
+                    None
+                } else {
+                    Some(SecretString::from(k))
+                }
+            });
+            let mut p = OpenAiProvider::new(api_key, &model, DEFAULT_MAX_TOKENS)
+                .map_err(|e| anyhow::anyhow!("failed to create OpenAI provider: {e}"))?;
+            if let Some(url) = base_url {
+                p = p.with_base_url(url);
+            }
+            Box::new(p)
+        }
+        "anthropic" => {
+            let api_key_raw = std::env::var("ANTHROPIC_API_KEY")
+                .context("ANTHROPIC_API_KEY environment variable not set")?;
+            if api_key_raw.is_empty() {
+                bail!("ANTHROPIC_API_KEY is empty");
+            }
+            let api_key = SecretString::from(api_key_raw);
+            Box::new(
+                AnthropicProvider::new(api_key, &model, DEFAULT_MAX_TOKENS)
+                    .map_err(|e| anyhow::anyhow!("failed to create Anthropic provider: {e}"))?,
+            )
+        }
+        other => bail!("unknown provider '{other}'. Available: anthropic, openai"),
+    };
 
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
@@ -950,7 +1186,7 @@ async fn run_agent(
     let output = StdoutSink;
     let mut agent = AgentLoop::new(
         policy,
-        Box::new(provider),
+        provider,
         registry,
         system_prompt,
         approval_gate,
@@ -979,16 +1215,36 @@ async fn run_agent(
         }
     }
 
-    // Attach cost tracking if DB is available (M12).
+    // Attach cost tracking + pricing table if DB is available (M12).
     #[cfg(feature = "postgres")]
     {
+        use cherub::storage::PricingStore;
         use cherub::storage::pg_cost_store::PgCostStore;
+        use cherub::storage::pg_pricing_store::PgPricingStore;
         use std::sync::Arc;
 
         if let Some(ref pool) = db_pool {
             let cost_store: Arc<dyn cherub::storage::CostStore> =
                 Arc::new(PgCostStore::new(pool.clone()));
             agent.with_cost_tracking(cost_store);
+
+            let pricing_store = PgPricingStore::new(pool.clone());
+            let pricing_table: cherub::providers::pricing::PricingTable = pricing_store
+                .list()
+                .await
+                .map(|entries| {
+                    entries
+                        .into_iter()
+                        .map(|e| (e.model_pattern.clone(), e.to_model_pricing()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let count = pricing_table.len();
+            agent.with_pricing_table(pricing_table);
+
+            if count > 0 {
+                info!(entries = count, "pricing table loaded");
+            }
             info!("cost tracking enabled");
         }
     }
@@ -1068,6 +1324,8 @@ async fn main() -> Result<()> {
         Command::Agent {
             policy_path,
             model,
+            provider,
+            base_url,
             #[cfg(feature = "wasm")]
             wasm_tools_dir,
             #[cfg(feature = "container")]
@@ -1080,6 +1338,8 @@ async fn main() -> Result<()> {
             run_agent(
                 policy_path,
                 model,
+                provider,
+                base_url,
                 #[cfg(feature = "wasm")]
                 wasm_tools_dir,
                 #[cfg(feature = "container")]
@@ -1097,5 +1357,7 @@ async fn main() -> Result<()> {
         Command::Audit(sub) => run_audit_command(sub).await,
         #[cfg(feature = "postgres")]
         Command::Cost(sub) => run_cost_command(sub).await,
+        #[cfg(feature = "postgres")]
+        Command::Pricing(sub) => run_pricing_command(sub).await,
     }
 }

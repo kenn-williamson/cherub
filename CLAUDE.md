@@ -69,10 +69,12 @@ cherub/
 │   ├── providers/
 │   │   ├── mod.rs            # Provider trait, Message/UserContent/ContentBlock types (serde + Clone)
 │   │   ├── anthropic.rs      # Anthropic API provider (non-streaming)
-│   │   ├── pricing.rs        # ModelPricing struct + compute_cost() (M12; providers own their rates via Provider::pricing())
+│   │   ├── openai.rs         # OpenAI-compatible API provider (M13a: OpenAI, Ollama, vLLM, Groq, etc.)
+│   │   ├── openai_wire.rs    # Serde structs for OpenAI Chat Completions wire format (private)
+│   │   ├── pricing.rs        # ModelPricing struct + PricingTable + lookup_pricing() + compute_cost() (M12; DB-backed pricing)
 │   │   └── wire.rs           # Serde structs for Anthropic API JSON (private, supports images)
 │   ├── storage/              # Feature-gated: #[cfg(feature = "postgres")]
-│   │   ├── mod.rs            # SessionStore + MemoryStore + CredentialStore + AuditStore + CostStore traits, connect(), migration runner
+│   │   ├── mod.rs            # SessionStore + MemoryStore + CredentialStore + AuditStore + CostStore + PricingStore traits, connect(), migration runner
 │   │   ├── embedding.rs      # EmbeddingProvider trait + OpenAiEmbeddingProvider (M6c)
 │   │   ├── search.rs         # Reciprocal Rank Fusion algorithm (M6c, pure/no-DB)
 │   │   ├── pg_session_store.rs  # PgSessionStore: PostgreSQL SessionStore impl
@@ -82,12 +84,14 @@ cherub/
 │   │   ├── pg_credential_store.rs  # PgCredentialStore: PostgreSQL CredentialStore impl (feature = "credentials")
 │   │   ├── pg_audit_store.rs    # PgAuditStore: PostgreSQL AuditStore impl, append-only event log (M10)
 │   │   ├── pg_cost_store.rs     # PgCostStore: PostgreSQL CostStore impl, append-only token usage (M12)
+│   │   ├── pg_pricing_store.rs  # PgPricingStore: PostgreSQL PricingStore impl, model pricing rates
 │   │   └── migrations/
 │   │       ├── V1__initial_schema.sql  # Sessions + messages + memory schema (UUIDv7, scope column)
 │   │       ├── V2__vector_indexes.sql  # HNSW indexes for embedding columns (M6c)
 │   │       ├── V3__credentials.sql     # Encrypted credential vault table (M7a)
 │   │       ├── V4__audit_log.sql       # Audit event log table (M10)
-│   │       └── V5__cost_tracking.sql   # Token usage log table (M12)
+│   │       ├── V5__cost_tracking.sql   # Token usage log table (M12)
+│   │       └── V6__model_pricing.sql  # DB-backed model pricing table (prefix-match rates)
 │   └── telegram/             # Feature-gated: #[cfg(feature = "telegram")]
 │       ├── mod.rs             # Module declarations
 │       ├── approval.rs        # TelegramApprovalGate (inline keyboard + oneshot channels)
@@ -110,6 +114,7 @@ cherub/
 │   ├── redteam.rs            # Live model adversarial tests (#[ignore], requires API key)
 │   ├── compaction.rs         # Context compaction integration tests (mock provider, no API key)
 │   ├── cost_store.rs         # PgCostStore integration tests (M12, feature = "sessions", auto-starts DB)
+│   ├── openai_retry_integration.rs  # OpenAI API retry integration tests (wiremock, no API key, M13a)
 │   ├── retry_integration.rs  # API retry integration tests (wiremock, no API key)
 │   ├── session_persistence.rs  # Session persistence integration tests (feature = "sessions", auto-starts DB)
 │   ├── telegram_approval.rs  # Telegram approval flow tests (feature-gated)
@@ -182,7 +187,7 @@ fn process(msg: &Message) {
 }
 ```
 
-Use `enum` when variants are known at compile time. Use `dyn Trait` only at true extension boundaries (plugins loaded at runtime). In this project, the legitimate `dyn Trait` boundaries are: `Provider` (multiple LLM backends; object-safe via `async_trait`, stored as `Box<dyn Provider>` in AgentLoop), `Tool` (plugin tools over IPC), `SessionStore`, `MemoryStore`, `EmbeddingProvider`, `AuditStore`, and `CostStore` (all storage/embedding backends selected at runtime). Everything else should be an enum.
+Use `enum` when variants are known at compile time. Use `dyn Trait` only at true extension boundaries (plugins loaded at runtime). In this project, the legitimate `dyn Trait` boundaries are: `Provider` (multiple LLM backends; object-safe via `async_trait`, stored as `Box<dyn Provider>` in AgentLoop), `Tool` (plugin tools over IPC), `SessionStore`, `MemoryStore`, `EmbeddingProvider`, `AuditStore`, `CostStore`, and `PricingStore` (all storage/embedding backends selected at runtime). Everything else should be an enum.
 
 ### Use the typestate pattern for capability tokens
 
@@ -291,14 +296,14 @@ These enforce Cherub-specific guarantees the compiler alone can't catch.
 - **CapabilityToken audit rule** — Before any PR/commit, `grep` for `CapabilityToken` and verify: no `pub fn new`, no `Default`, no `From`, no `Clone`, no `Copy`. Only `enforcement/` creates tokens.
 - **Single enforcement path** — Every tool's `execute()` function signature must require a `CapabilityToken` parameter. If a tool function compiles without one, it's a bug.
 - **Policy opacity** — No enforcement error message may contain: rule names, pattern text, tier names, or any string from the policy file. Rejection is always `"action not permitted"`.
-- **Credential isolation** — `secrecy::SecretString` for all credential values. `grep expose_secret` must only appear at these six call sites: (1) DB URL in `storage/mod.rs`, (2) API key in `providers/anthropic.rs`, (3) embedding key in `storage/embedding.rs`, (4) agent credential injection in `storage/credential_types.rs::DecryptedCredential::expose()` (called only from `tools/credential_broker.rs`), (5) master key hex-validation in `storage/crypto.rs::CredentialCrypto::new()`, (6) master key HKDF input in `storage/crypto.rs::CredentialCrypto::derive_key()`. If it appears anywhere else, it's a bug.
+- **Credential isolation** — `secrecy::SecretString` for all credential values. `grep expose_secret` must only appear at these seven call sites: (1) DB URL in `storage/mod.rs`, (2) API key in `providers/anthropic.rs`, (3) embedding key in `storage/embedding.rs`, (4) agent credential injection in `storage/credential_types.rs::DecryptedCredential::expose()` (called only from `tools/credential_broker.rs`), (5) master key hex-validation in `storage/crypto.rs::CredentialCrypto::new()`, (6) master key HKDF input in `storage/crypto.rs::CredentialCrypto::derive_key()`, (7) API key in `providers/openai.rs`. If it appears anywhere else, it's a bug.
 - **No `unsafe`** — Zero `unsafe` blocks unless documented with a `// SAFETY:` comment explaining why it's necessary and what invariant the developer is upholding.
 
 ### Idiomatic Rust Rules (LLM Anti-Pattern Watchlist)
 
 Specific patterns to catch and correct — based on what LLMs commonly get wrong when writing Rust.
 
-- **Enum over trait objects** — If variants are known at compile time, use `enum` + `match`. Legitimate `dyn Trait` boundaries in this project: `Provider` (LLM backends; `async_trait` + `Box<dyn Provider>`), `Tool` (plugin boundaries), `SessionStore`, `MemoryStore`, `EmbeddingProvider`, `AuditStore`, `CostStore` (all storage backends selected at runtime).
+- **Enum over trait objects** — If variants are known at compile time, use `enum` + `match`. Legitimate `dyn Trait` boundaries in this project: `Provider` (LLM backends; `async_trait` + `Box<dyn Provider>`), `Tool` (plugin boundaries), `SessionStore`, `MemoryStore`, `EmbeddingProvider`, `AuditStore`, `CostStore`, `PricingStore` (all storage backends selected at runtime).
 - **`&str` in, `String` out** — Function parameters take `&str` or `impl AsRef<str>`. Return `String` only when transferring ownership. Never `fn foo(s: String)` when `fn foo(s: &str)` works.
 - **Iterator chains over mutation** — Prefer `.iter().map().collect()` over `let mut v = Vec::new(); for x in ... { v.push(...) }`.
 - **`?` propagation, never `.unwrap()`** — `.unwrap()` only in tests and code paths that are provably infallible (with a comment explaining why). Use `thiserror` enums in the enforcement layer, `anyhow` at the application/CLI boundary.
@@ -318,7 +323,7 @@ Best practices for the specific crates in use.
 - **`tracing`** — Use structured fields (`tracing::info!(tool = %name, decision = %result)`), not string interpolation. Every enforcement decision gets a span. Every tool execution gets a span.
 - **`reqwest`** — Always set `connect_timeout(10s)`, `read_timeout(30s)`, `timeout(120s)`. Use `reqwest-eventsource` for SSE streaming from LLM providers.
 - **`tokio`** — Use `tokio::process::Command` with `.kill_on_drop(true)`. Wrap all child process execution in `tokio::time::timeout()`. Use `.arg()` arrays, never shell string concatenation (even though we're executing bash — the command string goes as a single arg to `bash -c`).
-- **`secrecy`** — Wrap all credential values in `SecretString`. The `Debug` impl auto-redacts. `expose_secret()` only at the six documented call sites: DB URL, API key, embedding key, credential broker, and the two crypto.rs master-key sites (hex validation + HKDF IKM). Not in general-purpose code.
+- **`secrecy`** — Wrap all credential values in `SecretString`. The `Debug` impl auto-redacts. `expose_secret()` only at the seven documented call sites: DB URL, Anthropic API key, OpenAI API key, embedding key, credential broker, and the two crypto.rs master-key sites (hex validation + HKDF IKM). Not in general-purpose code.
 - **`toml`** — Enforce file size limit before parsing. Strongly typed deserialization into Rust structs with `#[serde(deny_unknown_fields)]`.
 
 ## Build and Run
@@ -356,6 +361,15 @@ DATABASE_URL=postgres://cherub:cherub_dev@localhost:5480/cherub \
   OPENAI_API_KEY=sk-... \
   cargo run --features memory
 
+# Run with OpenAI provider (defaults to gpt-4o)
+OPENAI_API_KEY=sk-... cargo run -- --provider openai
+
+# Run with OpenAI provider and specific model
+OPENAI_API_KEY=sk-... cargo run -- --provider openai --model gpt-4o-mini
+
+# Run with local Ollama (no API key needed)
+cargo run -- --provider openai --base-url http://localhost:11434/v1 --model llama3
+
 # Run with custom policy
 ANTHROPIC_API_KEY=sk-... cargo run -- --policy path/to/policy.toml
 
@@ -370,6 +384,9 @@ TELEGRAM_BOT_TOKEN=... ANTHROPIC_API_KEY=sk-... TELEGRAM_ALLOWED_CHATS=123456,78
 
 # Run Telegram bot with sandbox bash
 CHERUB_SANDBOX_BASH=1 TELEGRAM_BOT_TOKEN=... ANTHROPIC_API_KEY=sk-... TELEGRAM_ALLOWED_CHATS=123456,789012 cargo run --features telegram,container --bin cherub-telegram
+
+# Run Telegram bot with OpenAI provider
+CHERUB_PROVIDER=openai OPENAI_API_KEY=sk-... TELEGRAM_BOT_TOKEN=... TELEGRAM_ALLOWED_CHATS=123456 cargo run --features telegram --bin cherub-telegram
 
 # Telegram bot open to all users (not recommended)
 TELEGRAM_BOT_TOKEN=... ANTHROPIC_API_KEY=sk-... TELEGRAM_ALLOWED_CHATS='*' cargo run --features telegram --bin cherub-telegram
@@ -406,6 +423,9 @@ cargo nextest run --features sessions --test cost_store
 
 # Non-DB memory tests (enforcement + injection + RRF) — also work with cargo test
 cargo nextest run --features memory --test memory_enforcement --test memory_injection
+
+# Test OpenAI provider retry logic (wiremock, no API key)
+cargo nextest run --test openai_retry_integration
 
 # Live embedding test (requires OPENAI_API_KEY, skipped by default)
 OPENAI_API_KEY=sk-... cargo nextest run --features memory --test embedding_live -- --ignored

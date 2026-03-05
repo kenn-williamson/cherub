@@ -6,26 +6,30 @@ use tracing::{Instrument, info, info_span, warn};
 
 use async_trait::async_trait;
 
-use super::wire::{self, RequestBody};
+use super::openai_wire::{self, ChatCompletionRequest, ChatCompletionResponse, OaiTool};
 use super::{ApiUsage, Message, Provider, ToolDefinition};
 use crate::error::CherubError;
 use crate::retry::{RetryConfig, RetryVerdict, classify_status, compute_delay};
 
-const API_URL: &str = "https://api.anthropic.com/v1/messages";
-const API_VERSION: &str = "2023-06-01";
+const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
-/// Anthropic Messages API provider. Non-streaming for M2.
-pub struct AnthropicProvider {
+/// OpenAI Chat Completions API provider. Covers any compatible endpoint:
+/// OpenAI, Azure OpenAI, Gemini, Ollama, vLLM, LM Studio, Groq.
+pub struct OpenAiProvider {
     client: Client,
-    api_key: SecretString,
+    api_key: Option<SecretString>,
     pub(crate) model: String,
     pub(crate) max_tokens: u32,
-    api_url: String,
+    base_url: String,
     retry_config: RetryConfig,
 }
 
-impl AnthropicProvider {
-    pub fn new(api_key: SecretString, model: &str, max_tokens: u32) -> Result<Self, CherubError> {
+impl OpenAiProvider {
+    pub fn new(
+        api_key: Option<SecretString>,
+        model: &str,
+        max_tokens: u32,
+    ) -> Result<Self, CherubError> {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .read_timeout(Duration::from_secs(30))
@@ -38,21 +42,21 @@ impl AnthropicProvider {
             api_key,
             model: model.to_owned(),
             max_tokens,
-            api_url: API_URL.to_owned(),
+            base_url: DEFAULT_BASE_URL.to_owned(),
             retry_config: RetryConfig::new(),
         })
     }
 
-    /// Override the API URL. Intended for testing with wiremock.
-    pub fn with_url(mut self, url: String) -> Self {
-        self.api_url = url;
+    /// Override the base URL. For Ollama, vLLM, LM Studio, Groq, Azure, etc.
+    pub fn with_base_url(mut self, url: String) -> Self {
+        self.base_url = url;
         self
     }
 }
 
 #[async_trait]
-impl Provider for AnthropicProvider {
-    /// Send a non-streaming completion request to the Anthropic API.
+impl Provider for OpenAiProvider {
+    /// Send a non-streaming completion request to an OpenAI-compatible API.
     /// Retries on transient errors (429, 5xx) with exponential backoff.
     async fn complete(
         &self,
@@ -60,35 +64,35 @@ impl Provider for AnthropicProvider {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<(Message, Option<ApiUsage>), CherubError> {
-        // Use Instrument instead of entered() — EnteredSpan is !Send, which
-        // prevents the future from being Send across await points.
         async {
-            let wire_messages = wire::messages_to_wire(messages);
-            let wire_tools: Vec<_> = tools.iter().map(wire::WireTool::from).collect();
+            let wire_messages = openai_wire::messages_to_openai_wire(system, messages);
+            let wire_tools: Vec<OaiTool> = tools.iter().map(OaiTool::from).collect();
 
-            let body = RequestBody {
+            let body = ChatCompletionRequest {
                 model: &self.model,
                 max_tokens: self.max_tokens,
-                system,
                 messages: wire_messages,
                 tools: wire_tools,
-                stream: false,
             };
 
             let json_body = serde_json::to_vec(&body)
                 .map_err(|e| CherubError::Provider(format!("JSON serialize error: {e}")))?;
 
+            let url = format!("{}/chat/completions", self.base_url);
+
             for attempt in 0..=self.retry_config.max_retries {
-                // NEVER log the API key — SecretString redacts on Debug, but we never format it either.
-                let result = self
+                let mut req = self
                     .client
-                    .post(&self.api_url)
-                    .header("x-api-key", self.api_key.expose_secret())
-                    .header("anthropic-version", API_VERSION)
+                    .post(&url)
                     .header("content-type", "application/json")
-                    .body(json_body.clone())
-                    .send()
-                    .await;
+                    .body(json_body.clone());
+
+                // Add auth header only when an API key is present.
+                if let Some(ref key) = self.api_key {
+                    req = req.header("authorization", format!("Bearer {}", key.expose_secret()));
+                }
+
+                let result = req.send().await;
 
                 let response = match result {
                     Ok(r) => r,
@@ -119,15 +123,14 @@ impl Provider for AnthropicProvider {
 
                 match classify_status(status) {
                     RetryVerdict::Success => {
-                        let resp: wire::ResponseBody = response
+                        let resp: ChatCompletionResponse = response
                             .json()
                             .await
                             .map_err(|e| CherubError::Provider(format!("JSON parse error: {e}")))?;
 
-                        return Ok(wire::response_to_message(resp));
+                        return Ok(openai_wire::openai_response_to_message(resp));
                     }
                     RetryVerdict::Transient(_) if attempt < self.retry_config.max_retries => {
-                        // Parse Retry-After header (Anthropic sends seconds as integer).
                         let retry_after = response
                             .headers()
                             .get("retry-after")
@@ -156,7 +159,6 @@ impl Provider for AnthropicProvider {
                 }
             }
 
-            // Unreachable: the loop always returns or continues.
             unreachable!("retry loop exhausted without returning")
         }
         .instrument(info_span!("api_call", model = %self.model))
@@ -175,10 +177,11 @@ impl Provider for AnthropicProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn request_body_structure() {
+        use serde_json::json;
+
         let messages = vec![Message::user_text("hello")];
         let tools = vec![ToolDefinition {
             name: "bash".to_owned(),
@@ -186,30 +189,28 @@ mod tests {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string", "description": "The bash command to run" }
+                    "command": { "type": "string" }
                 },
                 "required": ["command"]
             }),
         }];
 
-        let wire_messages = wire::messages_to_wire(&messages);
-        let wire_tools: Vec<_> = tools.iter().map(wire::WireTool::from).collect();
+        let wire_messages = openai_wire::messages_to_openai_wire("You are helpful.", &messages);
+        let wire_tools: Vec<_> = tools.iter().map(OaiTool::from).collect();
 
-        let body = RequestBody {
-            model: "claude-sonnet-4-20250514",
+        let body = ChatCompletionRequest {
+            model: "gpt-4o",
             max_tokens: 4096,
-            system: "You are helpful.",
             messages: wire_messages,
             tools: wire_tools,
-            stream: false,
         };
 
         let json = serde_json::to_value(&body).unwrap();
-        assert_eq!(json["model"], "claude-sonnet-4-20250514");
+        assert_eq!(json["model"], "gpt-4o");
         assert_eq!(json["max_tokens"], 4096);
-        assert_eq!(json["system"], "You are helpful.");
-        assert_eq!(json["stream"], false);
+        assert_eq!(json["messages"][0]["role"], "system");
         assert!(json["tools"].is_array());
-        assert_eq!(json["tools"][0]["name"], "bash");
+        assert_eq!(json["tools"][0]["type"], "function");
+        assert_eq!(json["tools"][0]["function"]["name"], "bash");
     }
 }
