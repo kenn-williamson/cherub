@@ -320,13 +320,14 @@ patterns = ["^google-workspace:send_email$"]
 
 ## Milestone 13: Multi-Provider Architecture
 
-**Goal:** Multiple LLM providers for failover, cost optimization, and task-appropriate model routing. Cloud providers first, local model support second.
+**Goal:** Multiple LLM providers for failover, cost optimization, and task-appropriate model routing. Frontier model as orchestrator, cheaper/local models as delegated tool calls.
 
 Research findings:
-- **Anchoring bias is real** in draft+review patterns. Cascade-with-gating (local tries → test gate → frontier only if local fails) saves more money with less risk than naive "draft then review."
-- **Aider's architect/editor split** is well-validated: strong model reasons, weaker model formats edits. The inverse (cheap drafts, expensive reviews) risks rubber-stamping flawed approaches.
-- **Gemini 2.5 Pro** is the best second cloud provider: 1M context, decent coding (63-74% benchmarks), 40-60% cheaper than Claude.
-- **Local models** (Qwen3-Coder-Next 70.6% SWE-bench, 3B active params) are good for bounded tasks but not autonomous multi-step reasoning.
+- **Anchoring bias is real and unfixable** in draft+review patterns. GPT-4 anchoring index ~0.45 (Ling et al. 2024). Standard mitigations (CoT, reflection, "ignore the anchor") do not reduce anchoring (tested across all GPT models).
+- **Cascade/draft-review is the wrong pattern.** Presenting a frontier model with a weaker draft anchors its output toward the draft's approach. Stronger models are *more* consistently biased than weaker ones.
+- **Frontier orchestrator + local model as tool is the right pattern.** The frontier model reasons first, delegates bounded subtasks (summarization, extraction, formatting) to cheaper models. This structurally avoids anchoring because frontier reasoning is upstream of the cheap model's output.
+- **Evidence:** Anthropic multi-agent (Opus lead + Sonnet workers) outperformed single Opus by 90.2%. NVIDIA Orchestrator-8B achieved 70% cost savings with better quality than GPT-5 solo. Cross-vendor DMF: 79% cost savings, +5% code correctness.
+- **Local models** are good for bounded tasks but not autonomous multi-step reasoning.
 
 ### M13-prep: Provider Trait Migration (complete)
 - [x] `async_trait` becomes non-optional dependency (was gated behind `postgres`/`container`)
@@ -343,11 +344,15 @@ Research findings:
 - [x] Own wire types in `openai_wire.rs` (private, like `wire.rs` for Anthropic)
 - [x] Same retry logic pattern as `AnthropicProvider` (provider-local `RetryConfig`)
 
-### M13b: Provider Configuration
-- [ ] TOML config for provider definitions (type, model, base_url, api_key_env)
-- [ ] `ProviderConfig` struct with `#[serde(deny_unknown_fields)]`
-- [ ] `--providers` CLI flag
-- [ ] Provider instantiation from config at startup
+### M13b: Provider Configuration (complete)
+- [x] TOML config for named provider definitions (`[providers.<name>]` sections)
+- [x] `ProvidersConfig` + `ProviderDef` + `SubAgentDef` structs with `#[serde(deny_unknown_fields)]`
+- [x] `ProviderType` enum: `anthropic`, `openai`, `failover` (M13c placeholder)
+- [x] `instantiate_provider()` reusable library function in `providers/config.rs`
+- [x] `--providers` CLI flag; backward compatible with existing `--provider`/`--base-url`/`--model`
+- [x] `CHERUB_PROVIDERS_CONFIG` env var for Telegram bot
+- [x] Cross-field validation: failover requires provider list, agents reference existing providers
+- [x] 14 unit tests: parsing, unknown field rejection, validation, instantiation
 
 ### M13c: Failover Provider
 - [ ] `FailoverProvider` wraps `Vec<Box<dyn Provider>>` — legitimate `dyn Provider` boundary
@@ -355,16 +360,19 @@ Research findings:
 - [ ] Circuit breaker per provider: N consecutive failures → skip for cooldown period, auto-recover
 - [ ] Structured tracing: which provider tried, succeeded, failed and why
 - [ ] Cost tracking integration: record correct model name for each provider's `ApiUsage`
+- [ ] Configuration in providers TOML: `type = "failover"` with `providers = ["name1", "name2"]`
 
-### M13d: Cascade Provider (Test-Gated)
-- [ ] `CascadeProvider` wraps a `draft_provider` (cheap/local) and a `review_provider` (frontier)
-- [ ] Draft provider tries first → run validation (compilation, tests, lints) → if passes, return draft directly (frontier never called)
-- [ ] If validation fails: call frontier with **original messages** (not the draft) to avoid anchoring bias. Optionally include draft's error output as context.
-- [ ] Configuration: `type = "cascade"`, `draft = "local"`, `review = "claude"`, `validation = "compile_and_test" | "none"`
-- [ ] Optional — users who don't want cascade complexity just use failover
-
-### M13e: Architect/Editor Split (Future, Design Only)
-Not implemented in M13. Forward-compatible provider config for Aider's architect/editor pattern (strong model reasons, cheaper model formats edits). Requires agent loop awareness (two-phase turn) — M15+ territory.
+### M13d: Sub-Agent Tools
+- [ ] `SubAgentTool` struct: owns `Box<dyn Provider>`, system prompt, description, resource limits
+- [ ] `ToolImpl::SubAgent` variant with full enum dispatch (name/execute/definition)
+- [ ] Each sub-agent is registered as a tool — orchestrator sees description, decides when to delegate
+- [ ] Bounded inner execution loop (not full AgentLoop): max_turns, timeout, no approval gate
+- [ ] Sub-agent escalations auto-rejected (`AutoRejectGate`) — only orchestrator can escalate to human
+- [ ] Policy gates sub-agent invocation via `MatchSource::Structured` (`action = "invoke"`)
+- [ ] Sub-agents can optionally have their own tool set (subset declared in config, e.g., `tools = ["bash", "file"]`)
+- [ ] Cost tracking correctly attributes sub-agent token usage to sub-agent's model name
+- [ ] TOML config: `[agents.<name>]` sections in the providers config file
+- [ ] No new feature flag (always available when `--providers` config defines agents)
 
 ---
 
@@ -407,7 +415,7 @@ M12b (pricing config) ──┼── M12c (budget constraints) ── M12d (CLI
                          │
                          └── M13a (OpenAI provider) ── M13b (provider config) ──┐
                                                                                  ├── M13c (failover)
-                                                                                 └── M13d (cascade)
+                                                                                 └── M13d (sub-agents)
 
 M14a-c are independent — can parallel with M12/M13
 M14d depends on M14c
@@ -432,7 +440,6 @@ These are real goals but not yet planned into milestones:
 - Policy hot-reload (file watch + re-evaluate). Design exists in DESIGN.md Section 9.4.
 - Multi-agent routing (different policies per channel)
 - Per-task dynamic constraints (session-scoped, user-confirmed via approval gate — see DESIGN.md Section 3.5)
-- Architect/editor split (M13e design, requires agent loop two-phase turn)
 - OpenTelemetry export: `tracing-opentelemetry` as optional subscriber. Feature-gated (`otel`).
 - MCP dynamic tool changes: handle `tools/list_changed` notifications at runtime
 - Policy generation tooling (analyze a tool's actions, suggest tier classifications)

@@ -163,6 +163,18 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Load providers config if CHERUB_PROVIDERS_CONFIG is set.
+    let providers_config = match std::env::var("CHERUB_PROVIDERS_CONFIG") {
+        Ok(path) => {
+            let config =
+                cherub::providers::config::ProvidersConfig::load(std::path::Path::new(&path))
+                    .map_err(|e| anyhow::anyhow!("failed to load providers config: {e}"))?;
+            info!(config = %path, "providers config loaded");
+            Some(config)
+        }
+        Err(_) => None,
+    };
+
     let bot = Bot::new(&bot_token_raw);
     info!(model = %model, "cherub-telegram starting");
 
@@ -179,6 +191,7 @@ async fn main() -> Result<()> {
         api_key,
         provider_type,
         base_url,
+        providers_config,
         #[cfg(any(feature = "sessions", feature = "memory"))]
         db_pool,
         #[cfg(feature = "memory")]

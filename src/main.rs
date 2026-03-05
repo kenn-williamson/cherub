@@ -32,6 +32,8 @@ enum Command {
         provider: String,
         /// Custom base URL for OpenAI-compatible endpoints (Ollama, vLLM, etc.).
         base_url: Option<String>,
+        /// Provider configuration file (TOML). Overrides --provider/--base-url/--model.
+        providers_config: Option<PathBuf>,
         /// Optional directory of WASM tools to load (M8).
         #[cfg(feature = "wasm")]
         wasm_tools_dir: Option<PathBuf>,
@@ -155,6 +157,7 @@ fn parse_args() -> Result<Command> {
     let mut sandbox_bash = false;
     #[cfg(feature = "mcp")]
     let mut mcp_config: Option<PathBuf> = None;
+    let mut providers_config: Option<PathBuf> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -208,6 +211,12 @@ fn parse_args() -> Result<Command> {
                     mcp_config = Some(PathBuf::from(&args[i]));
                 }
             }
+            "--providers" => {
+                i += 1;
+                if i < args.len() {
+                    providers_config = Some(PathBuf::from(&args[i]));
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -227,6 +236,7 @@ fn parse_args() -> Result<Command> {
         model,
         provider,
         base_url,
+        providers_config,
         #[cfg(feature = "wasm")]
         wasm_tools_dir,
         #[cfg(feature = "container")]
@@ -882,6 +892,7 @@ async fn run_agent(
     model: String,
     provider_type: String,
     base_url: Option<String>,
+    providers_config: Option<PathBuf>,
     #[cfg(feature = "wasm")] wasm_tools_dir: Option<PathBuf>,
     #[cfg(feature = "container")] container_tools_dir: Option<PathBuf>,
     #[cfg(feature = "container")] sandbox_bash: bool,
@@ -895,37 +906,54 @@ async fn run_agent(
     })?;
     info!(policy = %policy_path.display(), "policy loaded");
 
-    // Create provider based on --provider flag.
-    let provider: Box<dyn cherub::providers::Provider> = match provider_type.as_str() {
-        "openai" => {
-            // OPENAI_API_KEY is optional for local providers (Ollama, etc.).
-            let api_key = std::env::var("OPENAI_API_KEY").ok().and_then(|k| {
-                if k.is_empty() {
-                    None
-                } else {
-                    Some(SecretString::from(k))
+    // Create provider — from config file if --providers is set, otherwise from CLI flags.
+    let provider: Box<dyn cherub::providers::Provider> = if let Some(ref config_path) =
+        providers_config
+    {
+        use cherub::providers::config::{ProvidersConfig, instantiate_provider};
+
+        let config = ProvidersConfig::load(config_path)
+            .map_err(|e| anyhow::anyhow!("failed to load providers config: {e}"))?;
+        info!(config = %config_path.display(), "providers config loaded");
+
+        let default_def = config
+            .providers
+            .get("default")
+            .context("providers config must contain a [providers.default] entry")?;
+        instantiate_provider(default_def)
+            .map_err(|e| anyhow::anyhow!("failed to create default provider: {e}"))?
+    } else {
+        match provider_type.as_str() {
+            "openai" => {
+                // OPENAI_API_KEY is optional for local providers (Ollama, etc.).
+                let api_key = std::env::var("OPENAI_API_KEY").ok().and_then(|k| {
+                    if k.is_empty() {
+                        None
+                    } else {
+                        Some(SecretString::from(k))
+                    }
+                });
+                let mut p = OpenAiProvider::new(api_key, &model, DEFAULT_MAX_TOKENS)
+                    .map_err(|e| anyhow::anyhow!("failed to create OpenAI provider: {e}"))?;
+                if let Some(url) = base_url {
+                    p = p.with_base_url(url);
                 }
-            });
-            let mut p = OpenAiProvider::new(api_key, &model, DEFAULT_MAX_TOKENS)
-                .map_err(|e| anyhow::anyhow!("failed to create OpenAI provider: {e}"))?;
-            if let Some(url) = base_url {
-                p = p.with_base_url(url);
+                Box::new(p)
             }
-            Box::new(p)
-        }
-        "anthropic" => {
-            let api_key_raw = std::env::var("ANTHROPIC_API_KEY")
-                .context("ANTHROPIC_API_KEY environment variable not set")?;
-            if api_key_raw.is_empty() {
-                bail!("ANTHROPIC_API_KEY is empty");
+            "anthropic" => {
+                let api_key_raw = std::env::var("ANTHROPIC_API_KEY")
+                    .context("ANTHROPIC_API_KEY environment variable not set")?;
+                if api_key_raw.is_empty() {
+                    bail!("ANTHROPIC_API_KEY is empty");
+                }
+                let api_key = SecretString::from(api_key_raw);
+                Box::new(
+                    AnthropicProvider::new(api_key, &model, DEFAULT_MAX_TOKENS)
+                        .map_err(|e| anyhow::anyhow!("failed to create Anthropic provider: {e}"))?,
+                )
             }
-            let api_key = SecretString::from(api_key_raw);
-            Box::new(
-                AnthropicProvider::new(api_key, &model, DEFAULT_MAX_TOKENS)
-                    .map_err(|e| anyhow::anyhow!("failed to create Anthropic provider: {e}"))?,
-            )
+            other => bail!("unknown provider '{other}'. Available: anthropic, openai"),
         }
-        other => bail!("unknown provider '{other}'. Available: anthropic, openai"),
     };
 
     let cwd = std::env::current_dir()
@@ -1326,6 +1354,7 @@ async fn main() -> Result<()> {
             model,
             provider,
             base_url,
+            providers_config,
             #[cfg(feature = "wasm")]
             wasm_tools_dir,
             #[cfg(feature = "container")]
@@ -1340,6 +1369,7 @@ async fn main() -> Result<()> {
                 model,
                 provider,
                 base_url,
+                providers_config,
                 #[cfg(feature = "wasm")]
                 wasm_tools_dir,
                 #[cfg(feature = "container")]

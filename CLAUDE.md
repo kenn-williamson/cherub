@@ -69,6 +69,7 @@ cherub/
 │   ├── providers/
 │   │   ├── mod.rs            # Provider trait, Message/UserContent/ContentBlock types (serde + Clone)
 │   │   ├── anthropic.rs      # Anthropic API provider (non-streaming)
+│   │   ├── config.rs         # ProvidersConfig + ProviderDef + SubAgentDef + instantiate_provider() (M13b)
 │   │   ├── openai.rs         # OpenAI-compatible API provider (M13a: OpenAI, Ollama, vLLM, Groq, etc.)
 │   │   ├── openai_wire.rs    # Serde structs for OpenAI Chat Completions wire format (private)
 │   │   ├── pricing.rs        # ModelPricing struct + PricingTable + lookup_pricing() + compute_cost() (M12; DB-backed pricing)
@@ -296,7 +297,7 @@ These enforce Cherub-specific guarantees the compiler alone can't catch.
 - **CapabilityToken audit rule** — Before any PR/commit, `grep` for `CapabilityToken` and verify: no `pub fn new`, no `Default`, no `From`, no `Clone`, no `Copy`. Only `enforcement/` creates tokens.
 - **Single enforcement path** — Every tool's `execute()` function signature must require a `CapabilityToken` parameter. If a tool function compiles without one, it's a bug.
 - **Policy opacity** — No enforcement error message may contain: rule names, pattern text, tier names, or any string from the policy file. Rejection is always `"action not permitted"`.
-- **Credential isolation** — `secrecy::SecretString` for all credential values. `grep expose_secret` must only appear at these seven call sites: (1) DB URL in `storage/mod.rs`, (2) API key in `providers/anthropic.rs`, (3) embedding key in `storage/embedding.rs`, (4) agent credential injection in `storage/credential_types.rs::DecryptedCredential::expose()` (called only from `tools/credential_broker.rs`), (5) master key hex-validation in `storage/crypto.rs::CredentialCrypto::new()`, (6) master key HKDF input in `storage/crypto.rs::CredentialCrypto::derive_key()`, (7) API key in `providers/openai.rs`. If it appears anywhere else, it's a bug.
+- **Credential isolation** — `secrecy::SecretString` for all credential values. `grep expose_secret` must only appear at these eight call sites: (1) DB URL in `storage/mod.rs`, (2) API key in `providers/anthropic.rs`, (3) embedding key in `storage/embedding.rs`, (4) agent credential injection in `storage/credential_types.rs::DecryptedCredential::expose()` (called only from `tools/credential_broker.rs`), (5) master key hex-validation in `storage/crypto.rs::CredentialCrypto::new()`, (6) master key HKDF input in `storage/crypto.rs::CredentialCrypto::derive_key()`, (7) API key in `providers/openai.rs`, (8) MCP credential env injection in `tools/mcp/loader.rs`. If it appears anywhere else, it's a bug.
 - **No `unsafe`** — Zero `unsafe` blocks unless documented with a `// SAFETY:` comment explaining why it's necessary and what invariant the developer is upholding.
 
 ### Idiomatic Rust Rules (LLM Anti-Pattern Watchlist)
@@ -323,7 +324,7 @@ Best practices for the specific crates in use.
 - **`tracing`** — Use structured fields (`tracing::info!(tool = %name, decision = %result)`), not string interpolation. Every enforcement decision gets a span. Every tool execution gets a span.
 - **`reqwest`** — Always set `connect_timeout(10s)`, `read_timeout(30s)`, `timeout(120s)`. Use `reqwest-eventsource` for SSE streaming from LLM providers.
 - **`tokio`** — Use `tokio::process::Command` with `.kill_on_drop(true)`. Wrap all child process execution in `tokio::time::timeout()`. Use `.arg()` arrays, never shell string concatenation (even though we're executing bash — the command string goes as a single arg to `bash -c`).
-- **`secrecy`** — Wrap all credential values in `SecretString`. The `Debug` impl auto-redacts. `expose_secret()` only at the seven documented call sites: DB URL, Anthropic API key, OpenAI API key, embedding key, credential broker, and the two crypto.rs master-key sites (hex validation + HKDF IKM). Not in general-purpose code.
+- **`secrecy`** — Wrap all credential values in `SecretString`. The `Debug` impl auto-redacts. `expose_secret()` only at the eight documented call sites: DB URL, Anthropic API key, OpenAI API key, embedding key, credential broker, two crypto.rs master-key sites (hex validation + HKDF IKM), and MCP credential env injection. Not in general-purpose code.
 - **`toml`** — Enforce file size limit before parsing. Strongly typed deserialization into Rust structs with `#[serde(deny_unknown_fields)]`.
 
 ## Build and Run
@@ -373,6 +374,9 @@ cargo run -- --provider openai --base-url http://localhost:11434/v1 --model llam
 # Run with custom policy
 ANTHROPIC_API_KEY=sk-... cargo run -- --policy path/to/policy.toml
 
+# Run with providers config (M13b: named providers, sub-agent definitions)
+ANTHROPIC_API_KEY=sk-... cargo run -- --providers config/example_providers.toml
+
 # Run with sandbox bash (requires Docker + built image)
 # Build image (base only): docker build -t cherub-sandbox-bash:latest tools/container/sandbox-bash/
 # Build with Rust:         docker build --build-arg LANGUAGES="rust" -t cherub-sandbox-bash:latest tools/container/sandbox-bash/
@@ -387,6 +391,9 @@ CHERUB_SANDBOX_BASH=1 TELEGRAM_BOT_TOKEN=... ANTHROPIC_API_KEY=sk-... TELEGRAM_A
 
 # Run Telegram bot with OpenAI provider
 CHERUB_PROVIDER=openai OPENAI_API_KEY=sk-... TELEGRAM_BOT_TOKEN=... TELEGRAM_ALLOWED_CHATS=123456 cargo run --features telegram --bin cherub-telegram
+
+# Telegram bot with providers config
+CHERUB_PROVIDERS_CONFIG=config/example_providers.toml ANTHROPIC_API_KEY=sk-... TELEGRAM_BOT_TOKEN=... TELEGRAM_ALLOWED_CHATS=123456 cargo run --features telegram --bin cherub-telegram
 
 # Telegram bot open to all users (not recommended)
 TELEGRAM_BOT_TOKEN=... ANTHROPIC_API_KEY=sk-... TELEGRAM_ALLOWED_CHATS='*' cargo run --features telegram --bin cherub-telegram

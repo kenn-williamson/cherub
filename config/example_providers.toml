@@ -1,0 +1,56 @@
+# Example provider configuration for Cherub.
+#
+# Usage:
+#   cargo run -- --providers config/example_providers.toml
+#
+# The "default" provider is used as the main orchestrator.
+# Other providers can be referenced by failover (M13c) and sub-agents (M13d).
+
+# ─── Providers ───────────────────────────────────────────────────────────────
+
+[providers.default]
+type = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key_env = "ANTHROPIC_API_KEY"
+max_tokens = 4096
+
+[providers.gpt4o]
+type = "openai"
+model = "gpt-4o"
+api_key_env = "OPENAI_API_KEY"
+
+[providers.gpt4o-mini]
+type = "openai"
+model = "gpt-4o-mini"
+api_key_env = "OPENAI_API_KEY"
+max_tokens = 2048
+
+# Local Ollama — no API key needed.
+[providers.local]
+type = "openai"
+model = "llama3"
+base_url = "http://localhost:11434/v1"
+
+# ─── Sub-Agent Tools (M13d) ─────────────────────────────────────────────────
+#
+# Each agent becomes a tool the orchestrator can invoke.
+# The orchestrator sees the description and decides when to delegate.
+
+[agents.summarizer]
+description = "Summarize long text into concise bullet points. Use for any summarization task."
+provider = "local"
+system_prompt = """You are a concise summarizer. Given input text, produce a summary that:
+- Preserves key facts, decisions, and action items
+- Uses bullet points
+- Is no longer than 1/4 of the original length
+- Never adds information not in the original"""
+max_turns = 1
+timeout_secs = 60
+
+[agents.researcher]
+description = "Research a question by reading files and running read-only commands in the workspace."
+provider = "gpt4o-mini"
+system_prompt = """You are a research assistant. Investigate the given question by reading relevant source files and running read-only commands. Report findings as structured notes with file paths and line numbers."""
+max_turns = 5
+timeout_secs = 300
+tools = ["bash", "file"]

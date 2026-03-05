@@ -1,6 +1,6 @@
 # Secure Agent Runtime — Design Document
 
-**Status:** Draft — M13a Complete (OpenAI-compatible provider, DB-backed pricing table, cache token support)
+**Status:** Draft — M13b Complete (Provider configuration via TOML, sub-agent tool design, anchoring bias research)
 **Author:** Kenn Williamson  
 **Date:** February 2026
 

@@ -9,6 +9,7 @@ use tracing::{info, warn};
 use crate::enforcement::policy::Policy;
 use crate::providers::UserContent;
 use crate::providers::anthropic::AnthropicProvider;
+use crate::providers::config::ProvidersConfig;
 use crate::providers::openai::OpenAiProvider;
 use crate::runtime::AgentLoop;
 use crate::runtime::prompt::build_system_prompt;
@@ -33,6 +34,8 @@ pub struct SessionConfig {
     pub provider_type: String,
     /// Custom base URL for OpenAI-compatible endpoints.
     pub base_url: Option<String>,
+    /// Optional providers config (overrides provider_type/api_key/base_url).
+    pub providers_config: Option<ProvidersConfig>,
     /// PostgreSQL connection pool for session persistence and/or memory.
     /// Present when `sessions` or `memory` feature is enabled.
     #[cfg(any(feature = "sessions", feature = "memory"))]
@@ -84,6 +87,7 @@ pub async fn session_manager(
                         api_key: config.api_key.clone(),
                         provider_type: config.provider_type.clone(),
                         base_url: config.base_url.clone(),
+                        providers_config: config.providers_config.clone(),
                         #[cfg(any(feature = "sessions", feature = "memory"))]
                         db_pool: config.db_pool.clone(),
                         #[cfg(feature = "memory")]
@@ -121,33 +125,55 @@ async fn chat_session(
     config: SessionConfig,
     approval_tx: mpsc::Sender<ApprovalMessage>,
 ) {
-    let provider: Box<dyn crate::providers::Provider> = match config.provider_type.as_str() {
-        "openai" => match OpenAiProvider::new(config.api_key, &config.model, config.max_tokens) {
-            Ok(mut p) => {
-                if let Some(url) = config.base_url {
-                    p = p.with_base_url(url);
-                }
-                Box::new(p)
-            }
-            Err(e) => {
-                warn!(chat_id = %chat_id, error = %e, "failed to create OpenAI provider");
+    let provider: Box<dyn crate::providers::Provider> = if let Some(ref providers_config) =
+        config.providers_config
+    {
+        // Use config file — instantiate the "default" provider.
+        let default_def = match providers_config.providers.get("default") {
+            Some(def) => def,
+            None => {
+                warn!(chat_id = %chat_id, "providers config missing [providers.default]");
                 return;
             }
-        },
-        _ => {
-            // Default to Anthropic. api_key is required for Anthropic.
-            let api_key = match config.api_key {
-                Some(k) => k,
-                None => {
-                    warn!(chat_id = %chat_id, "ANTHROPIC_API_KEY required for anthropic provider");
-                    return;
+        };
+        match crate::providers::config::instantiate_provider(default_def) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(chat_id = %chat_id, error = %e, "failed to create provider from config");
+                return;
+            }
+        }
+    } else {
+        match config.provider_type.as_str() {
+            "openai" => {
+                match OpenAiProvider::new(config.api_key, &config.model, config.max_tokens) {
+                    Ok(mut p) => {
+                        if let Some(url) = config.base_url {
+                            p = p.with_base_url(url);
+                        }
+                        Box::new(p)
+                    }
+                    Err(e) => {
+                        warn!(chat_id = %chat_id, error = %e, "failed to create OpenAI provider");
+                        return;
+                    }
                 }
-            };
-            match AnthropicProvider::new(api_key, &config.model, config.max_tokens) {
-                Ok(p) => Box::new(p),
-                Err(e) => {
-                    warn!(chat_id = %chat_id, error = %e, "failed to create Anthropic provider");
-                    return;
+            }
+            _ => {
+                // Default to Anthropic. api_key is required for Anthropic.
+                let api_key = match config.api_key {
+                    Some(k) => k,
+                    None => {
+                        warn!(chat_id = %chat_id, "ANTHROPIC_API_KEY required for anthropic provider");
+                        return;
+                    }
+                };
+                match AnthropicProvider::new(api_key, &config.model, config.max_tokens) {
+                    Ok(p) => Box::new(p),
+                    Err(e) => {
+                        warn!(chat_id = %chat_id, error = %e, "failed to create Anthropic provider");
+                        return;
+                    }
                 }
             }
         }
