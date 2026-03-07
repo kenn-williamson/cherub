@@ -111,9 +111,7 @@ impl MemoryTool {
             })
             .await?;
 
-        Ok(ToolResult {
-            output: format!("stored: {id}"),
-        })
+        Ok(ToolResult::text(format!("stored: {id}")))
     }
 
     async fn op_recall(
@@ -155,9 +153,7 @@ impl MemoryTool {
             .await?;
 
         if memories.is_empty() {
-            return Ok(ToolResult {
-                output: "no memories found".to_owned(),
-            });
+            return Ok(ToolResult::text("no memories found".to_owned()));
         }
 
         // Touch each recalled memory's last_referenced_at (best-effort, non-fatal).
@@ -171,7 +167,7 @@ impl MemoryTool {
             .collect::<Vec<_>>()
             .join("\n");
 
-        Ok(ToolResult { output })
+        Ok(ToolResult::text(output))
     }
 
     async fn op_search(
@@ -198,9 +194,7 @@ impl MemoryTool {
             .await?;
 
         if memories.is_empty() {
-            return Ok(ToolResult {
-                output: "no results".to_owned(),
-            });
+            return Ok(ToolResult::text("no results".to_owned()));
         }
 
         let output = memories
@@ -209,7 +203,7 @@ impl MemoryTool {
             .collect::<Vec<_>>()
             .join("\n");
 
-        Ok(ToolResult { output })
+        Ok(ToolResult::text(output))
     }
 
     async fn op_update(&self, params: &serde_json::Value) -> Result<ToolResult, CherubError> {
@@ -235,9 +229,9 @@ impl MemoryTool {
         };
 
         let new_id = self.store.update(id, changes).await?;
-        Ok(ToolResult {
-            output: format!("updated: {new_id} (supersedes {id})"),
-        })
+        Ok(ToolResult::text(format!(
+            "updated: {new_id} (supersedes {id})"
+        )))
     }
 
     async fn op_forget(&self, params: &serde_json::Value) -> Result<ToolResult, CherubError> {
@@ -251,9 +245,7 @@ impl MemoryTool {
             .map_err(|e| CherubError::InvalidInvocation(format!("invalid memory id: {e}")))?;
 
         self.store.forget(id).await?;
-        Ok(ToolResult {
-            output: format!("forgotten: {id}"),
-        })
+        Ok(ToolResult::text(format!("forgotten: {id}")))
     }
 }
 

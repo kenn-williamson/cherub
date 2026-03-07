@@ -78,7 +78,7 @@ impl McpToolProxy {
                 self.server_name, self.tool_name
             )))
         } else {
-            Ok(ToolResult { output })
+            Ok(ToolResult::text(output))
         }
     }
 

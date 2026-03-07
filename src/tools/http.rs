@@ -195,7 +195,7 @@ impl HttpTool {
         );
 
         let output = format!("HTTP {status_code}\n\n{safe_body}");
-        Ok(ToolResult { output })
+        Ok(ToolResult::text(output))
     }
 }
 

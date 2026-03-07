@@ -134,7 +134,7 @@ impl FileTool {
             output = "[Empty file]".to_owned();
         }
 
-        Ok(ToolResult { output })
+        Ok(ToolResult::text(output))
     }
 
     fn op_edit(&self, params: &serde_json::Value) -> Result<ToolResult, CherubError> {
@@ -259,7 +259,7 @@ impl FileTool {
         } else {
             format!("edited '{path_str}' ({applied} replacements)")
         };
-        Ok(ToolResult { output: msg })
+        Ok(ToolResult::text(msg))
     }
 
     fn op_glob(&self, params: &serde_json::Value) -> Result<ToolResult, CherubError> {
@@ -335,7 +335,7 @@ impl FileTool {
             output = "no matches".to_owned();
         }
 
-        Ok(ToolResult { output })
+        Ok(ToolResult::text(output))
     }
 
     fn op_grep(&self, params: &serde_json::Value) -> Result<ToolResult, CherubError> {
@@ -449,7 +449,7 @@ impl FileTool {
             output = "no matches".to_owned();
         }
 
-        Ok(ToolResult { output })
+        Ok(ToolResult::text(output))
     }
 }
 

@@ -137,7 +137,7 @@ impl ProvidersConfig {
     }
 
     /// Validate cross-field constraints that serde can't enforce.
-    fn validate(&self) -> Result<(), CherubError> {
+    pub fn validate(&self) -> Result<(), CherubError> {
         for (name, def) in &self.providers {
             // Failover providers must declare a provider list.
             if def.provider_type == ProviderType::Failover && def.providers.is_none() {
@@ -175,13 +175,35 @@ impl ProvidersConfig {
             self.detect_cycle(name, &mut ancestry)?;
         }
 
-        // Validate sub-agent provider references.
+        // Validate sub-agent definitions.
+        let builtin_tool_names = ["bash", "file", "memory", "http", "dev_environment"];
+        let valid_sub_agent_tools = ["bash", "file"];
+
         for (name, agent) in &self.agents {
+            // Provider reference must exist.
             if !self.providers.contains_key(&agent.provider) {
                 return Err(CherubError::Config(format!(
                     "agent '{name}': references unknown provider '{}'",
                     agent.provider
                 )));
+            }
+
+            // Agent name must not conflict with built-in tool names.
+            if builtin_tool_names.contains(&name.as_str()) {
+                return Err(CherubError::Config(format!(
+                    "agent '{name}': name conflicts with built-in tool"
+                )));
+            }
+
+            // Validate declared tool names.
+            for tool_name in &agent.tools {
+                if !valid_sub_agent_tools.contains(&tool_name.as_str()) {
+                    tracing::warn!(
+                        agent = %name,
+                        tool = %tool_name,
+                        "sub-agent declares unknown tool (only bash/file supported in M13d)"
+                    );
+                }
             }
         }
 

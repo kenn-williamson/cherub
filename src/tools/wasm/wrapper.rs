@@ -450,9 +450,7 @@ fn execute_in_sandbox(
             module.name
         )));
     }
-    Ok(ToolResult {
-        output: response.output.unwrap_or_default(),
-    })
+    Ok(ToolResult::text(response.output.unwrap_or_default()))
 }
 
 // ─── Metadata extraction ─────────────────────────────────────────────────────

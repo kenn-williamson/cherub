@@ -240,9 +240,7 @@ impl ContainerTool {
                                 name
                             )));
                         }
-                        return Ok(ToolResult {
-                            output: output.unwrap_or_default(),
-                        });
+                        return Ok(ToolResult::text(output.unwrap_or_default()));
                     }
                     ToolMessage::HostCall { id, function, args } => {
                         let result = host_state

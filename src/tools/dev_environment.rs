@@ -72,12 +72,10 @@ impl DevEnvironmentTool {
             languages.join(", ")
         };
 
-        Ok(ToolResult {
-            output: format!(
-                "Dev environment ready. Image: {tag}\nInstalled: {lang_list}\n\
-                 Python 3 is always included. The sandbox bash tool will use this image."
-            ),
-        })
+        Ok(ToolResult::text(format!(
+            "Dev environment ready. Image: {tag}\nInstalled: {lang_list}\n\
+             Python 3 is always included. The sandbox bash tool will use this image."
+        )))
     }
 }
 

@@ -239,6 +239,48 @@ async fn chat_session(
         }
     };
 
+    // Wire sub-agent tools from providers config (M13d).
+    let registry = if let Some(ref providers_config) = config.providers_config {
+        use crate::providers::config::instantiate_named_provider;
+        use crate::tools::sub_agent::SubAgentTool;
+
+        let mut sub_agents: Vec<SubAgentTool> = Vec::new();
+        for (agent_name, agent_def) in &providers_config.agents {
+            match instantiate_named_provider(providers_config, &agent_def.provider, &mut Vec::new())
+            {
+                Ok(agent_provider) => {
+                    let sub_registry = ToolRegistry::for_sub_agent(&agent_def.tools);
+                    sub_agents.push(SubAgentTool {
+                        name: agent_name.clone(),
+                        description: agent_def.description.clone(),
+                        provider: agent_provider,
+                        system_prompt: agent_def.system_prompt.clone(),
+                        max_turns: agent_def.max_turns,
+                        timeout: std::time::Duration::from_secs(agent_def.timeout_secs),
+                        registry: sub_registry,
+                        policy: config.policy.clone(),
+                    });
+                    info!(chat_id = %chat_id, agent = %agent_name, "sub-agent tool registered");
+                }
+                Err(e) => {
+                    warn!(
+                        chat_id = %chat_id,
+                        agent = %agent_name,
+                        error = %e,
+                        "failed to create sub-agent provider, skipping"
+                    );
+                }
+            }
+        }
+        if sub_agents.is_empty() {
+            registry
+        } else {
+            registry.with_sub_agents(sub_agents)
+        }
+    } else {
+        registry
+    };
+
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| ".".to_owned());

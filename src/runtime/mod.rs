@@ -849,6 +849,36 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                     is_error: Some(false),
                                 })
                                 .await;
+                                // Record sub-agent cost under the sub-agent's model name (M13d).
+                                #[cfg(feature = "postgres")]
+                                if let Some((ref model_name, ref usage)) = result.sub_agent_usage {
+                                    if let Some(ref store) = self.cost_store {
+                                        use crate::providers::pricing;
+                                        let cost_usd = pricing::lookup_pricing(
+                                            &self.pricing_table,
+                                            model_name,
+                                        )
+                                        .map_or(0.0, |p| pricing::compute_cost(usage, &p));
+                                        if let Err(e) = store
+                                            .record(NewTokenUsage {
+                                                session_id: Some(self.session.id),
+                                                user_id: self.session.user_id.clone(),
+                                                turn_number: Some(self.session.next_ordinal),
+                                                model_name: model_name.clone(),
+                                                input_tokens: usage.input_tokens,
+                                                output_tokens: usage.output_tokens,
+                                                cost_usd,
+                                                call_type: CallType::Inference,
+                                            })
+                                            .await
+                                        {
+                                            warn!(
+                                                error = %e,
+                                                "sub-agent cost recording failed (non-fatal)"
+                                            );
+                                        }
+                                    }
+                                }
                                 if !result.output.is_empty() {
                                     self.output
                                         .emit(OutputEvent::ToolOutput(&result.output))

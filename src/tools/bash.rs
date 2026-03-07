@@ -114,7 +114,7 @@ impl BashTool {
                     stdout.push_str("\n[output truncated]");
                 }
 
-                Ok(ToolResult { output: stdout })
+                Ok(ToolResult::text(stdout))
             }
         }
     }

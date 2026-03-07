@@ -363,16 +363,16 @@ Research findings:
 - [x] Configuration in providers TOML: `type = "failover"` with `providers = ["name1", "name2"]`
 
 ### M13d: Sub-Agent Tools
-- [ ] `SubAgentTool` struct: owns `Box<dyn Provider>`, system prompt, description, resource limits
-- [ ] `ToolImpl::SubAgent` variant with full enum dispatch (name/execute/definition)
-- [ ] Each sub-agent is registered as a tool — orchestrator sees description, decides when to delegate
-- [ ] Bounded inner execution loop (not full AgentLoop): max_turns, timeout, no approval gate
-- [ ] Sub-agent escalations auto-rejected (`AutoRejectGate`) — only orchestrator can escalate to human
-- [ ] Policy gates sub-agent invocation via `MatchSource::Structured` (`action = "invoke"`)
-- [ ] Sub-agents can optionally have their own tool set (subset declared in config, e.g., `tools = ["bash", "file"]`)
-- [ ] Cost tracking correctly attributes sub-agent token usage to sub-agent's model name
-- [ ] TOML config: `[agents.<name>]` sections in the providers config file
-- [ ] No new feature flag (always available when `--providers` config defines agents)
+- [x] `SubAgentTool` struct: owns `Box<dyn Provider>`, system prompt, description, resource limits
+- [x] `ToolImpl::SubAgent` variant with full enum dispatch (name/execute/definition)
+- [x] Each sub-agent is registered as a tool — orchestrator sees description, decides when to delegate
+- [x] Bounded inner execution loop (not full AgentLoop): max_turns, timeout, no approval gate
+- [x] Sub-agent escalations auto-rejected — only orchestrator can escalate to human
+- [x] Policy gates sub-agent invocation via `MatchSource::Structured` (`action = "invoke"`)
+- [x] Sub-agents can optionally have their own tool set (subset declared in config, e.g., `tools = ["bash", "file"]`)
+- [x] Cost tracking correctly attributes sub-agent token usage to sub-agent's model name
+- [x] TOML config: `[agents.<name>]` sections in the providers config file
+- [x] No new feature flag (always available when `--providers` config defines agents)
 
 ---
 

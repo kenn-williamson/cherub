@@ -42,6 +42,7 @@ cherub/
 │   │   ├── dev_environment.rs # Dev environment tool: build sandbox images with language toolchains (feature = "container")
 │   │   ├── memory.rs         # Memory tool: store/recall/search/update/forget (feature = "memory")
 │   │   ├── http.rs           # HTTP tool: GET/POST/PUT/PATCH/DELETE with broker injection (feature = "credentials")
+│   │   ├── sub_agent.rs      # SubAgentTool: bounded inner loop for delegating to cheaper models (M13d)
 │   │   ├── credential_broker.rs  # CredentialBroker: name → inject into reqwest::RequestBuilder (feature = "credentials")
 │   │   ├── leak_detector.rs  # Per-request secret scanner: redacts values from response bodies (feature = "credentials")
 │   │   ├── wasm/             # Feature-gated: #[cfg(feature = "wasm")]
@@ -120,6 +121,7 @@ cherub/
 │   ├── openai_retry_integration.rs  # OpenAI API retry integration tests (wiremock, no API key, M13a)
 │   ├── retry_integration.rs  # API retry integration tests (wiremock, no API key)
 │   ├── session_persistence.rs  # Session persistence integration tests (feature = "sessions", auto-starts DB)
+│   ├── sub_agent_integration.rs # Sub-agent tool integration tests (M13d, 10 tests, no API key)
 │   ├── telegram_approval.rs  # Telegram approval flow tests (feature-gated)
 │   ├── mcp_integration.rs   # MCP full flow tests: spawn → discover → enforce → execute (feature = "mcp", 12 tests)
 │   └── ui/
@@ -459,6 +461,9 @@ cargo build --features mcp
 
 # Run with MCP config
 ANTHROPIC_API_KEY=sk-... cargo run --features mcp -- --mcp-config config/mcp_servers.toml
+
+# Test sub-agent tools (M13d, no API key required)
+cargo nextest run --test sub_agent_integration
 
 # Test MCP (build example first, then run integration tests)
 cargo build --example mock_mcp_server --features mcp && cargo nextest run --features mcp --test mcp_integration

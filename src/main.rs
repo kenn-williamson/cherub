@@ -907,20 +907,25 @@ async fn run_agent(
     info!(policy = %policy_path.display(), "policy loaded");
 
     // Create provider — from config file if --providers is set, otherwise from CLI flags.
-    let provider: Box<dyn cherub::providers::Provider> = if let Some(ref config_path) =
-        providers_config
-    {
-        use cherub::providers::config::{ProvidersConfig, instantiate_named_provider};
-
+    // Keep the parsed config around for sub-agent wiring (M13d).
+    let loaded_providers_config = if let Some(ref config_path) = providers_config {
+        use cherub::providers::config::ProvidersConfig;
         let config = ProvidersConfig::load(config_path)
             .map_err(|e| anyhow::anyhow!("failed to load providers config: {e}"))?;
         info!(config = %config_path.display(), "providers config loaded");
-
-        // Validate that "default" exists.
         if !config.providers.contains_key("default") {
             bail!("providers config must contain a [providers.default] entry");
         }
-        instantiate_named_provider(&config, "default", &mut Vec::new())
+        Some(config)
+    } else {
+        None
+    };
+
+    let provider: Box<dyn cherub::providers::Provider> = if let Some(ref config) =
+        loaded_providers_config
+    {
+        use cherub::providers::config::instantiate_named_provider;
+        instantiate_named_provider(config, "default", &mut Vec::new())
             .map_err(|e| anyhow::anyhow!("failed to create default provider: {e}"))?
     } else {
         match provider_type.as_str() {
@@ -1206,6 +1211,46 @@ async fn run_agent(
         } else {
             registry
         }
+    };
+
+    // Wire sub-agent tools from providers config (M13d).
+    let registry = if let Some(ref config) = loaded_providers_config {
+        use cherub::providers::config::instantiate_named_provider;
+        use cherub::tools::sub_agent::SubAgentTool;
+
+        let mut sub_agents: Vec<SubAgentTool> = Vec::new();
+        for (agent_name, agent_def) in &config.agents {
+            match instantiate_named_provider(config, &agent_def.provider, &mut Vec::new()) {
+                Ok(agent_provider) => {
+                    let sub_registry = ToolRegistry::for_sub_agent(&agent_def.tools);
+                    sub_agents.push(SubAgentTool {
+                        name: agent_name.clone(),
+                        description: agent_def.description.clone(),
+                        provider: agent_provider,
+                        system_prompt: agent_def.system_prompt.clone(),
+                        max_turns: agent_def.max_turns,
+                        timeout: std::time::Duration::from_secs(agent_def.timeout_secs),
+                        registry: sub_registry,
+                        policy: policy.clone(),
+                    });
+                    info!(agent = %agent_name, "sub-agent tool registered");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        agent = %agent_name,
+                        error = %e,
+                        "failed to create sub-agent provider, skipping"
+                    );
+                }
+            }
+        }
+        if sub_agents.is_empty() {
+            registry
+        } else {
+            registry.with_sub_agents(sub_agents)
+        }
+    } else {
+        registry
     };
 
     let system_prompt = build_system_prompt(&cwd);

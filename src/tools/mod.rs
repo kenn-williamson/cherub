@@ -17,6 +17,7 @@ pub mod mcp;
 #[cfg(feature = "memory")]
 pub mod memory;
 pub(crate) mod path;
+pub mod sub_agent;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
@@ -43,6 +44,7 @@ use http::HttpTool;
 use mcp::proxy::McpToolProxy;
 #[cfg(feature = "memory")]
 use memory::MemoryTool;
+use sub_agent::SubAgentTool;
 #[cfg(feature = "wasm")]
 use wasm::WasmTool;
 
@@ -112,6 +114,17 @@ impl ToolInvocation<Evaluated> {
 #[derive(Debug)]
 pub struct ToolResult {
     pub output: String,
+    /// Sub-agent cost data: (model_name, usage). Present only for SubAgent tools.
+    pub sub_agent_usage: Option<(String, crate::providers::ApiUsage)>,
+}
+
+impl ToolResult {
+    pub fn text(output: String) -> Self {
+        Self {
+            output,
+            sub_agent_usage: None,
+        }
+    }
 }
 
 /// Enum dispatch for tool implementations. Known variants at compile time.
@@ -130,6 +143,7 @@ pub(crate) enum ToolImpl {
     DevEnvironment(DevEnvironmentTool),
     #[cfg(feature = "mcp")]
     Mcp(McpToolProxy),
+    SubAgent(SubAgentTool),
 }
 
 impl ToolImpl {
@@ -149,6 +163,7 @@ impl ToolImpl {
             Self::DevEnvironment(_) => "dev_environment",
             #[cfg(feature = "mcp")]
             Self::Mcp(t) => &t.composite_name,
+            Self::SubAgent(t) => &t.name,
         }
     }
 
@@ -177,6 +192,12 @@ impl ToolImpl {
             Self::Mcp(tool) => {
                 let _ = token; // Consume the capability token.
                 tool.execute(params).await
+            }
+            Self::SubAgent(tool) => {
+                let _ = token; // Consume the capability token.
+                // Box::pin to break recursive async cycle:
+                // ToolImpl::execute → SubAgentTool::execute → evaluated.execute → ToolImpl::execute
+                Box::pin(tool.execute(params, _ctx)).await
             }
         }
     }
@@ -339,6 +360,7 @@ impl ToolImpl {
             Self::DevEnvironment(_) => dev_environment::tool_definition(),
             #[cfg(feature = "mcp")]
             Self::Mcp(t) => t.definition(),
+            Self::SubAgent(t) => t.definition(),
         }
     }
 }
@@ -447,6 +469,32 @@ impl ToolRegistry {
         self
     }
 
+    /// Append sub-agent tools to the registry (builder pattern).
+    ///
+    /// Call after other `with_*` methods, before building the `AgentLoop`.
+    pub fn with_sub_agents(mut self, tools: Vec<SubAgentTool>) -> Self {
+        self.tools.extend(tools.into_iter().map(ToolImpl::SubAgent));
+        self
+    }
+
+    /// Create a registry with only the named base tools.
+    ///
+    /// Used to build sub-agent registries that contain a subset of tools.
+    /// Only `bash` and `file` are supported in M13d scope.
+    pub fn for_sub_agent(tool_names: &[String]) -> Self {
+        let mut tools: Vec<ToolImpl> = Vec::new();
+        for name in tool_names {
+            match name.as_str() {
+                "bash" => tools.push(ToolImpl::Bash(BashTool::new())),
+                "file" => tools.push(ToolImpl::File(FileTool::new(workspace_root()))),
+                other => {
+                    tracing::warn!(tool = %other, "unknown tool in sub-agent config, skipping");
+                }
+            }
+        }
+        Self { tools }
+    }
+
     pub(crate) fn find(&self, name: &str) -> Option<&ToolImpl> {
         self.tools.iter().find(|t| t.name() == name)
     }
@@ -463,10 +511,12 @@ impl ToolRegistry {
         }
     }
 
-    /// Enrich params with MCP enforcement metadata.
+    /// Enrich params with enforcement metadata.
     ///
-    /// For MCP tools, injects `__mcp_server` and `__mcp_tool` keys for
-    /// `McpStructured` extraction. For all other tools, returns params unchanged.
+    /// - MCP tools: injects `__mcp_server` and `__mcp_tool` keys for
+    ///   `McpStructured` extraction.
+    /// - Sub-agent tools: injects `"action": "invoke"` for `Structured` extraction.
+    /// - All other tools: returns params unchanged.
     pub fn enrich_params(&self, tool_name: &str, params: &serde_json::Value) -> serde_json::Value {
         match self.find(tool_name) {
             #[cfg(feature = "mcp")]
@@ -481,6 +531,16 @@ impl ToolRegistry {
                     obj.insert(
                         "__mcp_tool".to_owned(),
                         serde_json::Value::String(t.tool_name.clone()),
+                    );
+                }
+                enriched
+            }
+            Some(ToolImpl::SubAgent(_)) => {
+                let mut enriched = params.clone();
+                if let Some(obj) = enriched.as_object_mut() {
+                    obj.insert(
+                        "action".to_owned(),
+                        serde_json::Value::String("invoke".to_owned()),
                     );
                 }
                 enriched
