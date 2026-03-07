@@ -118,6 +118,11 @@ pub fn build_system_prompt(cwd: &str) -> String {
              Explain what you're doing and share relevant output with the user.\n\
              If a command fails or is rejected, inform the user and suggest alternatives.\n\
              \n\
+             ## Response Format\n\
+             \n\
+             Begin each response with a brief 1-2 sentence summary of what you understand\n\
+             the user is asking for, then proceed with your answer or tool calls.\n\
+             \n\
              ## File Tool\n\
              \n\
              You have a file tool for structured file operations. Prefer it over bash for file I/O.\n\
@@ -193,6 +198,13 @@ mod tests {
     fn prompt_contains_cwd() {
         let prompt = build_system_prompt("/home/user/project");
         assert!(prompt.contains("/home/user/project"));
+    }
+
+    #[test]
+    fn prompt_contains_recapitulation_instruction() {
+        let prompt = build_system_prompt("/tmp");
+        assert!(prompt.contains("## Response Format"));
+        assert!(prompt.contains("brief 1-2 sentence summary"));
     }
 
     #[test]

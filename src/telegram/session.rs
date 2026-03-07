@@ -50,6 +50,8 @@ pub struct SessionConfig {
     pub sandbox_bash_runtime: Option<Arc<dyn crate::tools::container::ContainerRuntime>>,
     /// Extended thinking budget in tokens (Anthropic-only, M14a).
     pub thinking_budget: Option<u32>,
+    /// Verbose output: send events immediately instead of batching per turn (M14d).
+    pub verbose: bool,
 }
 
 /// Message sent to the session manager from the connector.
@@ -97,6 +99,7 @@ pub async fn session_manager(
                         #[cfg(feature = "container")]
                         sandbox_bash_runtime: config.sandbox_bash_runtime.clone(),
                         thinking_budget: config.thinking_budget,
+                        verbose: config.verbose,
                     };
                     let approval_tx = approval_tx.clone();
 
@@ -296,7 +299,7 @@ async fn chat_session(
         .unwrap_or_else(|_| ".".to_owned());
     let system_prompt = build_system_prompt(&cwd);
 
-    let output = TelegramSink::new(config.bot.clone(), chat_id);
+    let output = TelegramSink::new(config.bot.clone(), chat_id, config.verbose);
     let approval_gate = TelegramApprovalGate::new(config.bot, chat_id, approval_tx);
 
     let mut agent = AgentLoop::new(

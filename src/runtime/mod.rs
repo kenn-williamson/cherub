@@ -4,7 +4,8 @@ pub mod prompt;
 pub mod session;
 pub mod tokens;
 
-use std::time::Instant;
+use std::future::Future;
+use std::time::{Duration, Instant};
 
 use tracing::{info, info_span, warn};
 
@@ -607,6 +608,15 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
         // fields on info!() calls carry the same context.
         let _span = info_span!("turn");
 
+        self.output.turn_start().await;
+        let result = self.run_turn_inner(content).await;
+        self.output.turn_end().await;
+        result
+    }
+
+    /// Inner implementation of `run_turn`, separated so lifecycle calls always fire.
+    async fn run_turn_inner(&mut self, content: Vec<UserContent>) -> Result<(), CherubError> {
+
         // Extract text for injection query BEFORE content is moved into the session.
         #[cfg(feature = "memory")]
         let user_query = extract_user_text(&content);
@@ -719,16 +729,27 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                 _ => return Err(CherubError::Provider("unexpected message type".to_owned())),
             };
 
-            // Emit text blocks and collect tool_use blocks
+            // Emit text blocks and collect tool_use blocks.
+            // The first non-empty text block before any ToolUse is emitted as
+            // Recapitulation (M14b) so sinks can style it distinctly.
             let mut tool_uses = Vec::new();
+            let mut first_text_emitted = false;
+            let mut tool_use_seen = false;
             for block in &content {
                 match block {
-                    ContentBlock::Text { text } => {
-                        if !text.is_empty() {
+                    ContentBlock::Text { text } if !text.is_empty() => {
+                        if !first_text_emitted && !tool_use_seen {
+                            self.output
+                                .emit(OutputEvent::Recapitulation(text))
+                                .await;
+                            first_text_emitted = true;
+                        } else {
                             self.output.emit(OutputEvent::Text(text)).await;
                         }
                     }
+                    ContentBlock::Text { .. } => {}
                     ContentBlock::ToolUse { id, name, input } => {
+                        tool_use_seen = true;
                         tool_uses.push((id.clone(), name.clone(), input.clone()));
                     }
                     ContentBlock::Thinking { thinking } => {
@@ -849,7 +870,14 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                             .await;
 
                         let exec_start = Instant::now();
-                        match evaluated.execute(token, &self.registry, &ctx).await {
+                        match self
+                            .execute_with_progress(
+                                &name,
+                                display_str,
+                                evaluated.execute(token, &self.registry, &ctx),
+                            )
+                            .await
+                        {
                             Ok(result) => {
                                 let duration_ms = exec_start.elapsed().as_millis() as i64;
                                 info!(duration_ms = %duration_ms, "tool execution complete");
@@ -1001,7 +1029,14 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                     .await;
 
                                 let exec_start = Instant::now();
-                                match evaluated.execute(token, &self.registry, &ctx).await {
+                                match self
+                                    .execute_with_progress(
+                                        &name,
+                                        display_str,
+                                        evaluated.execute(token, &self.registry, &ctx),
+                                    )
+                                    .await
+                                {
                                     Ok(result) => {
                                         let duration_ms = exec_start.elapsed().as_millis() as i64;
                                         info!(duration_ms = %duration_ms, "tool execution complete");
@@ -1108,6 +1143,38 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
         }
 
         Ok(())
+    }
+
+    /// Execute a tool future with periodic progress updates (M14c).
+    async fn execute_with_progress(
+        &self,
+        tool_name: &str,
+        display_str: &str,
+        fut: impl Future<Output = Result<crate::tools::ToolResult, CherubError>>,
+    ) -> Result<crate::tools::ToolResult, CherubError> {
+        self.output
+            .emit(OutputEvent::Progress {
+                tool: tool_name,
+                status: display_str,
+            })
+            .await;
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        interval.tick().await; // skip immediate tick
+        tokio::pin!(fut);
+        let mut elapsed = 0u64;
+        loop {
+            tokio::select! {
+                result = &mut fut => {
+                    self.output.emit(OutputEvent::ProgressClear).await;
+                    return result;
+                }
+                _ = interval.tick() => {
+                    elapsed += 5;
+                    let status = format!("{display_str} ({elapsed}s)");
+                    self.output.emit(OutputEvent::Progress { tool: tool_name, status: &status }).await;
+                }
+            }
+        }
     }
 }
 

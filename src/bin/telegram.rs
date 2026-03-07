@@ -187,6 +187,12 @@ async fn main() -> Result<()> {
         .ok()
         .and_then(|v| v.parse().ok());
 
+    // Verbose Telegram output: send events immediately instead of batching (M14d).
+    let verbose = std::env::var("CHERUB_TELEGRAM_VERBOSE").is_ok();
+    if verbose {
+        info!("verbose output enabled — events sent immediately");
+    }
+
     // Session config
     let config = SessionConfig {
         bot: bot.clone(),
@@ -204,6 +210,7 @@ async fn main() -> Result<()> {
         #[cfg(feature = "container")]
         sandbox_bash_runtime,
         thinking_budget,
+        verbose,
     };
 
     // Spawn session manager and approval manager tasks.
