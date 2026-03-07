@@ -14,11 +14,14 @@ use uuid::Uuid;
 use crate::enforcement::capability::CapabilityToken;
 use crate::error::CherubError;
 use crate::storage::{
-    MemoryCategory, MemoryFilter, MemoryScope, MemoryStore, MemoryUpdate, NewMemory, SourceType,
+    Memory, MemoryCategory, MemoryFilter, MemoryScope, MemoryStore, MemoryUpdate, NewMemory,
+    SourceType,
 };
 use crate::tools::ToolResult;
 
 use super::ToolContext;
+
+const CONTRADICTION_SEARCH_LIMIT: i64 = 5;
 
 pub struct MemoryTool {
     store: Arc<dyn MemoryStore>,
@@ -51,6 +54,30 @@ impl MemoryTool {
             other => Err(CherubError::InvalidInvocation(format!(
                 "unknown memory action: {other}"
             ))),
+        }
+    }
+
+    async fn check_contradictions(
+        &self,
+        content: &str,
+        scope: MemoryScope,
+        user_id: &str,
+    ) -> Vec<Memory> {
+        match self
+            .store
+            .search(
+                content,
+                Some(scope),
+                Some(user_id),
+                CONTRADICTION_SEARCH_LIMIT,
+            )
+            .await
+        {
+            Ok(memories) => memories,
+            Err(e) => {
+                tracing::warn!(error = %e, "contradiction check search failed, allowing write");
+                Vec::new()
+            }
         }
     }
 
@@ -95,6 +122,38 @@ impl MemoryTool {
 
         let structured = params.get("structured").cloned();
 
+        let confirmed = params
+            .get("confirmed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // Pre-write contradiction check: find similar memories before storing.
+        if !confirmed {
+            let similar = self
+                .check_contradictions(content, scope, &ctx.user_id)
+                .await;
+            if !similar.is_empty() {
+                let mut msg = "Similar memories exist — resolve before storing:\n".to_owned();
+                for m in &similar {
+                    msg.push_str(&format!(
+                        "- [{}] ({}/{}) \"{}\" [confidence: {:.2}, stored: {}]\n",
+                        m.id,
+                        m.scope,
+                        m.path,
+                        m.content,
+                        m.confidence,
+                        m.created_at.format("%Y-%m-%d"),
+                    ));
+                }
+                msg.push_str(
+                    "\nOptions:\n\
+                     1. Update or forget the conflicting memory, then retry this store\n\
+                     2. Add confirmed=true to store alongside the existing memory",
+                );
+                return Ok(ToolResult::text(msg));
+            }
+        }
+
         let id = self
             .store
             .store(NewMemory {
@@ -110,6 +169,29 @@ impl MemoryTool {
                 confidence,
             })
             .await?;
+
+        // After a confirmed write, surface similar memories as FYI.
+        if confirmed {
+            let similar = self
+                .check_contradictions(content, scope, &ctx.user_id)
+                .await;
+            if !similar.is_empty() {
+                let mut msg = format!("stored: {id}\n\n[Note: similar memories exist]\n");
+                for m in &similar {
+                    msg.push_str(&format!(
+                        "- [{}] ({}/{}) \"{}\" [confidence: {:.2}, stored: {}]\n",
+                        m.id,
+                        m.scope,
+                        m.path,
+                        m.content,
+                        m.confidence,
+                        m.created_at.format("%Y-%m-%d"),
+                    ));
+                }
+                msg.push_str("\nConsider updating or forgetting outdated memories.");
+                return Ok(ToolResult::text(msg));
+            }
+        }
 
         Ok(ToolResult::text(format!("stored: {id}")))
     }
@@ -256,4 +338,344 @@ fn parse_scope(params: &serde_json::Value) -> Result<MemoryScope, CherubError> {
         .unwrap_or("user")
         .parse::<MemoryScope>()
         .map_err(|e| CherubError::InvalidInvocation(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use chrono::Utc;
+    use serde_json::json;
+    use uuid::{NoContext, Timestamp, Uuid};
+
+    fn new_uuid() -> Uuid {
+        Uuid::new_v7(Timestamp::now(NoContext))
+    }
+
+    fn test_ctx(user_id: &str) -> ToolContext {
+        ToolContext {
+            user_id: user_id.to_owned(),
+            session_id: new_uuid(),
+            turn_number: 1,
+        }
+    }
+
+    fn make_memory(content: &str, user_id: &str, scope: MemoryScope, path: &str) -> Memory {
+        Memory {
+            id: new_uuid(),
+            user_id: user_id.to_owned(),
+            scope,
+            category: MemoryCategory::Preference,
+            path: path.to_owned(),
+            content: content.to_owned(),
+            structured: None,
+            source_session_id: None,
+            source_turn_number: None,
+            source_type: SourceType::Explicit,
+            confidence: 1.0,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_referenced_at: None,
+            superseded_by: None,
+        }
+    }
+
+    // ─── In-memory MemoryStore for unit tests ────────────────────────────────
+
+    #[derive(Default)]
+    struct InMemoryStore {
+        memories: Mutex<Vec<Memory>>,
+    }
+
+    impl InMemoryStore {
+        fn new_arc() -> Arc<Self> {
+            Arc::new(Self::default())
+        }
+
+        fn add(&self, m: Memory) {
+            self.memories.lock().unwrap().push(m);
+        }
+    }
+
+    #[async_trait]
+    impl MemoryStore for InMemoryStore {
+        async fn store(&self, memory: NewMemory) -> Result<Uuid, CherubError> {
+            let id = new_uuid();
+            let row = Memory {
+                id,
+                user_id: memory.user_id,
+                scope: memory.scope,
+                category: memory.category,
+                path: memory.path,
+                content: memory.content,
+                structured: memory.structured,
+                source_session_id: memory.source_session_id,
+                source_turn_number: memory.source_turn_number,
+                source_type: memory.source_type,
+                confidence: memory.confidence,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                last_referenced_at: None,
+                superseded_by: None,
+            };
+            self.memories.lock().unwrap().push(row);
+            Ok(id)
+        }
+
+        async fn recall(&self, filter: MemoryFilter) -> Result<Vec<Memory>, CherubError> {
+            let memories = self.memories.lock().unwrap();
+            let results = memories
+                .iter()
+                .filter(|m| {
+                    filter
+                        .user_id
+                        .as_deref()
+                        .map_or(true, |uid| m.user_id == uid)
+                })
+                .filter(|m| filter.scope.map_or(true, |s| m.scope == s))
+                .filter(|m| filter.category.map_or(true, |c| m.category == c))
+                .cloned()
+                .collect();
+            Ok(results)
+        }
+
+        async fn search(
+            &self,
+            query: &str,
+            scope: Option<MemoryScope>,
+            user_id: Option<&str>,
+            limit: i64,
+        ) -> Result<Vec<Memory>, CherubError> {
+            let memories = self.memories.lock().unwrap();
+            let query_lower = query.to_lowercase();
+            let query_words: Vec<&str> = query_lower
+                .split_whitespace()
+                .filter(|w| w.len() >= 4)
+                .collect();
+            let results = memories
+                .iter()
+                .filter(|m| user_id.map_or(true, |uid| m.user_id == uid))
+                .filter(|m| scope.map_or(true, |s| m.scope == s))
+                .filter(|m| {
+                    let content_lower = m.content.to_lowercase();
+                    query_words.iter().any(|w| content_lower.contains(*w))
+                })
+                .take(limit as usize)
+                .cloned()
+                .collect();
+            Ok(results)
+        }
+
+        async fn update(&self, id: Uuid, _changes: MemoryUpdate) -> Result<Uuid, CherubError> {
+            Ok(id)
+        }
+
+        async fn forget(&self, _id: Uuid) -> Result<(), CherubError> {
+            Ok(())
+        }
+
+        async fn touch(&self, _id: Uuid) -> Result<(), CherubError> {
+            Ok(())
+        }
+    }
+
+    // ─── FailingSearchStore: search always errors ────────────────────────────
+
+    struct FailingSearchStore;
+
+    #[async_trait]
+    impl MemoryStore for FailingSearchStore {
+        async fn store(&self, _memory: NewMemory) -> Result<Uuid, CherubError> {
+            Ok(new_uuid())
+        }
+        async fn recall(&self, _filter: MemoryFilter) -> Result<Vec<Memory>, CherubError> {
+            Ok(Vec::new())
+        }
+        async fn search(
+            &self,
+            _query: &str,
+            _scope: Option<MemoryScope>,
+            _user_id: Option<&str>,
+            _limit: i64,
+        ) -> Result<Vec<Memory>, CherubError> {
+            Err(CherubError::ToolExecution("search unavailable".to_owned()))
+        }
+        async fn update(&self, id: Uuid, _changes: MemoryUpdate) -> Result<Uuid, CherubError> {
+            Ok(id)
+        }
+        async fn forget(&self, _id: Uuid) -> Result<(), CherubError> {
+            Ok(())
+        }
+        async fn touch(&self, _id: Uuid) -> Result<(), CherubError> {
+            Ok(())
+        }
+    }
+
+    // ─── Tests ───────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn store_blocked_when_similar_memory_exists() {
+        let store = InMemoryStore::new_arc();
+        store.add(make_memory(
+            "User prefers Italian food",
+            "user1",
+            MemoryScope::User,
+            "preferences/food",
+        ));
+
+        let tool = MemoryTool::new(store as Arc<dyn MemoryStore>);
+        let ctx = test_ctx("user1");
+        let params = json!({
+            "action": "store",
+            "content": "User prefers Thai food",
+            "category": "preference",
+            "path": "preferences/food",
+        });
+
+        let result = tool.op_store(&params, &ctx).await.unwrap();
+        assert!(
+            result.output.contains("Similar memories exist"),
+            "should block: {}",
+            result.output,
+        );
+        assert!(result.output.contains("Italian food"));
+        assert!(result.output.contains("confirmed=true"));
+    }
+
+    #[tokio::test]
+    async fn store_succeeds_when_no_similar() {
+        let store = InMemoryStore::new_arc();
+        store.add(make_memory(
+            "Loves Italian cooking",
+            "user1",
+            MemoryScope::User,
+            "preferences/food",
+        ));
+
+        let tool = MemoryTool::new(store as Arc<dyn MemoryStore>);
+        let ctx = test_ctx("user1");
+        let params = json!({
+            "action": "store",
+            "content": "Lives in Tokyo",
+            "category": "fact",
+            "path": "facts/location",
+        });
+
+        let result = tool.op_store(&params, &ctx).await.unwrap();
+        assert!(
+            result.output.starts_with("stored:"),
+            "should succeed: {}",
+            result.output,
+        );
+    }
+
+    #[tokio::test]
+    async fn store_succeeds_with_confirmed_true() {
+        let store = InMemoryStore::new_arc();
+        store.add(make_memory(
+            "User prefers Italian food",
+            "user1",
+            MemoryScope::User,
+            "preferences/food",
+        ));
+
+        let tool = MemoryTool::new(store as Arc<dyn MemoryStore>);
+        let ctx = test_ctx("user1");
+        let params = json!({
+            "action": "store",
+            "content": "User prefers Thai food",
+            "category": "preference",
+            "path": "preferences/food",
+            "confirmed": true,
+        });
+
+        let result = tool.op_store(&params, &ctx).await.unwrap();
+        assert!(
+            result.output.contains("stored:"),
+            "confirmed write should succeed: {}",
+            result.output,
+        );
+    }
+
+    #[tokio::test]
+    async fn confirmed_store_includes_similar_note() {
+        let store = InMemoryStore::new_arc();
+        store.add(make_memory(
+            "User prefers Italian food",
+            "user1",
+            MemoryScope::User,
+            "preferences/food",
+        ));
+
+        let tool = MemoryTool::new(store as Arc<dyn MemoryStore>);
+        let ctx = test_ctx("user1");
+        let params = json!({
+            "action": "store",
+            "content": "User prefers Thai food",
+            "category": "preference",
+            "path": "preferences/food",
+            "confirmed": true,
+        });
+
+        let result = tool.op_store(&params, &ctx).await.unwrap();
+        assert!(result.output.contains("stored:"));
+        assert!(
+            result.output.contains("[Note: similar memories exist]"),
+            "should include FYI note: {}",
+            result.output,
+        );
+        assert!(result.output.contains("Italian food"));
+        assert!(result.output.contains("Consider updating or forgetting"));
+    }
+
+    #[tokio::test]
+    async fn contradiction_check_search_failure_allows_write() {
+        let store: Arc<dyn MemoryStore> = Arc::new(FailingSearchStore);
+        let tool = MemoryTool::new(store);
+        let ctx = test_ctx("user1");
+        let params = json!({
+            "action": "store",
+            "content": "User prefers Italian food",
+            "category": "preference",
+            "path": "preferences/food",
+        });
+
+        let result = tool.op_store(&params, &ctx).await.unwrap();
+        assert!(
+            result.output.starts_with("stored:"),
+            "search failure should not block write: {}",
+            result.output,
+        );
+    }
+
+    #[tokio::test]
+    async fn contradiction_check_respects_user_isolation() {
+        let store = InMemoryStore::new_arc();
+        // User A has a memory about food
+        store.add(make_memory(
+            "User prefers Italian food",
+            "user_a",
+            MemoryScope::User,
+            "preferences/food",
+        ));
+
+        let tool = MemoryTool::new(store as Arc<dyn MemoryStore>);
+        // User B stores a similar memory — should NOT be blocked by user A's memory
+        let ctx = test_ctx("user_b");
+        let params = json!({
+            "action": "store",
+            "content": "User prefers Thai food",
+            "category": "preference",
+            "path": "preferences/food",
+        });
+
+        let result = tool.op_store(&params, &ctx).await.unwrap();
+        assert!(
+            result.output.starts_with("stored:"),
+            "user B should not be blocked by user A's memories: {}",
+            result.output,
+        );
+    }
 }

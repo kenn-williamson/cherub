@@ -331,6 +331,10 @@ impl ToolImpl {
                         "limit": {
                             "type": "integer",
                             "description": "Max results to return for recall/search (default: 10/5)"
+                        },
+                        "confirmed": {
+                            "type": "boolean",
+                            "description": "Set to true to store even when similar memories exist (bypass contradiction check)"
                         }
                     },
                     "required": ["action"]

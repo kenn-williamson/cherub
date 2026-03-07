@@ -116,6 +116,7 @@ cherub/
 │   ├── memory_store.rs       # PgMemoryStore integration tests (M6b + M6c hybrid search)
 │   ├── redteam.rs            # Live model adversarial tests (#[ignore], requires API key)
 │   ├── compaction.rs         # Context compaction integration tests (mock provider, no API key)
+│   ├── contradiction_detection.rs # Memory contradiction detection integration tests (M6, no DB needed)
 │   ├── cost_store.rs         # PgCostStore integration tests (M12, feature = "sessions", auto-starts DB)
 │   ├── failover_integration.rs  # Failover provider integration tests (wiremock, no API key, M13c)
 │   ├── openai_retry_integration.rs  # OpenAI API retry integration tests (wiremock, no API key, M13a)

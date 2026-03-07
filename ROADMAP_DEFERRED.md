@@ -65,3 +65,13 @@ Key design concerns:
 - **Constraint modification** — Once confirmed, constraints are immutable for the session. The user can request a new constraint set (re-confirmation required), but the agent cannot unilaterally modify them.
 - **Connector-agnostic representation** — The enforcement layer sees `Constraint { field, op, value, on_failure }` regardless of whether confirmation happened via Telegram, Discord, or CLI. Presentation is the connector's responsibility.
 - **Interaction with policy constraints** — Task constraints are additive. They can further restrict what the policy allows but cannot relax policy constraints. A policy that says "max $500 per buy" cannot be overridden by a task constraint of "max $1000 per buy."
+
+## Memory Reconciliation / Admin Panel
+
+Contradiction detection (M6) surfaces similar memories to the agent during writes. What's missing is a broader admin panel for memory management:
+
+- Bulk memory reconciliation: scan all memories for a user and surface clusters of potentially contradictory entries
+- Memory timeline view: show the `superseded_by` chain for a given memory path
+- Memory merge: combine two memories into one (with provenance from both)
+- `op_update()` contradiction check: currently deferred because it needs `get_by_id()` on `MemoryStore` to load scope/user_id from the existing memory
+- Admin CLI: `cherub memory list/search/reconcile` subcommands for operator use

@@ -149,6 +149,12 @@ pub fn build_system_prompt(cwd: &str) -> String {
             - Record facts about the user or project (category: fact)\n\
             - Track working context across turns (scope: working, category: observation)\n\
             \n\
+            When storing a new memory, the system checks for similar existing memories.\n\
+            If potential contradictions are found, the store is blocked until you resolve them:\n\
+            - Update or forget the conflicting memory if the new information supersedes it\n\
+            - Ask the user which version is correct if you're unsure\n\
+            - Use confirmed=true to store alongside if both are valid\n\
+            \n\
             Do NOT store sensitive credentials, secrets, or private data.\n\
             Do NOT modify agent-scope or identity memories without explicit user instruction.\n\
             Policy enforcement controls which operations are permitted — rejected operations\n\

@@ -156,8 +156,8 @@ Everything else — connectors, credential brokering, audit logging, IPC plugins
 - [x] Pre-compaction memory flush: extract important information before discarding context
 
 ### Contradiction Detection
-- [ ] On memory write, query semantically similar existing memories
-- [ ] Surface conflicts to user via existing escalation mechanism
+- [x] On memory write, query semantically similar existing memories
+- [x] Surface conflicts to user via existing escalation mechanism
 - [ ] `superseded_by` chain for memory history (no silent overwrites)
 
 ---
@@ -426,8 +426,8 @@ M14d depends on M14c
 ## Unfinished from Earlier Milestones
 
 ### M6: Contradiction Detection
-- [ ] On memory write, query semantically similar existing memories
-- [ ] Surface conflicts to user via existing escalation mechanism
+- [x] On memory write, query semantically similar existing memories
+- [x] Surface conflicts to user via existing escalation mechanism
 - [ ] `superseded_by` chain for memory history (no silent overwrites)
 
 ---
