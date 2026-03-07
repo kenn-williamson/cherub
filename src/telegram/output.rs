@@ -82,6 +82,9 @@ impl OutputSink for TelegramSink {
                 let text = format!("[WARNING] {msg}");
                 self.send_plain(&text).await;
             }
+            OutputEvent::Thinking(_) => {
+                // Thinking is debug-level, not shown to Telegram users.
+            }
         }
     }
 }

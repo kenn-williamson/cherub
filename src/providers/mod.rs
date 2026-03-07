@@ -77,6 +77,12 @@ pub enum ContentBlock {
         name: String,
         input: serde_json::Value,
     },
+    Thinking {
+        thinking: String,
+    },
+    RedactedThinking {
+        data: String,
+    },
 }
 
 /// Messages exchanged between the runtime and LLM providers.

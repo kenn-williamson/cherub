@@ -48,6 +48,8 @@ pub struct SessionConfig {
     /// replaced by a container-sandboxed equivalent.
     #[cfg(feature = "container")]
     pub sandbox_bash_runtime: Option<Arc<dyn crate::tools::container::ContainerRuntime>>,
+    /// Extended thinking budget in tokens (Anthropic-only, M14a).
+    pub thinking_budget: Option<u32>,
 }
 
 /// Message sent to the session manager from the connector.
@@ -94,6 +96,7 @@ pub async fn session_manager(
                         embedder: config.embedder.clone(),
                         #[cfg(feature = "container")]
                         sandbox_bash_runtime: config.sandbox_bash_runtime.clone(),
+                        thinking_budget: config.thinking_budget,
                     };
                     let approval_tx = approval_tx.clone();
 
@@ -170,7 +173,14 @@ async fn chat_session(
                     }
                 };
                 match AnthropicProvider::new(api_key, &config.model, config.max_tokens) {
-                    Ok(p) => Box::new(p),
+                    Ok(p) => {
+                        let p = if let Some(budget) = config.thinking_budget {
+                            p.with_thinking_budget(budget)
+                        } else {
+                            p
+                        };
+                        Box::new(p)
+                    }
                     Err(e) => {
                         warn!(chat_id = %chat_id, error = %e, "failed to create Anthropic provider");
                         return;

@@ -63,6 +63,12 @@ pub fn estimate_tokens(system: &str, messages: &[Message], tools: &[ToolDefiniti
                             let input_len = input.to_string().len() as u32;
                             total += input_len / CHARS_PER_TOKEN_JSON;
                         }
+                        ContentBlock::Thinking { thinking } => {
+                            total += (thinking.len() as u32) / CHARS_PER_TOKEN_TEXT;
+                        }
+                        ContentBlock::RedactedThinking { data } => {
+                            total += (data.len() as u32) / CHARS_PER_TOKEN_TEXT;
+                        }
                     }
                 }
             }
@@ -163,6 +169,37 @@ mod tests {
         let tokens = estimate_tokens("", &messages, &[]);
         // 4 overhead + 1000 fixed image cost
         assert_eq!(tokens, 1004);
+    }
+
+    #[test]
+    fn thinking_block_estimation() {
+        let messages = vec![Message::Assistant {
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "Let me think about this carefully...".to_owned(), // 36 chars
+                },
+                ContentBlock::Text {
+                    text: "The answer.".to_owned(),
+                },
+            ],
+            stop_reason: crate::providers::StopReason::EndTurn,
+        }];
+        let tokens = estimate_tokens("", &messages, &[]);
+        // 4 overhead + 36/4=9 (thinking) + 11/4=2 (text) = 15
+        assert_eq!(tokens, 15);
+    }
+
+    #[test]
+    fn redacted_thinking_block_estimation() {
+        let messages = vec![Message::Assistant {
+            content: vec![ContentBlock::RedactedThinking {
+                data: "c29tZSBiYXNlNjQ=".to_owned(), // 17 chars
+            }],
+            stop_reason: crate::providers::StopReason::EndTurn,
+        }];
+        let tokens = estimate_tokens("", &messages, &[]);
+        // 4 overhead + 17/4=4
+        assert_eq!(tokens, 8);
     }
 
     #[test]

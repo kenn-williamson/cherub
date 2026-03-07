@@ -211,6 +211,7 @@ fn user_content_to_oai(content: &[UserContent]) -> OaiContent {
 }
 
 /// Split assistant content blocks into text content and tool calls.
+/// Thinking and RedactedThinking blocks are Anthropic-specific and skipped.
 fn assistant_content_to_oai(content: &[ContentBlock]) -> (OaiContent, Vec<OaiToolCall>) {
     let mut text_parts = Vec::new();
     let mut tool_calls = Vec::new();
@@ -230,6 +231,8 @@ fn assistant_content_to_oai(content: &[ContentBlock]) -> (OaiContent, Vec<OaiToo
                     },
                 });
             }
+            // Anthropic-specific blocks — not forwarded to OpenAI-compatible APIs.
+            ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {}
         }
     }
 

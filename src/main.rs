@@ -46,6 +46,10 @@ enum Command {
         /// Optional MCP servers config file (M11).
         #[cfg(feature = "mcp")]
         mcp_config: Option<PathBuf>,
+        /// Extended thinking budget in tokens (Anthropic-only, M14a).
+        thinking_budget: Option<u32>,
+        /// Whether to show thinking blocks in output (M14a).
+        show_thinking: bool,
     },
     /// Credential vault management (M7a).
     #[cfg(feature = "credentials")]
@@ -158,6 +162,8 @@ fn parse_args() -> Result<Command> {
     #[cfg(feature = "mcp")]
     let mut mcp_config: Option<PathBuf> = None;
     let mut providers_config: Option<PathBuf> = None;
+    let mut thinking_budget: Option<u32> = None;
+    let mut show_thinking = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -217,6 +223,15 @@ fn parse_args() -> Result<Command> {
                     providers_config = Some(PathBuf::from(&args[i]));
                 }
             }
+            "--thinking-budget" => {
+                i += 1;
+                if i < args.len() {
+                    thinking_budget = args[i].parse().ok();
+                }
+            }
+            "--show-thinking" => {
+                show_thinking = true;
+            }
             _ => {}
         }
         i += 1;
@@ -245,6 +260,8 @@ fn parse_args() -> Result<Command> {
         sandbox_bash,
         #[cfg(feature = "mcp")]
         mcp_config,
+        thinking_budget,
+        show_thinking,
     })
 }
 
@@ -897,6 +914,8 @@ async fn run_agent(
     #[cfg(feature = "container")] container_tools_dir: Option<PathBuf>,
     #[cfg(feature = "container")] sandbox_bash: bool,
     #[cfg(feature = "mcp")] mcp_config: Option<PathBuf>,
+    thinking_budget: Option<u32>,
+    show_thinking: bool,
 ) -> Result<()> {
     let user_id = std::env::var("USER").unwrap_or_else(|_| "local".to_owned());
 
@@ -921,45 +940,46 @@ async fn run_agent(
         None
     };
 
-    let provider: Box<dyn cherub::providers::Provider> = if let Some(ref config) =
-        loaded_providers_config
-    {
-        use cherub::providers::config::instantiate_named_provider;
-        instantiate_named_provider(config, "default", &mut Vec::new())
-            .map_err(|e| anyhow::anyhow!("failed to create default provider: {e}"))?
-    } else {
-        match provider_type.as_str() {
-            "openai" => {
-                // OPENAI_API_KEY is optional for local providers (Ollama, etc.).
-                let api_key = std::env::var("OPENAI_API_KEY").ok().and_then(|k| {
-                    if k.is_empty() {
-                        None
-                    } else {
-                        Some(SecretString::from(k))
+    let provider: Box<dyn cherub::providers::Provider> =
+        if let Some(ref config) = loaded_providers_config {
+            use cherub::providers::config::instantiate_named_provider;
+            instantiate_named_provider(config, "default", &mut Vec::new())
+                .map_err(|e| anyhow::anyhow!("failed to create default provider: {e}"))?
+        } else {
+            match provider_type.as_str() {
+                "openai" => {
+                    // OPENAI_API_KEY is optional for local providers (Ollama, etc.).
+                    let api_key = std::env::var("OPENAI_API_KEY").ok().and_then(|k| {
+                        if k.is_empty() {
+                            None
+                        } else {
+                            Some(SecretString::from(k))
+                        }
+                    });
+                    let mut p = OpenAiProvider::new(api_key, &model, DEFAULT_MAX_TOKENS)
+                        .map_err(|e| anyhow::anyhow!("failed to create OpenAI provider: {e}"))?;
+                    if let Some(url) = base_url {
+                        p = p.with_base_url(url);
                     }
-                });
-                let mut p = OpenAiProvider::new(api_key, &model, DEFAULT_MAX_TOKENS)
-                    .map_err(|e| anyhow::anyhow!("failed to create OpenAI provider: {e}"))?;
-                if let Some(url) = base_url {
-                    p = p.with_base_url(url);
+                    Box::new(p)
                 }
-                Box::new(p)
-            }
-            "anthropic" => {
-                let api_key_raw = std::env::var("ANTHROPIC_API_KEY")
-                    .context("ANTHROPIC_API_KEY environment variable not set")?;
-                if api_key_raw.is_empty() {
-                    bail!("ANTHROPIC_API_KEY is empty");
+                "anthropic" => {
+                    let api_key_raw = std::env::var("ANTHROPIC_API_KEY")
+                        .context("ANTHROPIC_API_KEY environment variable not set")?;
+                    if api_key_raw.is_empty() {
+                        bail!("ANTHROPIC_API_KEY is empty");
+                    }
+                    let api_key = SecretString::from(api_key_raw);
+                    let mut p = AnthropicProvider::new(api_key, &model, DEFAULT_MAX_TOKENS)
+                        .map_err(|e| anyhow::anyhow!("failed to create Anthropic provider: {e}"))?;
+                    if let Some(budget) = thinking_budget {
+                        p = p.with_thinking_budget(budget);
+                    }
+                    Box::new(p)
                 }
-                let api_key = SecretString::from(api_key_raw);
-                Box::new(
-                    AnthropicProvider::new(api_key, &model, DEFAULT_MAX_TOKENS)
-                        .map_err(|e| anyhow::anyhow!("failed to create Anthropic provider: {e}"))?,
-                )
+                other => bail!("unknown provider '{other}'. Available: anthropic, openai"),
             }
-            other => bail!("unknown provider '{other}'. Available: anthropic, openai"),
-        }
-    };
+        };
 
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
@@ -1266,6 +1286,7 @@ async fn run_agent(
         output,
         &user_id,
     );
+    agent.with_show_thinking(show_thinking);
 
     // Attach proactive memory injection if store is available (M6d).
     #[cfg(feature = "memory")]
@@ -1408,6 +1429,8 @@ async fn main() -> Result<()> {
             sandbox_bash,
             #[cfg(feature = "mcp")]
             mcp_config,
+            thinking_budget,
+            show_thinking,
         } => {
             run_agent(
                 policy_path,
@@ -1423,6 +1446,8 @@ async fn main() -> Result<()> {
                 sandbox_bash,
                 #[cfg(feature = "mcp")]
                 mcp_config,
+                thinking_budget,
+                show_thinking,
             )
             .await
         }

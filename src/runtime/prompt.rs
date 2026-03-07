@@ -79,6 +79,8 @@ pub fn serialize_messages_for_prompt(messages: &[crate::providers::Message]) -> 
                         ContentBlock::ToolUse { name, input, .. } => {
                             out.push_str(&format!("[tool_use: {name}({input})]"));
                         }
+                        // Thinking blocks are internal reasoning, not conversation content.
+                        ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {}
                     }
                 }
                 out.push('\n');
@@ -243,6 +245,29 @@ mod tests {
         }];
         let result = serialize_messages_for_prompt(&messages);
         assert!(result.contains("Tool Error: action not permitted"));
+    }
+
+    #[test]
+    fn serialize_messages_thinking_blocks_excluded() {
+        use crate::providers::{ContentBlock, Message, StopReason};
+        let messages = vec![Message::Assistant {
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "internal reasoning".to_owned(),
+                },
+                ContentBlock::RedactedThinking {
+                    data: "base64data".to_owned(),
+                },
+                ContentBlock::Text {
+                    text: "visible answer".to_owned(),
+                },
+            ],
+            stop_reason: StopReason::EndTurn,
+        }];
+        let result = serialize_messages_for_prompt(&messages);
+        assert!(result.contains("visible answer"));
+        assert!(!result.contains("internal reasoning"));
+        assert!(!result.contains("base64data"));
     }
 
     #[test]

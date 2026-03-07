@@ -100,6 +100,8 @@ pub struct AgentLoop<A: ApprovalGate, O: OutputSink> {
     /// Empty map = all costs recorded as $0.00 (no DB or no pricing configured).
     #[cfg(feature = "postgres")]
     pricing_table: crate::providers::pricing::PricingTable,
+    /// Whether to emit thinking blocks to the output sink (M14a).
+    show_thinking: bool,
 }
 
 impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
@@ -131,6 +133,7 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
             cost_store: None,
             #[cfg(feature = "postgres")]
             pricing_table: std::collections::HashMap::new(),
+            show_thinking: false,
         }
     }
 
@@ -205,6 +208,11 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
             "session attached"
         );
         Ok(())
+    }
+
+    /// Enable or disable emitting thinking blocks to the output sink (M14a).
+    pub fn with_show_thinking(&mut self, show: bool) {
+        self.show_thinking = show;
     }
 
     /// Read-only view of the conversation history.
@@ -722,6 +730,15 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                     }
                     ContentBlock::ToolUse { id, name, input } => {
                         tool_uses.push((id.clone(), name.clone(), input.clone()));
+                    }
+                    ContentBlock::Thinking { thinking } => {
+                        tracing::debug!(len = thinking.len(), "thinking block");
+                        if self.show_thinking {
+                            self.output.emit(OutputEvent::Thinking(thinking)).await;
+                        }
+                    }
+                    ContentBlock::RedactedThinking { .. } => {
+                        tracing::debug!("redacted thinking block");
                     }
                 }
             }

@@ -18,6 +18,8 @@ pub enum OutputEvent<'a> {
     ToolError(&'a str),
     /// Runtime warning (e.g., max iterations reached).
     Warning(&'a str),
+    /// Extended thinking output from the model (M14a).
+    Thinking(&'a str),
 }
 
 /// Abstraction over output delivery. Generic parameter on `AgentLoop`,
@@ -48,6 +50,7 @@ impl OutputSink for StdoutSink {
             OutputEvent::ToolOutput(output) => println!("{output}"),
             OutputEvent::ToolError(err) => println!("[ERROR] {err}"),
             OutputEvent::Warning(msg) => println!("[WARNING] {msg}"),
+            OutputEvent::Thinking(text) => println!("[THINKING] {text}"),
         }
     }
 }

@@ -1,6 +1,6 @@
 # Secure Agent Runtime — Design Document
 
-**Status:** Draft — M13d Complete (Sub-agent tools, failover provider, provider configuration, multi-provider support)
+**Status:** Draft — M14a Complete (Extended thinking support, sub-agent tools, failover, multi-provider)
 **Author:** Kenn Williamson  
 **Date:** February 2026
 

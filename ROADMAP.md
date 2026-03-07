@@ -380,12 +380,14 @@ Research findings:
 
 **Goal:** The agent communicates clearly during autonomous work: recapitulates understanding, shows heartbeat during execution, presents clean results. Extended thinking enables complex code reasoning.
 
-### M14a: Extended Thinking Support
-- [ ] Add `Thinking { thinking: String }` to wire `ResponseContentBlock` (currently only `Text` and `ToolUse`)
-- [ ] Add `ContentBlock::Thinking` to internal types
-- [ ] Enable extended thinking in Anthropic API request when configured (`anthropic-beta` header)
-- [ ] Thinking blocks logged via tracing but NOT emitted to OutputSink by default — available in debug/verbose mode
-- [ ] Feature-gated or config-gated (not all providers support thinking blocks)
+### M14a: Extended Thinking Support (complete)
+- [x] Add `Thinking { thinking: String }` and `RedactedThinking { data: String }` to wire types and internal `ContentBlock`
+- [x] `ThinkingConfig` in Anthropic wire request — `thinking_budget` config-gated (not all providers support thinking)
+- [x] Thinking blocks logged via tracing, emitted to `OutputSink` only when `--show-thinking` is set
+- [x] Token estimation for thinking/redacted blocks; excluded from summarization prompts
+- [x] OpenAI provider skips thinking blocks; Telegram sink ignores them (no-op)
+- [x] CLI: `--thinking-budget <tokens>` + `--show-thinking` flags; Telegram: `CHERUB_THINKING_BUDGET` env var
+- [x] Provider config TOML: `thinking_budget` field in `ProviderDef`
 
 ### M14b: Recapitulation Pattern
 - [ ] System prompt instruction: model begins each response by briefly restating its understanding of the task (1-2 sentences), then proceeds with execution
@@ -419,6 +421,12 @@ M12b (pricing config) ──┼── M12c (budget constraints) ── M12d (CLI
 
 M14a-c are independent — can parallel with M12/M13
 M14d depends on M14c
+
+M15a (hook trait) ── M15b (output stashing, first hook consumer)
+M16a (complexity scorer) ── M16b (smart routing provider) ── depends on M13b (provider config)
+M17a (response cache) — independent, can parallel with M15/M16
+M18a-c are independent of each other
+M18b (streaming) should precede Web UI (Beyond M18)
 ```
 
 ---
@@ -432,7 +440,106 @@ M14d depends on M14c
 
 ---
 
-## Beyond M14
+## Milestone 15: Lifecycle Hooks
+
+**Goal:** Pluggable interception points in the agent loop. External code can observe and transform events at well-defined boundaries without modifying the core runtime. Hooks are not plugins — they run in-process and are registered at startup. Security invariant: hooks cannot bypass enforcement or forge capability tokens.
+
+### Hook Points
+
+Six interception points, matching the natural boundaries in `run_turn()`:
+
+| Hook | Fires | Can modify | Use cases |
+|------|-------|------------|-----------|
+| `BeforeInbound` | After user message received, before push to session | User content (filter, enrich, redact PII) | Input preprocessing, content filtering |
+| `BeforeProviderCall` | Before `provider.complete()` | System prompt, message list (read-only inspection) | Logging, compliance checks, payload mutation |
+| `AfterProviderCall` | After response received, before processing | Response content (read-only inspection) | Response logging, latency tracking |
+| `BeforeToolCall` | After enforcement decision, before execution | Tool params (read-only inspection) | Parameter logging, side-channel checks |
+| `AfterToolCall` | After tool execution, before result pushed to session | Tool result (transform, truncate, stash) | Output stashing, result transformation |
+| `BeforeCompaction` | Before summarizing old messages | (read-only) | Custom pre-compaction extraction |
+
+### Design Constraints
+
+- Hooks are a `Vec<Box<dyn Hook>>` on `AgentLoop`, registered via builder method
+- `Hook` trait with default no-op impls for each point (implement only what you need)
+- Hooks run sequentially in registration order (no parallelism — predictable ordering)
+- Hooks cannot create `CapabilityToken`s or call tools directly
+- Hook errors are non-fatal (logged, skipped) — a broken hook never blocks the agent
+- No feature flag — always available (zero-cost when no hooks registered)
+
+### M15a: Hook Trait + Registration
+- [ ] `Hook` trait with default no-op methods for all 6 points
+- [ ] `AgentLoop::with_hook()` builder method (pushes to `Vec<Box<dyn Hook>>`)
+- [ ] Hook dispatch at each point in `run_turn()`
+- [ ] Tests: hook ordering, error resilience, no-op overhead
+
+### M15b: Tool Output Stashing (first hook consumer)
+- [ ] `AfterToolCall` hook that truncates tool results exceeding a size threshold
+- [ ] Stashed output written to workspace file, tool result replaced with file reference
+- [ ] Configurable threshold (default 256 KiB)
+- [ ] Prevents context window overflow from large tool outputs
+
+---
+
+## Milestone 16: Smart Routing
+
+**Goal:** Automatically route simple queries to cheaper/faster models, reserving the primary model for complex reasoning. Cost optimization without manual sub-agent delegation.
+
+Inspired by IronClaw's 13-dimension complexity scorer, but implemented as a decorator provider that routes through the enforcement layer (cherub-idiomatic).
+
+### M16a: Complexity Scorer
+- [ ] `ComplexityScore` struct with weighted dimensions (reasoning indicators, code markers, multi-step signals, domain keywords, token estimate)
+- [ ] `score(user_message) -> u32` pure function (0-100 scale)
+- [ ] 4 tiers: Flash (0-15), Standard (16-40), Pro (41-65), Frontier (66+)
+- [ ] Pattern overrides for deterministic fast-path (e.g., greetings → Flash)
+- [ ] Configurable weights via TOML
+
+### M16b: Smart Routing Provider
+- [ ] `SmartRoutingProvider` implementing `Provider` — wraps two child providers (cheap + primary)
+- [ ] Routes based on complexity score: Flash/Standard → cheap, Pro/Frontier → primary
+- [ ] Structured tracing: which model was selected and why
+- [ ] Falls back to primary on cheap-model error
+- [ ] Cost tracking attributes usage to correct model
+
+---
+
+## Milestone 17: Response Caching
+
+**Goal:** Cache non-tool-calling LLM responses to avoid redundant API calls. Pure cost/latency optimization.
+
+### M17a: In-Memory LLM Cache
+- [ ] SHA-256 key derived from (model_name, messages, tool_definitions)
+- [ ] TTL-based expiry (default 1 hour, configurable)
+- [ ] LRU eviction (default max 1000 entries)
+- [ ] Tool-calling responses never cached (side effects)
+- [ ] `CachedProvider` decorator wrapping any `Box<dyn Provider>`
+- [ ] Stats logging (hit rate, cache size) via tracing
+- [ ] Configurable in providers TOML: `cache = { ttl_secs = 3600, max_entries = 1000 }`
+
+---
+
+## Milestone 18: Extended Tooling
+
+**Goal:** Close remaining tooling gaps vs. competitors.
+
+### M18a: WASM Extension Versioning
+- [ ] `version` field in WASM tool manifest (semver from Cargo.toml)
+- [ ] WIT compatibility validation before loading — reject version mismatches
+- [ ] Structured error on version mismatch with expected vs. actual
+
+### M18b: Streaming Responses
+- [ ] SSE streaming for CLI (text appears incrementally)
+- [ ] Provider trait extended with optional `complete_streaming()` method
+- [ ] Anthropic SSE parser over `reqwest::Response::bytes_stream()`
+- [ ] OpenAI SSE streaming support
+
+### M18c: Parallel Tool Execution
+- [ ] When model returns multiple `tool_use` blocks, execute independent tools concurrently
+- [ ] `tokio::JoinSet` for parallel execution with individual timeouts
+- [ ] Sequential fallback for tools with declared dependencies
+
+---
+
+## Beyond M18
 
 These are real goals but not yet planned into milestones:
 
@@ -445,6 +552,10 @@ These are real goals but not yet planned into milestones:
 - Policy generation tooling (analyze a tool's actions, suggest tier classifications)
 - Discord connector
 - Slack connector
+- Web UI / gateway (JSON-RPC over WebSocket control plane)
+- Session branching / undo-redo (tree-structured session history)
+- Dual DB backend (libSQL/Turso for embedded zero-dependency mode)
+- Skill/extension system (user-extensible prompt-based skills with trust tiers)
 
 ---
 

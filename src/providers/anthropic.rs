@@ -22,6 +22,7 @@ pub struct AnthropicProvider {
     pub(crate) max_tokens: u32,
     api_url: String,
     retry_config: RetryConfig,
+    thinking_budget: Option<u32>,
 }
 
 impl AnthropicProvider {
@@ -40,12 +41,22 @@ impl AnthropicProvider {
             max_tokens,
             api_url: API_URL.to_owned(),
             retry_config: RetryConfig::new(),
+            thinking_budget: None,
         })
     }
 
     /// Override the API URL. Intended for testing with wiremock.
     pub fn with_url(mut self, url: String) -> Self {
         self.api_url = url;
+        self
+    }
+
+    /// Enable extended thinking with the given token budget.
+    ///
+    /// `budget` must be less than `max_tokens`. If `budget >= max_tokens`,
+    /// it is clamped to `max_tokens - 1`.
+    pub fn with_thinking_budget(mut self, budget: u32) -> Self {
+        self.thinking_budget = Some(budget.min(self.max_tokens.saturating_sub(1)));
         self
     }
 }
@@ -66,6 +77,11 @@ impl Provider for AnthropicProvider {
             let wire_messages = wire::messages_to_wire(messages);
             let wire_tools: Vec<_> = tools.iter().map(wire::WireTool::from).collect();
 
+            let thinking = self.thinking_budget.map(|budget| wire::ThinkingConfig {
+                config_type: "enabled",
+                budget_tokens: budget,
+            });
+
             let body = RequestBody {
                 model: &self.model,
                 max_tokens: self.max_tokens,
@@ -73,6 +89,7 @@ impl Provider for AnthropicProvider {
                 messages: wire_messages,
                 tools: wire_tools,
                 stream: false,
+                thinking,
             };
 
             let json_body = serde_json::to_vec(&body)
@@ -202,6 +219,7 @@ mod tests {
             messages: wire_messages,
             tools: wire_tools,
             stream: false,
+            thinking: None,
         };
 
         let json = serde_json::to_value(&body).unwrap();

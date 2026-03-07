@@ -182,6 +182,11 @@ async fn main() -> Result<()> {
     let (session_tx, session_rx) = mpsc::channel::<SessionCommand>(256);
     let (approval_tx, approval_rx) = mpsc::channel::<ApprovalMessage>(64);
 
+    // Extended thinking budget (M14a).
+    let thinking_budget: Option<u32> = std::env::var("CHERUB_THINKING_BUDGET")
+        .ok()
+        .and_then(|v| v.parse().ok());
+
     // Session config
     let config = SessionConfig {
         bot: bot.clone(),
@@ -198,6 +203,7 @@ async fn main() -> Result<()> {
         embedder,
         #[cfg(feature = "container")]
         sandbox_bash_runtime,
+        thinking_budget,
     };
 
     // Spawn session manager and approval manager tasks.

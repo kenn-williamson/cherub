@@ -8,6 +8,13 @@ use super::{ApiUsage, ContentBlock, Message, StopReason, ToolDefinition, UserCon
 // --- Request types ---
 
 #[derive(Serialize)]
+pub(crate) struct ThinkingConfig {
+    #[serde(rename = "type")]
+    pub config_type: &'static str,
+    pub budget_tokens: u32,
+}
+
+#[derive(Serialize)]
 pub(crate) struct RequestBody<'a> {
     pub model: &'a str,
     pub max_tokens: u32,
@@ -16,6 +23,8 @@ pub(crate) struct RequestBody<'a> {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<WireTool>,
     pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingConfig>,
 }
 
 #[derive(Serialize)]
@@ -50,6 +59,10 @@ pub(crate) enum WireContentBlock {
     },
     #[serde(rename = "image")]
     Image { source: WireImageSource },
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String },
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking { data: String },
 }
 
 #[derive(Serialize)]
@@ -97,6 +110,10 @@ pub(crate) enum ResponseContentBlock {
         name: String,
         input: serde_json::Value,
     },
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String },
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking { data: String },
 }
 
 // --- Conversions ---
@@ -168,6 +185,12 @@ pub(crate) fn messages_to_wire(messages: &[Message]) -> Vec<WireMessage> {
                             name: name.clone(),
                             input: input.clone(),
                         },
+                        ContentBlock::Thinking { thinking } => WireContentBlock::Thinking {
+                            thinking: thinking.clone(),
+                        },
+                        ContentBlock::RedactedThinking { data } => {
+                            WireContentBlock::RedactedThinking { data: data.clone() }
+                        }
                     })
                     .collect();
                 wire.push(WireMessage {
@@ -224,6 +247,10 @@ pub(crate) fn response_to_message(resp: ResponseBody) -> (Message, Option<ApiUsa
             ResponseContentBlock::Text { text } => ContentBlock::Text { text },
             ResponseContentBlock::ToolUse { id, name, input } => {
                 ContentBlock::ToolUse { id, name, input }
+            }
+            ResponseContentBlock::Thinking { thinking } => ContentBlock::Thinking { thinking },
+            ResponseContentBlock::RedactedThinking { data } => {
+                ContentBlock::RedactedThinking { data }
             }
         })
         .collect();
@@ -333,6 +360,7 @@ mod tests {
                 input_schema: json!({"type": "object", "properties": {"command": {"type": "string"}}}),
             }],
             stream: false,
+            thinking: None,
         };
         let json = serde_json::to_value(&body).unwrap();
         assert_eq!(json["model"], "claude-sonnet-4-20250514");
@@ -585,6 +613,125 @@ mod tests {
         assert_eq!(usage.output_tokens, 50);
         assert_eq!(usage.cache_creation_tokens, 2000);
         assert_eq!(usage.cache_read_tokens, 5000);
+    }
+
+    #[test]
+    fn response_parsing_thinking_blocks() {
+        let json_str = r#"{
+            "content": [
+                {"type": "thinking", "thinking": "Let me work through this..."},
+                {"type": "text", "text": "The answer is 42."}
+            ],
+            "stop_reason": "end_turn"
+        }"#;
+        let resp: ResponseBody = serde_json::from_str(json_str).unwrap();
+        assert_eq!(resp.content.len(), 2);
+        let (msg, _) = response_to_message(resp);
+        match msg {
+            Message::Assistant { content, .. } => {
+                assert_eq!(content.len(), 2);
+                match &content[0] {
+                    ContentBlock::Thinking { thinking } => {
+                        assert_eq!(thinking, "Let me work through this...");
+                    }
+                    _ => panic!("expected Thinking block"),
+                }
+                match &content[1] {
+                    ContentBlock::Text { text } => assert_eq!(text, "The answer is 42."),
+                    _ => panic!("expected Text block"),
+                }
+            }
+            _ => panic!("expected Assistant message"),
+        }
+    }
+
+    #[test]
+    fn response_parsing_redacted_thinking() {
+        let json_str = r#"{
+            "content": [
+                {"type": "redacted_thinking", "data": "c29tZSBiYXNlNjQ="},
+                {"type": "text", "text": "Done."}
+            ],
+            "stop_reason": "end_turn"
+        }"#;
+        let resp: ResponseBody = serde_json::from_str(json_str).unwrap();
+        let (msg, _) = response_to_message(resp);
+        match msg {
+            Message::Assistant { content, .. } => {
+                assert_eq!(content.len(), 2);
+                match &content[0] {
+                    ContentBlock::RedactedThinking { data } => {
+                        assert_eq!(data, "c29tZSBiYXNlNjQ=");
+                    }
+                    _ => panic!("expected RedactedThinking block"),
+                }
+            }
+            _ => panic!("expected Assistant message"),
+        }
+    }
+
+    #[test]
+    fn thinking_blocks_round_trip_through_wire() {
+        // Build a message with thinking blocks, serialize to wire, verify format.
+        let messages = vec![Message::Assistant {
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "hmm...".to_owned(),
+                },
+                ContentBlock::RedactedThinking {
+                    data: "abc123".to_owned(),
+                },
+                ContentBlock::Text {
+                    text: "answer".to_owned(),
+                },
+            ],
+            stop_reason: StopReason::EndTurn,
+        }];
+        let wire = messages_to_wire(&messages);
+        assert_eq!(wire.len(), 1);
+        let json = serde_json::to_value(&wire[0]).unwrap();
+        let blocks = json["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["thinking"], "hmm...");
+        assert_eq!(blocks[1]["type"], "redacted_thinking");
+        assert_eq!(blocks[1]["data"], "abc123");
+        assert_eq!(blocks[2]["type"], "text");
+        assert_eq!(blocks[2]["text"], "answer");
+    }
+
+    #[test]
+    fn request_body_with_thinking_config() {
+        let body = RequestBody {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: 16000,
+            system: "test",
+            messages: vec![],
+            tools: vec![],
+            stream: false,
+            thinking: Some(ThinkingConfig {
+                config_type: "enabled",
+                budget_tokens: 4000,
+            }),
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["thinking"]["type"], "enabled");
+        assert_eq!(json["thinking"]["budget_tokens"], 4000);
+    }
+
+    #[test]
+    fn request_body_without_thinking_config() {
+        let body = RequestBody {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: 4096,
+            system: "test",
+            messages: vec![],
+            tools: vec![],
+            stream: false,
+            thinking: None,
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        assert!(json.get("thinking").is_none());
     }
 
     #[test]

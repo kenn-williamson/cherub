@@ -68,6 +68,11 @@ pub struct ProviderDef {
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
 
+    /// Extended thinking budget in tokens (Anthropic-only, M14a).
+    /// When set, enables extended thinking with this token budget.
+    #[serde(default)]
+    pub thinking_budget: Option<u32>,
+
     /// For failover providers (M13c): ordered list of provider names to try.
     #[serde(default)]
     pub providers: Option<Vec<String>>,
@@ -250,11 +255,20 @@ pub fn instantiate_provider(def: &ProviderDef) -> Result<Box<dyn Provider>, Cher
             if key_raw.is_empty() {
                 return Err(CherubError::Config(format!("{key_env} is empty")));
             }
-            let provider =
+            let mut provider =
                 AnthropicProvider::new(SecretString::from(key_raw), &def.model, def.max_tokens)?;
+            if let Some(budget) = def.thinking_budget {
+                provider = provider.with_thinking_budget(budget);
+            }
             Ok(Box::new(provider))
         }
         ProviderType::Openai => {
+            if def.thinking_budget.is_some() {
+                tracing::warn!(
+                    model = %def.model,
+                    "thinking_budget is only supported by Anthropic providers; ignored for OpenAI"
+                );
+            }
             let api_key = def
                 .api_key_env
                 .as_deref()
@@ -514,6 +528,7 @@ system_prompt = "test"
             api_key_env: None,
             base_url: Some("http://localhost:11434/v1".to_owned()),
             max_tokens: 2048,
+            thinking_budget: None,
             providers: None,
         };
         let provider = instantiate_provider(&def).expect("should succeed without API key");
@@ -529,6 +544,7 @@ system_prompt = "test"
             api_key_env: Some("CHERUB_TEST_NONEXISTENT_KEY_12345".to_owned()),
             base_url: None,
             max_tokens: 4096,
+            thinking_budget: None,
             providers: None,
         };
         match instantiate_provider(&def) {
