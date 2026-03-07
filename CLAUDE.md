@@ -22,7 +22,7 @@ cherub/
 │   ├── runtime/
 │   │   ├── mod.rs            # AgentLoop<A, O> + run_turn() (Box<dyn Provider>, generic over ApprovalGate/OutputSink)
 │   │   ├── approval.rs       # ApprovalGate trait, CliApprovalGate, EscalationContext
-│   │   ├── output.rs         # OutputSink trait, StdoutSink, NullSink
+│   │   ├── output.rs         # OutputSink trait (emit/turn_start/turn_end), StdoutSink, NullSink
 │   │   ├── session.rs        # Conversation state, message history, optional persistence
 │   │   ├── prompt.rs         # System prompt builder
 │   │   └── tokens.rs         # Token estimation for context compaction
@@ -99,7 +99,7 @@ cherub/
 │       ├── mod.rs             # Module declarations
 │       ├── approval.rs        # TelegramApprovalGate (inline keyboard + oneshot channels)
 │       ├── connector.rs       # Message/callback routing, photo download + base64
-│       ├── output.rs          # TelegramSink (OutputSink for Telegram chats)
+│       ├── output.rs          # TelegramSink (OutputSink for Telegram chats, turn batching M14d)
 │       └── session.rs         # Per-chat session manager (channel-based, no Arc<Mutex>)
 ├── tests/
 │   ├── adversarial.rs        # Mock-provider adversarial integration tests (27 tests)
@@ -125,6 +125,7 @@ cherub/
 │   ├── sub_agent_integration.rs # Sub-agent tool integration tests (M13d, 10 tests, no API key)
 │   ├── telegram_approval.rs  # Telegram approval flow tests (feature-gated)
 │   ├── mcp_integration.rs   # MCP full flow tests: spawn → discover → enforce → execute (feature = "mcp", 12 tests)
+│   ├── output_events.rs    # Output event integration tests: recapitulation, progress, turn lifecycle (M14b/c, 7 tests)
 │   └── ui/
 │       ├── capability_token_private.rs      # Proves CapabilityToken can't be constructed outside enforcement
 │       └── capability_token_private.stderr  # Expected compiler error output

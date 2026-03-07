@@ -389,23 +389,23 @@ Research findings:
 - [x] CLI: `--thinking-budget <tokens>` + `--show-thinking` flags; Telegram: `CHERUB_THINKING_BUDGET` env var
 - [x] Provider config TOML: `thinking_budget` field in `ProviderDef`
 
-### M14b: Recapitulation Pattern
-- [ ] System prompt instruction: model begins each response by briefly restating its understanding of the task (1-2 sentences), then proceeds with execution
-- [ ] `OutputEvent::Recapitulation(&'a str)` for sinks that want to style it differently
-- [ ] Prompt-level pattern, not structural — model naturally produces recapitulation before tool calls
+### M14b: Recapitulation Pattern (complete)
+- [x] System prompt instruction: model begins each response by briefly restating its understanding of the task (1-2 sentences), then proceeds with execution
+- [x] `OutputEvent::Recapitulation(&'a str)` for sinks that want to style it differently
+- [x] Prompt-level pattern, not structural — model naturally produces recapitulation before tool calls
 
-### M14c: Heartbeat / Progress Indicator
-- [ ] `OutputEvent::Progress { tool: &'a str, status: &'a str }` — emitted when a tool starts executing
-- [ ] CLI sink: spinner line (`[working] running tests...`) overwritten by next event
-- [ ] Telegram sink: edit last message to show current status (avoids message spam)
-- [ ] Periodic `Progress` events during long tool executions
+### M14c: Heartbeat / Progress Indicator (complete)
+- [x] `OutputEvent::Progress { tool: &'a str, status: &'a str }` — emitted when a tool starts executing
+- [x] CLI sink: spinner line (`[working] running tests...`) overwritten by next event
+- [x] Telegram sink: edit last message to show current status (avoids message spam)
+- [x] Periodic `Progress` events during long tool executions
 
-### M14d: Turn-Level Output Batching (Telegram)
-- [ ] `TelegramSink` collects events during a turn instead of sending each immediately
-- [ ] At turn end: single message with recapitulation at top, tool summary (collapsed), final result
-- [ ] Uses `edit_message` to update a single status message during the turn
-- [ ] Falls back to current behavior in debug/verbose mode
-- [ ] Subsumes "Telegram output verbosity modes" from ROADMAP_DEFERRED.md
+### M14d: Turn-Level Output Batching (Telegram) (complete)
+- [x] `TelegramSink` collects events during a turn instead of sending each immediately
+- [x] At turn end: single message with recapitulation at top, tool summary (collapsed), final result
+- [x] Uses `edit_message` to update a single status message during the turn
+- [x] Falls back to current behavior in debug/verbose mode
+- [x] Subsumes "Telegram output verbosity modes" from ROADMAP_DEFERRED.md
 
 ---
 

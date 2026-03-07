@@ -1,6 +1,6 @@
 # Secure Agent Runtime — Design Document
 
-**Status:** Draft — M14a Complete (Extended thinking support, sub-agent tools, failover, multi-provider)
+**Status:** Draft — M14 Complete (Extended thinking, recapitulation, progress indicators, Telegram batching)
 **Author:** Kenn Williamson  
 **Date:** February 2026
 

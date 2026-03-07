@@ -616,7 +616,6 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
 
     /// Inner implementation of `run_turn`, separated so lifecycle calls always fire.
     async fn run_turn_inner(&mut self, content: Vec<UserContent>) -> Result<(), CherubError> {
-
         // Extract text for injection query BEFORE content is moved into the session.
         #[cfg(feature = "memory")]
         let user_query = extract_user_text(&content);
@@ -739,9 +738,7 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                 match block {
                     ContentBlock::Text { text } if !text.is_empty() => {
                         if !first_text_emitted && !tool_use_seen {
-                            self.output
-                                .emit(OutputEvent::Recapitulation(text))
-                                .await;
+                            self.output.emit(OutputEvent::Recapitulation(text)).await;
                             first_text_emitted = true;
                         } else {
                             self.output.emit(OutputEvent::Text(text)).await;

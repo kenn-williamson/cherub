@@ -93,10 +93,7 @@ impl TelegramSink {
         let existing = { *self.status_message_id.lock().unwrap() };
         if let Some(msg_id) = existing {
             // Edit existing status message.
-            let _ = self
-                .bot
-                .edit_message_text(self.chat_id, msg_id, text)
-                .await;
+            let _ = self.bot.edit_message_text(self.chat_id, msg_id, text).await;
         } else {
             // Send new status message.
             if let Ok(msg) = self.bot.send_message(self.chat_id, text).await {
@@ -387,10 +384,7 @@ mod tests {
             recapitulation: Some("You want to list files".to_owned()),
             ..TurnBatch::new()
         };
-        assert_eq!(
-            compose_turn_message(&batch),
-            "_You want to list files_"
-        );
+        assert_eq!(compose_turn_message(&batch), "_You want to list files_");
     }
 
     #[test]
