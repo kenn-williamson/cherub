@@ -1,6 +1,6 @@
 # Secure Agent Runtime — Design Document
 
-**Status:** Draft — M13b Complete (Provider configuration via TOML, sub-agent tool design, anchoring bias research)
+**Status:** Draft — M13c Complete (Failover provider with circuit breaker, provider configuration, sub-agent tool design)
 **Author:** Kenn Williamson  
 **Date:** February 2026
 

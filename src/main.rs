@@ -910,17 +910,17 @@ async fn run_agent(
     let provider: Box<dyn cherub::providers::Provider> = if let Some(ref config_path) =
         providers_config
     {
-        use cherub::providers::config::{ProvidersConfig, instantiate_provider};
+        use cherub::providers::config::{ProvidersConfig, instantiate_named_provider};
 
         let config = ProvidersConfig::load(config_path)
             .map_err(|e| anyhow::anyhow!("failed to load providers config: {e}"))?;
         info!(config = %config_path.display(), "providers config loaded");
 
-        let default_def = config
-            .providers
-            .get("default")
-            .context("providers config must contain a [providers.default] entry")?;
-        instantiate_provider(default_def)
+        // Validate that "default" exists.
+        if !config.providers.contains_key("default") {
+            bail!("providers config must contain a [providers.default] entry");
+        }
+        instantiate_named_provider(&config, "default", &mut Vec::new())
             .map_err(|e| anyhow::anyhow!("failed to create default provider: {e}"))?
     } else {
         match provider_type.as_str() {

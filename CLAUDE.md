@@ -69,7 +69,8 @@ cherub/
 │   ├── providers/
 │   │   ├── mod.rs            # Provider trait, Message/UserContent/ContentBlock types (serde + Clone)
 │   │   ├── anthropic.rs      # Anthropic API provider (non-streaming)
-│   │   ├── config.rs         # ProvidersConfig + ProviderDef + SubAgentDef + instantiate_provider() (M13b)
+│   │   ├── config.rs         # ProvidersConfig + ProviderDef + SubAgentDef + instantiate_provider/instantiate_named_provider (M13b/c)
+│   │   ├── failover.rs       # FailoverProvider + CircuitState: ordered failover with circuit breaker (M13c)
 │   │   ├── openai.rs         # OpenAI-compatible API provider (M13a: OpenAI, Ollama, vLLM, Groq, etc.)
 │   │   ├── openai_wire.rs    # Serde structs for OpenAI Chat Completions wire format (private)
 │   │   ├── pricing.rs        # ModelPricing struct + PricingTable + lookup_pricing() + compute_cost() (M12; DB-backed pricing)
@@ -115,6 +116,7 @@ cherub/
 │   ├── redteam.rs            # Live model adversarial tests (#[ignore], requires API key)
 │   ├── compaction.rs         # Context compaction integration tests (mock provider, no API key)
 │   ├── cost_store.rs         # PgCostStore integration tests (M12, feature = "sessions", auto-starts DB)
+│   ├── failover_integration.rs  # Failover provider integration tests (wiremock, no API key, M13c)
 │   ├── openai_retry_integration.rs  # OpenAI API retry integration tests (wiremock, no API key, M13a)
 │   ├── retry_integration.rs  # API retry integration tests (wiremock, no API key)
 │   ├── session_persistence.rs  # Session persistence integration tests (feature = "sessions", auto-starts DB)

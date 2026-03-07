@@ -128,15 +128,16 @@ async fn chat_session(
     let provider: Box<dyn crate::providers::Provider> = if let Some(ref providers_config) =
         config.providers_config
     {
-        // Use config file — instantiate the "default" provider.
-        let default_def = match providers_config.providers.get("default") {
-            Some(def) => def,
-            None => {
-                warn!(chat_id = %chat_id, "providers config missing [providers.default]");
-                return;
-            }
-        };
-        match crate::providers::config::instantiate_provider(default_def) {
+        // Use config file — instantiate the "default" provider (supports failover).
+        if !providers_config.providers.contains_key("default") {
+            warn!(chat_id = %chat_id, "providers config missing [providers.default]");
+            return;
+        }
+        match crate::providers::config::instantiate_named_provider(
+            providers_config,
+            "default",
+            &mut Vec::new(),
+        ) {
             Ok(p) => p,
             Err(e) => {
                 warn!(chat_id = %chat_id, error = %e, "failed to create provider from config");

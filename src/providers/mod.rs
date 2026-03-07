@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod config;
+pub mod failover;
 pub mod openai;
 pub(crate) mod openai_wire;
 pub mod pricing;

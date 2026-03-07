@@ -13,6 +13,7 @@ use serde::Deserialize;
 
 use super::Provider;
 use super::anthropic::AnthropicProvider;
+use super::failover::FailoverProvider;
 use super::openai::OpenAiProvider;
 use crate::error::CherubError;
 
@@ -150,6 +151,28 @@ impl ProvidersConfig {
                     "provider '{name}': 'providers' list is only valid for failover type"
                 )));
             }
+
+            // Failover children must reference existing providers and the list must be non-empty.
+            if let Some(ref children) = def.providers {
+                if children.is_empty() {
+                    return Err(CherubError::Config(format!(
+                        "provider '{name}': failover providers list must not be empty"
+                    )));
+                }
+                for child in children {
+                    if !self.providers.contains_key(child) {
+                        return Err(CherubError::Config(format!(
+                            "provider '{name}': references unknown child provider '{child}'"
+                        )));
+                    }
+                }
+            }
+        }
+
+        // Detect cycles in failover references via DFS.
+        for name in self.providers.keys() {
+            let mut ancestry = Vec::new();
+            self.detect_cycle(name, &mut ancestry)?;
         }
 
         // Validate sub-agent provider references.
@@ -164,12 +187,38 @@ impl ProvidersConfig {
 
         Ok(())
     }
+
+    /// DFS cycle detection for failover provider references.
+    fn detect_cycle(&self, name: &str, ancestry: &mut Vec<String>) -> Result<(), CherubError> {
+        if ancestry.contains(&name.to_owned()) {
+            ancestry.push(name.to_owned());
+            return Err(CherubError::Config(format!(
+                "provider cycle detected: {}",
+                ancestry.join(" -> ")
+            )));
+        }
+
+        let def = match self.providers.get(name) {
+            Some(d) => d,
+            None => return Ok(()), // Already validated above.
+        };
+
+        if let Some(ref children) = def.providers {
+            ancestry.push(name.to_owned());
+            for child in children {
+                self.detect_cycle(child, ancestry)?;
+            }
+            ancestry.pop();
+        }
+
+        Ok(())
+    }
 }
 
 /// Instantiate a concrete provider from a definition.
 ///
-/// Reads the API key from the environment variable named in `api_key_env`.
-/// Reusable by `main.rs`, `telegram.rs`, and sub-agent setup (M13d).
+/// Handles Anthropic and OpenAI types. For failover, use [`instantiate_named_provider`]
+/// which resolves child references recursively.
 pub fn instantiate_provider(def: &ProviderDef) -> Result<Box<dyn Provider>, CherubError> {
     match def.provider_type {
         ProviderType::Anthropic => {
@@ -197,8 +246,58 @@ pub fn instantiate_provider(def: &ProviderDef) -> Result<Box<dyn Provider>, Cher
             Ok(Box::new(provider))
         }
         ProviderType::Failover => Err(CherubError::Config(
-            "failover provider type is not yet implemented (M13c)".to_owned(),
+            "use instantiate_named_provider() for failover types".to_owned(),
         )),
+    }
+}
+
+/// Instantiate a named provider from the config, resolving failover children recursively.
+///
+/// Uses DFS with `ancestry` for cycle detection (push on enter, pop on exit).
+/// Callers should pass `&mut Vec::new()` for the initial call.
+pub fn instantiate_named_provider(
+    config: &ProvidersConfig,
+    name: &str,
+    ancestry: &mut Vec<String>,
+) -> Result<Box<dyn Provider>, CherubError> {
+    // Cycle detection.
+    if ancestry.contains(&name.to_owned()) {
+        ancestry.push(name.to_owned());
+        return Err(CherubError::Config(format!(
+            "provider cycle detected: {}",
+            ancestry.join(" -> ")
+        )));
+    }
+
+    let def = config
+        .providers
+        .get(name)
+        .ok_or_else(|| CherubError::Config(format!("unknown provider '{name}'")))?;
+
+    match def.provider_type {
+        ProviderType::Failover => {
+            let children = def.providers.as_ref().ok_or_else(|| {
+                CherubError::Config(format!(
+                    "provider '{name}': failover type requires a 'providers' list"
+                ))
+            })?;
+
+            ancestry.push(name.to_owned());
+            let mut child_providers: Vec<Box<dyn Provider>> = Vec::new();
+            let mut child_names: Vec<String> = Vec::new();
+            for child_name in children {
+                let child = instantiate_named_provider(config, child_name, ancestry)?;
+                child_providers.push(child);
+                child_names.push(child_name.clone());
+            }
+            ancestry.pop();
+
+            Ok(Box::new(FailoverProvider::new(
+                child_providers,
+                child_names,
+            )))
+        }
+        _ => instantiate_provider(def),
     }
 }
 
@@ -420,21 +519,162 @@ system_prompt = "test"
     }
 
     #[test]
-    fn instantiate_failover_returns_error() {
-        let def = ProviderDef {
-            provider_type: ProviderType::Failover,
-            model: "failover".to_owned(),
-            api_key_env: None,
-            base_url: None,
-            max_tokens: 4096,
-            providers: Some(vec!["a".to_owned(), "b".to_owned()]),
-        };
-        match instantiate_provider(&def) {
-            Err(e) => assert!(
-                e.to_string().contains("not yet implemented"),
-                "unexpected error: {e}"
-            ),
-            Ok(_) => panic!("expected error for failover"),
-        }
+    fn instantiate_failover_via_named_provider() {
+        // Failover wrapping two local OpenAI providers (no API key needed).
+        let toml_str = r#"
+[providers.default]
+type = "failover"
+model = "failover"
+providers = ["local1", "local2"]
+
+[providers.local1]
+type = "openai"
+model = "llama3"
+base_url = "http://localhost:11434/v1"
+
+[providers.local2]
+type = "openai"
+model = "llama3-backup"
+base_url = "http://localhost:11435/v1"
+"#;
+        let config: ProvidersConfig = toml::from_str(toml_str).expect("should parse");
+        config.validate().expect("should validate");
+
+        let provider = instantiate_named_provider(&config, "default", &mut Vec::new())
+            .expect("should instantiate failover");
+        // max_output_tokens is min(4096, 4096).
+        assert_eq!(provider.max_output_tokens(), 4096);
+    }
+
+    #[test]
+    fn parse_failover_config() {
+        let toml_str = r#"
+[providers.default]
+type = "failover"
+model = "failover"
+providers = ["primary", "fallback"]
+
+[providers.primary]
+type = "openai"
+model = "gpt-4o"
+api_key_env = "OPENAI_API_KEY"
+
+[providers.fallback]
+type = "openai"
+model = "llama3"
+base_url = "http://localhost:11434/v1"
+"#;
+        let config: ProvidersConfig = toml::from_str(toml_str).expect("should parse");
+        config.validate().expect("should validate");
+
+        let default = &config.providers["default"];
+        assert_eq!(default.provider_type, ProviderType::Failover);
+        assert_eq!(
+            default.providers.as_deref(),
+            Some(&["primary".to_owned(), "fallback".to_owned()][..])
+        );
+    }
+
+    #[test]
+    fn validate_failover_unknown_child_ref() {
+        let toml_str = r#"
+[providers.default]
+type = "failover"
+model = "failover"
+providers = ["primary", "nonexistent"]
+
+[providers.primary]
+type = "openai"
+model = "gpt-4o"
+"#;
+        let config: ProvidersConfig = toml::from_str(toml_str).expect("should parse");
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown child provider 'nonexistent'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_failover_empty_list() {
+        let toml_str = r#"
+[providers.default]
+type = "failover"
+model = "failover"
+providers = []
+"#;
+        let config: ProvidersConfig = toml::from_str(toml_str).expect("should parse");
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_direct_cycle() {
+        let toml_str = r#"
+[providers.a]
+type = "failover"
+model = "failover"
+providers = ["a"]
+"#;
+        let config: ProvidersConfig = toml::from_str(toml_str).expect("should parse");
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("cycle detected"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_indirect_cycle() {
+        let toml_str = r#"
+[providers.a]
+type = "failover"
+model = "failover"
+providers = ["b"]
+
+[providers.b]
+type = "failover"
+model = "failover"
+providers = ["a"]
+"#;
+        let config: ProvidersConfig = toml::from_str(toml_str).expect("should parse");
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("cycle detected"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_diamond_ok() {
+        // Diamond: default → {a, b}, both a and b reference the same leaf.
+        // This is NOT a cycle — it's fine.
+        let toml_str = r#"
+[providers.default]
+type = "failover"
+model = "failover"
+providers = ["a", "b"]
+
+[providers.a]
+type = "failover"
+model = "failover"
+providers = ["leaf"]
+
+[providers.b]
+type = "failover"
+model = "failover"
+providers = ["leaf"]
+
+[providers.leaf]
+type = "openai"
+model = "llama3"
+base_url = "http://localhost:11434/v1"
+"#;
+        let config: ProvidersConfig = toml::from_str(toml_str).expect("should parse");
+        config.validate().expect("diamond should be valid");
     }
 }

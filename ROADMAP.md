@@ -354,13 +354,13 @@ Research findings:
 - [x] Cross-field validation: failover requires provider list, agents reference existing providers
 - [x] 14 unit tests: parsing, unknown field rejection, validation, instantiation
 
-### M13c: Failover Provider
-- [ ] `FailoverProvider` wraps `Vec<Box<dyn Provider>>` — legitimate `dyn Provider` boundary
-- [ ] `complete()` tries providers in order; on transient `CherubError::Provider`, tries next
-- [ ] Circuit breaker per provider: N consecutive failures → skip for cooldown period, auto-recover
-- [ ] Structured tracing: which provider tried, succeeded, failed and why
-- [ ] Cost tracking integration: record correct model name for each provider's `ApiUsage`
-- [ ] Configuration in providers TOML: `type = "failover"` with `providers = ["name1", "name2"]`
+### M13c: Failover Provider (complete)
+- [x] `FailoverProvider` wraps `Vec<Box<dyn Provider>>` — legitimate `dyn Provider` boundary
+- [x] `complete()` tries providers in order; on transient `CherubError::Provider`, tries next
+- [x] Circuit breaker per provider: N consecutive failures → skip for cooldown period, auto-recover
+- [x] Structured tracing: which provider tried, succeeded, failed and why
+- [x] Cost tracking integration: record correct model name for each provider's `ApiUsage`
+- [x] Configuration in providers TOML: `type = "failover"` with `providers = ["name1", "name2"]`
 
 ### M13d: Sub-Agent Tools
 - [ ] `SubAgentTool` struct: owns `Box<dyn Provider>`, system prompt, description, resource limits
