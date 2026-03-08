@@ -312,6 +312,11 @@ async fn chat_session(
         &user_id,
     );
 
+    // Attach output stashing hook (M15b).
+    agent.with_hook(Box::new(crate::runtime::hooks::OutputStashingHook::new(
+        std::path::Path::new(&cwd),
+    )));
+
     // Attach proactive memory injection if store is available (M6d).
     #[cfg(feature = "memory")]
     if let Some(store) = memory_store_for_injection {

@@ -1,4 +1,5 @@
 pub mod approval;
+pub mod hooks;
 pub mod output;
 pub mod prompt;
 pub mod session;
@@ -103,6 +104,9 @@ pub struct AgentLoop<A: ApprovalGate, O: OutputSink> {
     pricing_table: crate::providers::pricing::PricingTable,
     /// Whether to emit thinking blocks to the output sink (M14a).
     show_thinking: bool,
+    /// Lifecycle hooks (M15a). Dispatched at 6 points in the agent loop.
+    /// Errors are non-fatal — logged and skipped, never blocking execution.
+    hooks: Vec<Box<dyn hooks::Hook>>,
 }
 
 impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
@@ -135,6 +139,7 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
             #[cfg(feature = "postgres")]
             pricing_table: std::collections::HashMap::new(),
             show_thinking: false,
+            hooks: Vec::new(),
         }
     }
 
@@ -214,6 +219,14 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
     /// Enable or disable emitting thinking blocks to the output sink (M14a).
     pub fn with_show_thinking(&mut self, show: bool) {
         self.show_thinking = show;
+    }
+
+    /// Register a lifecycle hook (M15a).
+    ///
+    /// Hooks are dispatched in registration order at 6 points in the agent loop.
+    /// Hook errors are non-fatal — logged and skipped, never blocking execution.
+    pub fn with_hook(&mut self, hook: Box<dyn hooks::Hook>) {
+        self.hooks.push(hook);
     }
 
     /// Read-only view of the conversation history.
@@ -304,6 +317,16 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
             warn!("compaction split failed — not enough messages at clean boundary");
             return Ok(());
         };
+
+        // Hook: before_compaction.
+        hooks::dispatch_before_compaction(
+            &self.hooks,
+            &hooks::CompactionContext {
+                messages_to_compact: &old,
+                total_message_count: self.session.messages.len(),
+            },
+        )
+        .await;
 
         // Pre-compaction memory flush (feature-gated, non-fatal).
         #[cfg(feature = "memory")]
@@ -615,8 +638,18 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
     }
 
     /// Inner implementation of `run_turn`, separated so lifecycle calls always fire.
-    async fn run_turn_inner(&mut self, content: Vec<UserContent>) -> Result<(), CherubError> {
-        // Extract text for injection query BEFORE content is moved into the session.
+    async fn run_turn_inner(&mut self, mut content: Vec<UserContent>) -> Result<(), CherubError> {
+        // Hook: before_inbound — hooks can redact/transform user input.
+        hooks::dispatch_before_inbound(
+            &self.hooks,
+            &mut hooks::InboundContext {
+                content: &mut content,
+                user_id: &self.session.user_id,
+            },
+        )
+        .await;
+
+        // Extract text for injection query AFTER hooks have processed content.
         #[cfg(feature = "memory")]
         let user_query = extract_user_text(&content);
 
@@ -705,6 +738,17 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                 }
             }
 
+            // Hook: before_provider_call.
+            hooks::dispatch_before_provider_call(
+                &self.hooks,
+                &hooks::ProviderCallContext {
+                    system_prompt: &effective_system,
+                    messages: &self.session.messages,
+                    iteration,
+                },
+            )
+            .await;
+
             let (assistant_msg, usage) = self
                 .provider
                 .complete(
@@ -727,6 +771,17 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                 } => (content, stop_reason),
                 _ => return Err(CherubError::Provider("unexpected message type".to_owned())),
             };
+
+            // Hook: after_provider_call.
+            hooks::dispatch_after_provider_call(
+                &self.hooks,
+                &hooks::ProviderResponseContext {
+                    content: &content,
+                    stop_reason,
+                    usage,
+                },
+            )
+            .await;
 
             // Emit text blocks and collect tool_use blocks.
             // The first non-empty text block before any ToolUse is emitted as
@@ -866,6 +921,17 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                             })
                             .await;
 
+                        // Hook: before_tool_call (fires only for allowed tools).
+                        hooks::dispatch_before_tool_call(
+                            &self.hooks,
+                            &hooks::BeforeToolCallContext {
+                                tool: &name,
+                                action: display_str,
+                                params: &evaluated.params,
+                            },
+                        )
+                        .await;
+
                         let exec_start = Instant::now();
                         match self
                             .execute_with_progress(
@@ -921,14 +987,24 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                         }
                                     }
                                 }
-                                if !result.output.is_empty() {
-                                    self.output
-                                        .emit(OutputEvent::ToolOutput(&result.output))
-                                        .await;
+                                // Hook: after_tool_call (success path).
+                                let mut output = result.output;
+                                hooks::dispatch_after_tool_call(
+                                    &self.hooks,
+                                    &mut hooks::AfterToolCallContext {
+                                        tool: &name,
+                                        action: display_str,
+                                        result: &mut output,
+                                        is_error: false,
+                                    },
+                                )
+                                .await;
+                                if !output.is_empty() {
+                                    self.output.emit(OutputEvent::ToolOutput(&output)).await;
                                 }
                                 self.session.push(Message::ToolResult {
                                     tool_use_id,
-                                    content: result.output,
+                                    content: output,
                                     is_error: false,
                                 });
                                 #[cfg(feature = "sessions")]
@@ -951,10 +1027,22 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                     is_error: Some(true),
                                 })
                                 .await;
-                                self.output.emit(OutputEvent::ToolError(&err_msg)).await;
+                                // Hook: after_tool_call (error path).
+                                let mut err_output = err_msg;
+                                hooks::dispatch_after_tool_call(
+                                    &self.hooks,
+                                    &mut hooks::AfterToolCallContext {
+                                        tool: &name,
+                                        action: display_str,
+                                        result: &mut err_output,
+                                        is_error: true,
+                                    },
+                                )
+                                .await;
+                                self.output.emit(OutputEvent::ToolError(&err_output)).await;
                                 self.session.push(Message::ToolResult {
                                     tool_use_id,
-                                    content: err_msg,
+                                    content: err_output,
                                     is_error: true,
                                 });
                                 #[cfg(feature = "sessions")]
@@ -1025,6 +1113,17 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                     })
                                     .await;
 
+                                // Hook: before_tool_call (fires only for approved tools).
+                                hooks::dispatch_before_tool_call(
+                                    &self.hooks,
+                                    &hooks::BeforeToolCallContext {
+                                        tool: &name,
+                                        action: display_str,
+                                        params: &evaluated.params,
+                                    },
+                                )
+                                .await;
+
                                 let exec_start = Instant::now();
                                 match self
                                     .execute_with_progress(
@@ -1050,14 +1149,26 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                             is_error: Some(false),
                                         })
                                         .await;
-                                        if !result.output.is_empty() {
+                                        // Hook: after_tool_call (approved success path).
+                                        let mut output = result.output;
+                                        hooks::dispatch_after_tool_call(
+                                            &self.hooks,
+                                            &mut hooks::AfterToolCallContext {
+                                                tool: &name,
+                                                action: display_str,
+                                                result: &mut output,
+                                                is_error: false,
+                                            },
+                                        )
+                                        .await;
+                                        if !output.is_empty() {
                                             self.output
-                                                .emit(OutputEvent::ToolOutput(&result.output))
+                                                .emit(OutputEvent::ToolOutput(&output))
                                                 .await;
                                         }
                                         self.session.push(Message::ToolResult {
                                             tool_use_id,
-                                            content: result.output,
+                                            content: output,
                                             is_error: false,
                                         });
                                         #[cfg(feature = "sessions")]
@@ -1080,10 +1191,22 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                             is_error: Some(true),
                                         })
                                         .await;
-                                        self.output.emit(OutputEvent::ToolError(&err_msg)).await;
+                                        // Hook: after_tool_call (approved error path).
+                                        let mut err_output = err_msg;
+                                        hooks::dispatch_after_tool_call(
+                                            &self.hooks,
+                                            &mut hooks::AfterToolCallContext {
+                                                tool: &name,
+                                                action: display_str,
+                                                result: &mut err_output,
+                                                is_error: true,
+                                            },
+                                        )
+                                        .await;
+                                        self.output.emit(OutputEvent::ToolError(&err_output)).await;
                                         self.session.push(Message::ToolResult {
                                             tool_use_id,
-                                            content: err_msg,
+                                            content: err_output,
                                             is_error: true,
                                         });
                                         #[cfg(feature = "sessions")]

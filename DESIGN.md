@@ -1,6 +1,6 @@
 # Secure Agent Runtime — Design Document
 
-**Status:** Draft — M14 Complete (Extended thinking, recapitulation, progress indicators, Telegram batching)
+**Status:** Draft — M15 Complete (Lifecycle hooks, output stashing)
 **Author:** Kenn Williamson  
 **Date:** February 2026
 

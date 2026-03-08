@@ -467,16 +467,16 @@ Six interception points, matching the natural boundaries in `run_turn()`:
 - No feature flag — always available (zero-cost when no hooks registered)
 
 ### M15a: Hook Trait + Registration
-- [ ] `Hook` trait with default no-op methods for all 6 points
-- [ ] `AgentLoop::with_hook()` builder method (pushes to `Vec<Box<dyn Hook>>`)
-- [ ] Hook dispatch at each point in `run_turn()`
-- [ ] Tests: hook ordering, error resilience, no-op overhead
+- [x] `Hook` trait with default no-op methods for all 6 points
+- [x] `AgentLoop::with_hook()` builder method (pushes to `Vec<Box<dyn Hook>>`)
+- [x] Hook dispatch at each point in `run_turn()`
+- [x] Tests: hook ordering, error resilience, no-op overhead
 
 ### M15b: Tool Output Stashing (first hook consumer)
-- [ ] `AfterToolCall` hook that truncates tool results exceeding a size threshold
-- [ ] Stashed output written to workspace file, tool result replaced with file reference
-- [ ] Configurable threshold (default 256 KiB)
-- [ ] Prevents context window overflow from large tool outputs
+- [x] `AfterToolCall` hook that truncates tool results exceeding a size threshold
+- [x] Stashed output written to workspace file, tool result replaced with file reference
+- [x] Configurable threshold (default 256 KiB)
+- [x] Prevents context window overflow from large tool outputs
 
 ---
 

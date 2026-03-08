@@ -22,6 +22,7 @@ cherub/
 │   ├── runtime/
 │   │   ├── mod.rs            # AgentLoop<A, O> + run_turn() (Box<dyn Provider>, generic over ApprovalGate/OutputSink)
 │   │   ├── approval.rs       # ApprovalGate trait, CliApprovalGate, EscalationContext
+│   │   ├── hooks.rs          # Hook trait, 6 context structs, dispatch helpers, OutputStashingHook (M15a/b)
 │   │   ├── output.rs         # OutputSink trait (emit/turn_start/turn_end), StdoutSink, NullSink
 │   │   ├── session.rs        # Conversation state, message history, optional persistence
 │   │   ├── prompt.rs         # System prompt builder
@@ -125,6 +126,7 @@ cherub/
 │   ├── sub_agent_integration.rs # Sub-agent tool integration tests (M13d, 10 tests, no API key)
 │   ├── telegram_approval.rs  # Telegram approval flow tests (feature-gated)
 │   ├── mcp_integration.rs   # MCP full flow tests: spawn → discover → enforce → execute (feature = "mcp", 12 tests)
+│   ├── hooks_integration.rs  # Hook lifecycle + stashing integration tests (M15a/b, 8 tests)
 │   ├── output_events.rs    # Output event integration tests: recapitulation, progress, turn lifecycle (M14b/c, 7 tests)
 │   └── ui/
 │       ├── capability_token_private.rs      # Proves CapabilityToken can't be constructed outside enforcement
@@ -194,7 +196,7 @@ fn process(msg: &Message) {
 }
 ```
 
-Use `enum` when variants are known at compile time. Use `dyn Trait` only at true extension boundaries (plugins loaded at runtime). In this project, the legitimate `dyn Trait` boundaries are: `Provider` (multiple LLM backends; object-safe via `async_trait`, stored as `Box<dyn Provider>` in AgentLoop), `Tool` (plugin tools over IPC), `SessionStore`, `MemoryStore`, `EmbeddingProvider`, `AuditStore`, `CostStore`, and `PricingStore` (all storage/embedding backends selected at runtime). Everything else should be an enum.
+Use `enum` when variants are known at compile time. Use `dyn Trait` only at true extension boundaries (plugins loaded at runtime). In this project, the legitimate `dyn Trait` boundaries are: `Provider` (multiple LLM backends; object-safe via `async_trait`, stored as `Box<dyn Provider>` in AgentLoop), `Tool` (plugin tools over IPC), `Hook` (lifecycle hooks registered at startup, `async_trait` + `Vec<Box<dyn Hook>>`), `SessionStore`, `MemoryStore`, `EmbeddingProvider`, `AuditStore`, `CostStore`, and `PricingStore` (all storage/embedding backends selected at runtime). Everything else should be an enum.
 
 ### Use the typestate pattern for capability tokens
 
@@ -310,7 +312,7 @@ These enforce Cherub-specific guarantees the compiler alone can't catch.
 
 Specific patterns to catch and correct — based on what LLMs commonly get wrong when writing Rust.
 
-- **Enum over trait objects** — If variants are known at compile time, use `enum` + `match`. Legitimate `dyn Trait` boundaries in this project: `Provider` (LLM backends; `async_trait` + `Box<dyn Provider>`), `Tool` (plugin boundaries), `SessionStore`, `MemoryStore`, `EmbeddingProvider`, `AuditStore`, `CostStore`, `PricingStore` (all storage backends selected at runtime).
+- **Enum over trait objects** — If variants are known at compile time, use `enum` + `match`. Legitimate `dyn Trait` boundaries in this project: `Provider` (LLM backends; `async_trait` + `Box<dyn Provider>`), `Tool` (plugin boundaries), `Hook` (lifecycle hooks; `async_trait` + `Vec<Box<dyn Hook>>`), `SessionStore`, `MemoryStore`, `EmbeddingProvider`, `AuditStore`, `CostStore`, `PricingStore` (all storage backends selected at runtime).
 - **`&str` in, `String` out** — Function parameters take `&str` or `impl AsRef<str>`. Return `String` only when transferring ownership. Never `fn foo(s: String)` when `fn foo(s: &str)` works.
 - **Iterator chains over mutation** — Prefer `.iter().map().collect()` over `let mut v = Vec::new(); for x in ... { v.push(...) }`.
 - **`?` propagation, never `.unwrap()`** — `.unwrap()` only in tests and code paths that are provably infallible (with a comment explaining why). Use `thiserror` enums in the enforcement layer, `anyhow` at the application/CLI boundary.
