@@ -39,7 +39,7 @@ pub struct SessionConfig {
     /// PostgreSQL connection pool for session persistence and/or memory.
     /// Present when `sessions` or `memory` feature is enabled.
     #[cfg(any(feature = "sessions", feature = "memory"))]
-    pub db_pool: Option<deadpool_postgres::Pool>,
+    pub db_pool: Option<crate::storage::Pool>,
     /// Embedding provider for hybrid memory search (M6c).
     /// `None` = FTS-only search.
     #[cfg(feature = "memory")]

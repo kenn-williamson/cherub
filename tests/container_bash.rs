@@ -417,19 +417,24 @@ async fn registry_no_bash_then_container_bash() {
     // build() now returns Arc<ContainerTool>
     let registry = ToolRegistry::new_without_bash().with_container(vec![bash_tool]);
 
-    // Exactly one tool should be registered (the container bash, no duplicate built-in).
+    // Two tools: container bash + file (no duplicate built-in bash).
     let defs = registry.definitions();
-    assert_eq!(defs.len(), 1, "expected exactly 1 tool, got {}", defs.len());
+    assert_eq!(
+        defs.len(),
+        2,
+        "expected exactly 2 tools, got {}",
+        defs.len()
+    );
 }
 
-/// Regular new() has 1 tool (bash); new_without_bash() has 0.
+/// Regular new() has 2 tools (bash + file); new_without_bash() has 1 (file only).
 #[test]
 fn registry_new_vs_no_bash() {
     let with = ToolRegistry::new();
-    assert_eq!(with.definitions().len(), 1);
+    assert_eq!(with.definitions().len(), 2);
 
     let without = ToolRegistry::new_without_bash();
-    assert_eq!(without.definitions().len(), 0);
+    assert_eq!(without.definitions().len(), 1);
 }
 
 // ─── Docker integration (requires Docker + built image) ─────────────────────

@@ -1,0 +1,9 @@
+DROP TABLE IF EXISTS model_pricing;
+DROP TABLE IF EXISTS token_usage;
+DROP TABLE IF EXISTS audit_events;
+DROP TABLE IF EXISTS credentials;
+DROP TABLE IF EXISTS memory_chunks;
+DROP TABLE IF EXISTS memories;
+DROP TABLE IF EXISTS session_messages;
+DROP TABLE IF EXISTS sessions;
+DROP EXTENSION IF EXISTS vector;

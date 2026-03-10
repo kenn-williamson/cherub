@@ -265,7 +265,7 @@ impl ContainerHostState {
             }
         }
 
-        let headers: Vec<(String, String)> = extra_headers.into_iter().collect();
+        let mut headers: Vec<(String, String)> = extra_headers.into_iter().collect();
 
         // Credential injection (requires `credentials` feature).
         #[cfg(feature = "credentials")]
@@ -365,7 +365,7 @@ impl ContainerHostState {
             Ok((status, resp_headers_json, body_bytes)) => {
                 let body_str = String::from_utf8_lossy(&body_bytes);
                 #[cfg(feature = "credentials")]
-                let body_str = {
+                let body_str: std::borrow::Cow<'_, str> = {
                     let detector = crate::tools::leak_detector::LeakDetector::new();
                     std::borrow::Cow::Owned(detector.redact(&body_str))
                 };

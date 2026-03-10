@@ -26,6 +26,7 @@ cherub/
 │   │   ├── output.rs         # OutputSink trait (emit/turn_start/turn_end), StdoutSink, NullSink
 │   │   ├── session.rs        # Conversation state, message history, optional persistence
 │   │   ├── prompt.rs         # System prompt builder
+│   │   ├── schedule.rs       # Scheduled wake triggers (feature = "schedule")
 │   │   └── tokens.rs         # Token estimation for context compaction
 │   ├── enforcement/
 │   │   ├── mod.rs            # Enforcement layer entry point
@@ -78,7 +79,7 @@ cherub/
 │   │   ├── pricing.rs        # ModelPricing struct + PricingTable + lookup_pricing() + compute_cost() (M12; DB-backed pricing)
 │   │   └── wire.rs           # Serde structs for Anthropic API JSON (private, supports images)
 │   ├── storage/              # Feature-gated: #[cfg(feature = "postgres")]
-│   │   ├── mod.rs            # SessionStore + MemoryStore + CredentialStore + AuditStore + CostStore + PricingStore traits, connect(), migration runner
+│   │   ├── mod.rs            # SessionStore + MemoryStore + CredentialStore + AuditStore + CostStore + PricingStore traits, connect(), Pool type alias
 │   │   ├── embedding.rs      # EmbeddingProvider trait + OpenAiEmbeddingProvider (M6c)
 │   │   ├── search.rs         # Reciprocal Rank Fusion algorithm (M6c, pure/no-DB)
 │   │   ├── pg_session_store.rs  # PgSessionStore: PostgreSQL SessionStore impl
@@ -88,14 +89,7 @@ cherub/
 │   │   ├── pg_credential_store.rs  # PgCredentialStore: PostgreSQL CredentialStore impl (feature = "credentials")
 │   │   ├── pg_audit_store.rs    # PgAuditStore: PostgreSQL AuditStore impl, append-only event log (M10)
 │   │   ├── pg_cost_store.rs     # PgCostStore: PostgreSQL CostStore impl, append-only token usage (M12)
-│   │   ├── pg_pricing_store.rs  # PgPricingStore: PostgreSQL PricingStore impl, model pricing rates
-│   │   └── migrations/
-│   │       ├── V1__initial_schema.sql  # Sessions + messages + memory schema (UUIDv7, scope column)
-│   │       ├── V2__vector_indexes.sql  # HNSW indexes for embedding columns (M6c)
-│   │       ├── V3__credentials.sql     # Encrypted credential vault table (M7a)
-│   │       ├── V4__audit_log.sql       # Audit event log table (M10)
-│   │       ├── V5__cost_tracking.sql   # Token usage log table (M12)
-│   │       └── V6__model_pricing.sql  # DB-backed model pricing table (prefix-match rates)
+│   │   └── pg_pricing_store.rs  # PgPricingStore: PostgreSQL PricingStore impl, model pricing rates
 │   └── telegram/             # Feature-gated: #[cfg(feature = "telegram")]
 │       ├── mod.rs             # Module declarations
 │       ├── approval.rs        # TelegramApprovalGate (inline keyboard + oneshot channels)
@@ -128,9 +122,13 @@ cherub/
 │   ├── mcp_integration.rs   # MCP full flow tests: spawn → discover → enforce → execute (feature = "mcp", 12 tests)
 │   ├── hooks_integration.rs  # Hook lifecycle + stashing integration tests (M15a/b, 8 tests)
 │   ├── output_events.rs    # Output event integration tests: recapitulation, progress, turn lifecycle (M14b/c, 7 tests)
+│   ├── parallel_tools.rs   # Parallel tool execution tests (M18c)
 │   └── ui/
 │       ├── capability_token_private.rs      # Proves CapabilityToken can't be constructed outside enforcement
 │       └── capability_token_private.stderr  # Expected compiler error output
+├── migrations/
+│   ├── 20260309000000_initial_schema.up.sql    # Consolidated schema: sessions, memories, credentials, audit, cost, pricing
+│   └── 20260309000000_initial_schema.down.sql  # Reversible rollback: drop all tables + vector extension
 ├── .config/
 │   └── nextest.toml          # cargo-nextest config: 4 slots, retries, slow-test detection
 ├── examples/

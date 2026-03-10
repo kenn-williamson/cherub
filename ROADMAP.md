@@ -121,11 +121,11 @@ Everything else — connectors, credential brokering, audit logging, IPC plugins
 **Goal:** The agent has persistent, structured memory protected by the enforcement layer. Sessions survive restarts. Memory writes are policy-gated tool invocations.
 
 ### Database
-- [x] PostgreSQL integration (deadpool-postgres connection pool, `postgres` feature)
+- [x] PostgreSQL integration (sqlx connection pool + compile-time migrations, `postgres` feature)
 - [x] Schema: memories table (content, structured JSONB, provenance, confidence, tier, embeddings, tsvector)
 - [x] Schema: memory_chunks table (chunked documents for search)
 - [x] Schema: sessions table, session_messages table
-- [x] Migration framework (refinery, embedded migrations)
+- [x] Migration framework (sqlx::migrate!, single consolidated reversible migration)
 
 ### Memory as an Enforced Tool (M6b complete)
 - [x] `memory` tool: store, recall, search, update, forget operations

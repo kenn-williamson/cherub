@@ -1,6 +1,6 @@
 //! PostgreSQL implementation of `CredentialStore`.
 //!
-//! Uses the `credentials` table from the V3 migration. All values are AES-256-GCM
+//! Uses the `credentials` table from the initial migration. All values are AES-256-GCM
 //! encrypted before storage — the database never holds plaintext.
 //!
 //! `store()` uses INSERT ... ON CONFLICT ... DO UPDATE (upsert) so re-storing a
@@ -8,8 +8,8 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use deadpool_postgres::Pool;
 use secrecy::SecretString;
+use sqlx::Row;
 use uuid::Uuid;
 
 use crate::error::CherubError;
@@ -18,6 +18,8 @@ use crate::storage::credential_types::{
     Credential, CredentialLocation, CredentialRef, DecryptedCredential, NewCredential,
 };
 use crate::storage::crypto::CredentialCrypto;
+
+use super::Pool;
 
 /// PostgreSQL-backed credential store with AES-256-GCM encryption.
 pub struct PgCredentialStore {
@@ -34,10 +36,6 @@ impl PgCredentialStore {
         Ok(Self { pool, crypto })
     }
 
-    fn pool_err(e: impl std::fmt::Display) -> CherubError {
-        CherubError::Storage(format!("credential store pool error: {e}"))
-    }
-
     fn query_err(e: impl std::fmt::Display) -> CherubError {
         CherubError::Storage(format!("credential store query error: {e}"))
     }
@@ -47,7 +45,7 @@ impl PgCredentialStore {
     }
 
     /// Convert a DB row into a `Credential`. Column order must match the SELECT below.
-    fn row_to_credential(row: &tokio_postgres::Row) -> Result<Credential, CherubError> {
+    fn row_to_credential(row: &sqlx::postgres::PgRow) -> Result<Credential, CherubError> {
         let location_json: serde_json::Value = row.get("location");
         let location: CredentialLocation = serde_json::from_value(location_json)
             .map_err(|e| CherubError::Storage(format!("invalid credential location in DB: {e}")))?;
@@ -70,7 +68,7 @@ impl PgCredentialStore {
         })
     }
 
-    fn row_to_ref(row: &tokio_postgres::Row) -> CredentialRef {
+    fn row_to_ref(row: &sqlx::postgres::PgRow) -> CredentialRef {
         CredentialRef {
             name: row.get("name"),
             provider: row.get("provider"),
@@ -83,8 +81,6 @@ impl PgCredentialStore {
 #[async_trait]
 impl CredentialStore for PgCredentialStore {
     async fn store(&self, cred: NewCredential) -> Result<Uuid, CherubError> {
-        let conn = self.pool.get().await.map_err(Self::pool_err)?;
-
         // Encrypt the plaintext value before touching the DB.
         let (encrypted_value, key_salt) = self.crypto.encrypt(cred.value.as_bytes())?;
 
@@ -94,54 +90,51 @@ impl CredentialStore for PgCredentialStore {
         let caps: Vec<String> = cred.capabilities;
         let patterns: Vec<String> = cred.host_patterns;
 
-        let row = conn
-            .query_one(
-                "INSERT INTO credentials \
-                    (user_id, name, encrypted_value, key_salt, provider, \
-                     capabilities, host_patterns, location, expires_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
-                 ON CONFLICT (user_id, name) DO UPDATE SET \
-                    encrypted_value = EXCLUDED.encrypted_value, \
-                    key_salt        = EXCLUDED.key_salt, \
-                    provider        = EXCLUDED.provider, \
-                    capabilities    = EXCLUDED.capabilities, \
-                    host_patterns   = EXCLUDED.host_patterns, \
-                    location        = EXCLUDED.location, \
-                    expires_at      = EXCLUDED.expires_at, \
-                    updated_at      = now() \
-                 RETURNING id",
-                &[
-                    &cred.user_id,
-                    &cred.name,
-                    &encrypted_value,
-                    &key_salt,
-                    &cred.provider,
-                    &caps,
-                    &patterns,
-                    &location_json,
-                    &cred.expires_at,
-                ],
-            )
-            .await
-            .map_err(Self::query_err)?;
+        let row = sqlx::query(
+            "INSERT INTO credentials \
+                (user_id, name, encrypted_value, key_salt, provider, \
+                 capabilities, host_patterns, location, expires_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+             ON CONFLICT (user_id, name) DO UPDATE SET \
+                encrypted_value = EXCLUDED.encrypted_value, \
+                key_salt        = EXCLUDED.key_salt, \
+                provider        = EXCLUDED.provider, \
+                capabilities    = EXCLUDED.capabilities, \
+                host_patterns   = EXCLUDED.host_patterns, \
+                location        = EXCLUDED.location, \
+                expires_at      = EXCLUDED.expires_at, \
+                updated_at      = now() \
+             RETURNING id",
+        )
+        .bind(&cred.user_id)
+        .bind(&cred.name)
+        .bind(&encrypted_value)
+        .bind(&key_salt)
+        .bind(&cred.provider)
+        .bind(&caps)
+        .bind(&patterns)
+        .bind(&location_json)
+        .bind(cred.expires_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Self::query_err)?;
 
         Ok(row.get("id"))
     }
 
     async fn get(&self, user_id: &str, name: &str) -> Result<Credential, CherubError> {
-        let conn = self.pool.get().await.map_err(Self::pool_err)?;
-
-        let row = conn
-            .query_opt(
-                "SELECT id, user_id, name, encrypted_value, key_salt, provider, \
-                        capabilities, host_patterns, location, expires_at, \
-                        last_used_at, usage_count, created_at, updated_at \
-                 FROM credentials \
-                 WHERE user_id = $1 AND name = $2",
-                &[&user_id, &name],
-            )
-            .await
-            .map_err(Self::query_err)?;
+        let row = sqlx::query(
+            "SELECT id, user_id, name, encrypted_value, key_salt, provider, \
+                    capabilities, host_patterns, location, expires_at, \
+                    last_used_at, usage_count, created_at, updated_at \
+             FROM credentials \
+             WHERE user_id = $1 AND name = $2",
+        )
+        .bind(user_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Self::query_err)?;
 
         match row {
             Some(r) => Self::row_to_credential(&r),
@@ -150,17 +143,16 @@ impl CredentialStore for PgCredentialStore {
     }
 
     async fn get_ref(&self, user_id: &str, name: &str) -> Result<CredentialRef, CherubError> {
-        let conn = self.pool.get().await.map_err(Self::pool_err)?;
-
-        let row = conn
-            .query_opt(
-                "SELECT name, provider, capabilities, host_patterns \
-                 FROM credentials \
-                 WHERE user_id = $1 AND name = $2",
-                &[&user_id, &name],
-            )
-            .await
-            .map_err(Self::query_err)?;
+        let row = sqlx::query(
+            "SELECT name, provider, capabilities, host_patterns \
+             FROM credentials \
+             WHERE user_id = $1 AND name = $2",
+        )
+        .bind(user_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Self::query_err)?;
 
         match row {
             Some(r) => Ok(Self::row_to_ref(&r)),
@@ -169,34 +161,29 @@ impl CredentialStore for PgCredentialStore {
     }
 
     async fn list(&self, user_id: &str) -> Result<Vec<CredentialRef>, CherubError> {
-        let conn = self.pool.get().await.map_err(Self::pool_err)?;
-
-        let rows = conn
-            .query(
-                "SELECT name, provider, capabilities, host_patterns \
-                 FROM credentials \
-                 WHERE user_id = $1 \
-                 ORDER BY name ASC",
-                &[&user_id],
-            )
-            .await
-            .map_err(Self::query_err)?;
+        let rows = sqlx::query(
+            "SELECT name, provider, capabilities, host_patterns \
+             FROM credentials \
+             WHERE user_id = $1 \
+             ORDER BY name ASC",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Self::query_err)?;
 
         Ok(rows.iter().map(Self::row_to_ref).collect())
     }
 
     async fn delete(&self, user_id: &str, name: &str) -> Result<(), CherubError> {
-        let conn = self.pool.get().await.map_err(Self::pool_err)?;
-
-        let n = conn
-            .execute(
-                "DELETE FROM credentials WHERE user_id = $1 AND name = $2",
-                &[&user_id, &name],
-            )
+        let result = sqlx::query("DELETE FROM credentials WHERE user_id = $1 AND name = $2")
+            .bind(user_id)
+            .bind(name)
+            .execute(&self.pool)
             .await
             .map_err(Self::query_err)?;
 
-        if n == 0 {
+        if result.rows_affected() == 0 {
             Err(Self::not_found(name))
         } else {
             Ok(())
@@ -204,15 +191,14 @@ impl CredentialStore for PgCredentialStore {
     }
 
     async fn exists(&self, user_id: &str, name: &str) -> Result<bool, CherubError> {
-        let conn = self.pool.get().await.map_err(Self::pool_err)?;
-
-        let row = conn
-            .query_one(
-                "SELECT EXISTS(SELECT 1 FROM credentials WHERE user_id = $1 AND name = $2)",
-                &[&user_id, &name],
-            )
-            .await
-            .map_err(Self::query_err)?;
+        let row = sqlx::query(
+            "SELECT EXISTS(SELECT 1 FROM credentials WHERE user_id = $1 AND name = $2)",
+        )
+        .bind(user_id)
+        .bind(name)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Self::query_err)?;
 
         Ok(row.get(0))
     }
@@ -229,14 +215,14 @@ impl CredentialStore for PgCredentialStore {
     }
 
     async fn record_usage(&self, user_id: &str, name: &str) -> Result<(), CherubError> {
-        let conn = self.pool.get().await.map_err(Self::pool_err)?;
-
-        conn.execute(
+        sqlx::query(
             "UPDATE credentials \
              SET last_used_at = now(), usage_count = usage_count + 1 \
              WHERE user_id = $1 AND name = $2",
-            &[&user_id, &name],
         )
+        .bind(user_id)
+        .bind(name)
+        .execute(&self.pool)
         .await
         .map_err(Self::query_err)?;
 
@@ -244,15 +230,13 @@ impl CredentialStore for PgCredentialStore {
     }
 
     async fn is_expired(&self, user_id: &str, name: &str) -> Result<bool, CherubError> {
-        let conn = self.pool.get().await.map_err(Self::pool_err)?;
-
-        let row = conn
-            .query_opt(
-                "SELECT expires_at FROM credentials WHERE user_id = $1 AND name = $2",
-                &[&user_id, &name],
-            )
-            .await
-            .map_err(Self::query_err)?;
+        let row =
+            sqlx::query("SELECT expires_at FROM credentials WHERE user_id = $1 AND name = $2")
+                .bind(user_id)
+                .bind(name)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(Self::query_err)?;
 
         match row {
             None => Err(Self::not_found(name)),

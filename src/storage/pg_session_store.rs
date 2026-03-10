@@ -1,14 +1,16 @@
 use async_trait::async_trait;
-use deadpool_postgres::Pool;
+use sqlx::Row;
 use uuid::Uuid;
 
 use crate::error::CherubError;
 use crate::providers::Message;
 use crate::storage::SessionStore;
 
+use super::Pool;
+
 /// PostgreSQL implementation of `SessionStore`.
 ///
-/// Wraps a `deadpool_postgres::Pool` for connection reuse across concurrent sessions.
+/// Wraps a `sqlx::PgPool` for connection reuse across concurrent sessions.
 pub struct PgSessionStore {
     pool: Pool,
 }
@@ -16,10 +18,6 @@ pub struct PgSessionStore {
 impl PgSessionStore {
     pub fn new(pool: Pool) -> Self {
         Self { pool }
-    }
-
-    fn pool_err(e: impl std::fmt::Display) -> CherubError {
-        CherubError::Storage(format!("pool error: {e}"))
     }
 
     fn query_err(e: impl std::fmt::Display) -> CherubError {
@@ -38,28 +36,26 @@ impl SessionStore for PgSessionStore {
         connector: &str,
         connector_id: &str,
     ) -> Result<(Uuid, Vec<Message>), CherubError> {
-        let conn = self.pool.get().await.map_err(Self::pool_err)?;
-
         // Try to find an existing session.
-        let row = conn
-            .query_opt(
-                "SELECT id FROM sessions WHERE connector = $1 AND connector_id = $2",
-                &[&connector, &connector_id],
-            )
+        let row = sqlx::query("SELECT id FROM sessions WHERE connector = $1 AND connector_id = $2")
+            .bind(connector)
+            .bind(connector_id)
+            .fetch_optional(&self.pool)
             .await
             .map_err(Self::query_err)?;
 
         let session_id: Uuid = if let Some(row) = row {
-            row.get(0)
+            row.get("id")
         } else {
             // Insert a new session. Generate the UUID in Rust (Uuid::now_v7 for time-sortable IDs).
             let new_id = Uuid::now_v7();
-            conn.execute(
-                "INSERT INTO sessions (id, connector, connector_id) VALUES ($1, $2, $3)",
-                &[&new_id, &connector, &connector_id],
-            )
-            .await
-            .map_err(Self::query_err)?;
+            sqlx::query("INSERT INTO sessions (id, connector, connector_id) VALUES ($1, $2, $3)")
+                .bind(new_id)
+                .bind(connector)
+                .bind(connector_id)
+                .execute(&self.pool)
+                .await
+                .map_err(Self::query_err)?;
             tracing::info!(
                 session_id = %new_id,
                 connector,
@@ -79,48 +75,48 @@ impl SessionStore for PgSessionStore {
         ordinal: i32,
         message: &Message,
     ) -> Result<(), CherubError> {
-        let conn = self.pool.get().await.map_err(Self::pool_err)?;
-
         let message_json = serde_json::to_value(message).map_err(Self::serde_err)?;
         let role = message_role_str(message);
         let msg_id = Uuid::now_v7();
 
-        conn.execute(
+        sqlx::query(
             "INSERT INTO session_messages (id, session_id, ordinal, message_json, role) \
              VALUES ($1, $2, $3, $4, $5) \
              ON CONFLICT (session_id, ordinal) DO UPDATE \
                SET message_json = EXCLUDED.message_json, role = EXCLUDED.role",
-            &[&msg_id, &session_id, &ordinal, &message_json, &role],
         )
+        .bind(msg_id)
+        .bind(session_id)
+        .bind(ordinal)
+        .bind(&message_json)
+        .bind(role)
+        .execute(&self.pool)
         .await
         .map_err(Self::query_err)?;
 
         // Touch the session's updated_at timestamp.
-        conn.execute(
-            "UPDATE sessions SET updated_at = now() WHERE id = $1",
-            &[&session_id],
-        )
-        .await
-        .map_err(Self::query_err)?;
+        sqlx::query("UPDATE sessions SET updated_at = now() WHERE id = $1")
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+            .map_err(Self::query_err)?;
 
         Ok(())
     }
 
     async fn load_messages(&self, session_id: Uuid) -> Result<Vec<Message>, CherubError> {
-        let conn = self.pool.get().await.map_err(Self::pool_err)?;
-
-        let rows = conn
-            .query(
-                "SELECT message_json FROM session_messages \
-                 WHERE session_id = $1 ORDER BY ordinal ASC",
-                &[&session_id],
-            )
-            .await
-            .map_err(Self::query_err)?;
+        let rows = sqlx::query(
+            "SELECT message_json FROM session_messages \
+             WHERE session_id = $1 ORDER BY ordinal ASC",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Self::query_err)?;
 
         rows.into_iter()
             .map(|row| {
-                let json: serde_json::Value = row.get(0);
+                let json: serde_json::Value = row.get("message_json");
                 serde_json::from_value(json).map_err(Self::serde_err)
             })
             .collect()
@@ -130,16 +126,14 @@ impl SessionStore for PgSessionStore {
         session_id: Uuid,
         messages: &[Message],
     ) -> Result<(), CherubError> {
-        let mut conn = self.pool.get().await.map_err(Self::pool_err)?;
-        let txn = conn.transaction().await.map_err(Self::query_err)?;
+        let mut txn = self.pool.begin().await.map_err(Self::query_err)?;
 
         // Delete all existing messages for this session.
-        txn.execute(
-            "DELETE FROM session_messages WHERE session_id = $1",
-            &[&session_id],
-        )
-        .await
-        .map_err(Self::query_err)?;
+        sqlx::query("DELETE FROM session_messages WHERE session_id = $1")
+            .bind(session_id)
+            .execute(&mut *txn)
+            .await
+            .map_err(Self::query_err)?;
 
         // Re-insert with fresh ordinals.
         for (ordinal, message) in messages.iter().enumerate() {
@@ -148,22 +142,26 @@ impl SessionStore for PgSessionStore {
             let message_json = serde_json::to_value(message).map_err(Self::serde_err)?;
             let role = message_role_str(message);
 
-            txn.execute(
+            sqlx::query(
                 "INSERT INTO session_messages (id, session_id, ordinal, message_json, role) \
                  VALUES ($1, $2, $3, $4, $5)",
-                &[&msg_id, &session_id, &ordinal, &message_json, &role],
             )
+            .bind(msg_id)
+            .bind(session_id)
+            .bind(ordinal)
+            .bind(&message_json)
+            .bind(role)
+            .execute(&mut *txn)
             .await
             .map_err(Self::query_err)?;
         }
 
         // Touch the session's updated_at timestamp.
-        txn.execute(
-            "UPDATE sessions SET updated_at = now() WHERE id = $1",
-            &[&session_id],
-        )
-        .await
-        .map_err(Self::query_err)?;
+        sqlx::query("UPDATE sessions SET updated_at = now() WHERE id = $1")
+            .bind(session_id)
+            .execute(&mut *txn)
+            .await
+            .map_err(Self::query_err)?;
 
         txn.commit().await.map_err(Self::query_err)?;
 

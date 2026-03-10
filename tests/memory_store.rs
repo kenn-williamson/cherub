@@ -306,14 +306,13 @@ async fn store_creates_embedding() {
         .expect("store");
 
     // Verify embedding was stored (column non-NULL).
-    let conn = tc.pool.get().await.expect("conn");
-    let row = conn
-        .query_one(
-            "SELECT embedding IS NOT NULL AS has_embedding FROM memories WHERE id = $1",
-            &[&id],
-        )
-        .await
-        .expect("query");
+    use sqlx::Row;
+    let row =
+        sqlx::query("SELECT embedding IS NOT NULL AS has_embedding FROM memories WHERE id = $1")
+            .bind(id)
+            .fetch_one(&tc.pool)
+            .await
+            .expect("query");
     let has_embedding: bool = row.get("has_embedding");
     assert!(
         has_embedding,
@@ -332,12 +331,10 @@ async fn store_without_embedder_leaves_null() {
         .await
         .expect("store");
 
-    let conn = tc.pool.get().await.expect("conn");
-    let row = conn
-        .query_one(
-            "SELECT embedding IS NULL AS is_null FROM memories WHERE id = $1",
-            &[&id],
-        )
+    use sqlx::Row;
+    let row = sqlx::query("SELECT embedding IS NULL AS is_null FROM memories WHERE id = $1")
+        .bind(id)
+        .fetch_one(&tc.pool)
         .await
         .expect("query");
     let is_null: bool = row.get("is_null");
@@ -432,14 +429,14 @@ async fn update_re_embeds_content() {
         .expect("update");
 
     // Both rows should have non-NULL embeddings.
-    let conn = tc.pool.get().await.expect("conn");
-    let rows = conn
-        .query(
-            "SELECT id, embedding IS NOT NULL AS has_embedding FROM memories WHERE id = ANY($1)",
-            &[&vec![orig_id, new_id]],
-        )
-        .await
-        .expect("query");
+    use sqlx::Row;
+    let rows = sqlx::query(
+        "SELECT id, embedding IS NOT NULL AS has_embedding FROM memories WHERE id = ANY($1)",
+    )
+    .bind(&vec![orig_id, new_id])
+    .fetch_all(&tc.pool)
+    .await
+    .expect("query");
 
     for row in &rows {
         let has_embedding: bool = row.get("has_embedding");
@@ -463,12 +460,10 @@ async fn embedding_failure_does_not_block_store() {
         .await
         .expect("store should succeed even when embedding fails");
 
-    let conn = tc.pool.get().await.expect("conn");
-    let row = conn
-        .query_one(
-            "SELECT embedding IS NULL AS is_null FROM memories WHERE id = $1",
-            &[&id],
-        )
+    use sqlx::Row;
+    let row = sqlx::query("SELECT embedding IS NULL AS is_null FROM memories WHERE id = $1")
+        .bind(id)
+        .fetch_one(&tc.pool)
         .await
         .expect("query");
     let is_null: bool = row.get("is_null");

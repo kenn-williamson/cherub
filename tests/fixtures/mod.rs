@@ -12,9 +12,9 @@
 use async_trait::async_trait;
 #[cfg(feature = "memory")]
 use cherub::error::CherubError;
+use cherub::storage::Pool;
 #[cfg(feature = "memory")]
 use cherub::storage::embedding::EmbeddingProvider;
-use deadpool_postgres::Pool;
 use secrecy::SecretString;
 use testcontainers::{
     ContainerAsync, GenericImage, ImageExt, ReuseDirective,
@@ -88,13 +88,13 @@ impl TestContainer {
             );
 
             // Inner retry: 5 connection attempts with exponential backoff.
-            // connect() runs refinery migrations (idempotent on reused containers).
+            // connect() runs sqlx migrations (idempotent on reused containers).
             match Self::connect_with_retry(&db_url).await {
                 Ok(pool) => {
                     // TRUNCATE all data tables so each test starts with a clean slate.
                     // Safe because nextest serializes tests within a slot.
-                    let conn = pool.get().await.expect("get connection for truncate");
-                    conn.batch_execute(RESET_SQL)
+                    sqlx::raw_sql(RESET_SQL)
+                        .execute(&pool)
                         .await
                         .expect("truncate tables");
                     return Self {

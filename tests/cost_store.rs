@@ -14,7 +14,7 @@ use cherub::storage::{CallType, CostStore, NewTokenUsage, SessionStore};
 use uuid::Uuid;
 
 /// Helper: create a real session in the DB and return its ID.
-async fn create_session(pool: &deadpool_postgres::Pool) -> Uuid {
+async fn create_session(pool: &cherub::storage::Pool) -> Uuid {
     let store = PgSessionStore::new(pool.clone());
     let connector_id = format!("cost-test-{}", Uuid::now_v7());
     let (session_id, _) = store
