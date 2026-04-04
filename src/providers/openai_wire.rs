@@ -4,7 +4,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{ApiUsage, ContentBlock, Message, StopReason, ToolDefinition, UserContent};
+use super::{
+    ApiUsage, ContentBlock, Message, StopReason, ToolDefinition, ToolResultImage, UserContent,
+};
 
 // --- Request types ---
 
@@ -171,11 +173,17 @@ pub(crate) fn messages_to_openai_wire(system: &str, messages: &[Message]) -> Vec
             Message::ToolResult {
                 tool_use_id,
                 content,
+                images,
                 ..
             } => {
+                let oai_content = if images.is_empty() {
+                    OaiContent::Text(content.clone())
+                } else {
+                    tool_result_content_to_oai(content, images)
+                };
                 wire.push(OaiMessage {
                     role: "tool",
-                    content: OaiContent::Text(content.clone()),
+                    content: oai_content,
                     tool_calls: None,
                     tool_call_id: Some(tool_use_id.clone()),
                 });
@@ -184,6 +192,24 @@ pub(crate) fn messages_to_openai_wire(system: &str, messages: &[Message]) -> Vec
     }
 
     wire
+}
+
+/// Build multi-part content for a tool result with images (OpenAI format).
+fn tool_result_content_to_oai(text: &str, images: &[ToolResultImage]) -> OaiContent {
+    let mut parts = Vec::with_capacity(1 + images.len());
+    if !text.is_empty() {
+        parts.push(OaiContentPart::Text {
+            text: text.to_owned(),
+        });
+    }
+    for img in images {
+        parts.push(OaiContentPart::ImageUrl {
+            image_url: OaiImageUrl {
+                url: format!("data:{};base64,{}", img.media_type, img.data),
+            },
+        });
+    }
+    OaiContent::Parts(parts)
 }
 
 /// Convert user content items to OpenAI format.
@@ -403,6 +429,7 @@ mod tests {
             &[Message::ToolResult {
                 tool_use_id: "call_123".to_owned(),
                 content: "file1.txt\nfile2.txt".to_owned(),
+                images: vec![],
                 is_error: false,
             }],
         );

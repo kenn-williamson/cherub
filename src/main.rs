@@ -43,6 +43,9 @@ enum Command {
         /// Replace in-process bash with a container-sandboxed equivalent.
         #[cfg(feature = "container")]
         sandbox_bash: bool,
+        /// Enable the Playwright browser tool (container-sandboxed Chromium).
+        #[cfg(feature = "browser")]
+        browser: bool,
         /// Optional MCP servers config file (M11).
         #[cfg(feature = "mcp")]
         mcp_config: Option<PathBuf>,
@@ -159,6 +162,8 @@ fn parse_args() -> Result<Command> {
     let mut container_tools_dir: Option<PathBuf> = None;
     #[cfg(feature = "container")]
     let mut sandbox_bash = false;
+    #[cfg(feature = "browser")]
+    let mut browser = false;
     #[cfg(feature = "mcp")]
     let mut mcp_config: Option<PathBuf> = None;
     let mut providers_config: Option<PathBuf> = None;
@@ -210,6 +215,10 @@ fn parse_args() -> Result<Command> {
             "--sandbox-bash" => {
                 sandbox_bash = true;
             }
+            #[cfg(feature = "browser")]
+            "--browser" => {
+                browser = true;
+            }
             #[cfg(feature = "mcp")]
             "--mcp-config" => {
                 i += 1;
@@ -258,6 +267,8 @@ fn parse_args() -> Result<Command> {
         container_tools_dir,
         #[cfg(feature = "container")]
         sandbox_bash,
+        #[cfg(feature = "browser")]
+        browser,
         #[cfg(feature = "mcp")]
         mcp_config,
         thinking_budget,
@@ -913,6 +924,7 @@ async fn run_agent(
     #[cfg(feature = "wasm")] wasm_tools_dir: Option<PathBuf>,
     #[cfg(feature = "container")] container_tools_dir: Option<PathBuf>,
     #[cfg(feature = "container")] sandbox_bash: bool,
+    #[cfg(feature = "browser")] browser: bool,
     #[cfg(feature = "mcp")] mcp_config: Option<PathBuf>,
     thinking_budget: Option<u32>,
     show_thinking: bool,
@@ -1203,6 +1215,29 @@ async fn run_agent(
         }
     };
 
+    // Add Playwright browser tool if requested.
+    #[cfg(feature = "browser")]
+    let (registry, _browser_ipc_dir) = {
+        if browser {
+            use cherub::tools::container::BollardRuntime;
+            use std::sync::Arc;
+
+            let runtime =
+                BollardRuntime::new().context("--browser requires Docker — failed to connect")?;
+            let rt: Arc<dyn cherub::tools::container::ContainerRuntime> = Arc::new(runtime);
+            if !rt.is_available().await {
+                bail!("--browser requires Docker but the daemon is not reachable");
+            }
+
+            let (browser_tool, ipc_dir) = cherub::tools::container_browser::build(Arc::clone(&rt));
+            let registry = registry.with_container(vec![browser_tool]);
+            info!("browser tool enabled — Playwright runs in isolated container");
+            (registry, Some(ipc_dir))
+        } else {
+            (registry, None)
+        }
+    };
+
     // Load MCP servers if a config file was specified (M11).
     #[cfg(feature = "mcp")]
     let registry = {
@@ -1432,6 +1467,8 @@ async fn main() -> Result<()> {
             container_tools_dir,
             #[cfg(feature = "container")]
             sandbox_bash,
+            #[cfg(feature = "browser")]
+            browser,
             #[cfg(feature = "mcp")]
             mcp_config,
             thinking_budget,
@@ -1449,6 +1486,8 @@ async fn main() -> Result<()> {
                 container_tools_dir,
                 #[cfg(feature = "container")]
                 sandbox_bash,
+                #[cfg(feature = "browser")]
+                browser,
                 #[cfg(feature = "mcp")]
                 mcp_config,
                 thinking_budget,

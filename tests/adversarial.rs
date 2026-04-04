@@ -168,6 +168,7 @@ fn find_tool_results(messages: &[Message]) -> Vec<(&str, &str, bool)> {
                 tool_use_id,
                 content,
                 is_error,
+                ..
             } => Some((tool_use_id.as_str(), content.as_str(), *is_error)),
             _ => None,
         })

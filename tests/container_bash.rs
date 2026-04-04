@@ -138,7 +138,9 @@ async fn ipc_client_echo() {
         .expect("timeout")
         .expect("recv");
     match result {
-        ToolMessage::Result { id, output, error } => {
+        ToolMessage::Result {
+            id, output, error, ..
+        } => {
             assert_eq!(id, 1);
             assert!(error.is_none());
             let out = output.expect("expected output");
@@ -198,7 +200,9 @@ async fn ipc_client_stderr() {
         .expect("timeout")
         .expect("recv");
     match result {
-        ToolMessage::Result { id, output, error } => {
+        ToolMessage::Result {
+            id, output, error, ..
+        } => {
             assert_eq!(id, 2);
             assert!(error.is_none());
             let out = output.expect("expected output");
@@ -259,7 +263,9 @@ async fn ipc_client_exit_code() {
         .expect("timeout")
         .expect("recv");
     match result {
-        ToolMessage::Result { id, output, error } => {
+        ToolMessage::Result {
+            id, output, error, ..
+        } => {
             assert_eq!(id, 3);
             assert!(error.is_none());
             let out = output.expect("expected output");
@@ -320,7 +326,9 @@ async fn ipc_client_truncation() {
         .expect("timeout")
         .expect("recv");
     match result {
-        ToolMessage::Result { id, output, error } => {
+        ToolMessage::Result {
+            id, output, error, ..
+        } => {
             assert_eq!(id, 4);
             assert!(error.is_none());
             let out = output.expect("expected output");
@@ -384,7 +392,9 @@ async fn ipc_client_missing_command() {
         .expect("timeout")
         .expect("recv");
     match result {
-        ToolMessage::Result { id, output, error } => {
+        ToolMessage::Result {
+            id, output, error, ..
+        } => {
             assert_eq!(id, 5);
             assert!(output.is_none());
             let err = error.expect("expected error");

@@ -72,8 +72,12 @@ pub fn estimate_tokens(system: &str, messages: &[Message], tools: &[ToolDefiniti
                     }
                 }
             }
-            Message::ToolResult { content, .. } => {
+            Message::ToolResult {
+                content, images, ..
+            } => {
                 total += (content.len() as u32) / CHARS_PER_TOKEN_JSON;
+                // Images in tool results are billed like user images.
+                total += (images.len() as u32) * 1000;
             }
         }
     }
@@ -133,6 +137,7 @@ mod tests {
         let messages = vec![Message::ToolResult {
             tool_use_id: "t1".to_owned(),
             content: "file1.txt\nfile2.txt\nfile3.txt".to_owned(),
+            images: vec![],
             is_error: false,
         }];
         let tokens = estimate_tokens("", &messages, &[]);
@@ -235,6 +240,7 @@ mod tests {
             Message::ToolResult {
                 tool_use_id: "t1".to_owned(),
                 content: "file1.txt\nfile2.txt".to_owned(),
+                images: vec![],
                 is_error: false,
             },
             Message::Assistant {

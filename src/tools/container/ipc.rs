@@ -75,6 +75,10 @@ pub enum ToolMessage {
         /// Error message (mutually exclusive with `output`).
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// Optional images (e.g. browser screenshots). Base64-encoded.
+        /// Backwards-compatible: existing container tools don't send this field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        images: Option<Vec<IpcImage>>,
     },
     /// Request to call a host function (M9b). Pauses execution until
     /// the runtime replies with a `HostResponse`.
@@ -88,6 +92,15 @@ pub enum ToolMessage {
     },
     /// Diagnostic log entry from the tool.
     Log { level: String, message: String },
+}
+
+/// An image included in a tool result over IPC (e.g. browser screenshot).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpcImage {
+    /// MIME type (e.g. `"image/png"`).
+    pub media_type: String,
+    /// Base64-encoded image data.
+    pub data: String,
 }
 
 // ─── IPC transport ────────────────────────────────────────────────────────────
@@ -320,6 +333,7 @@ mod tests {
             id: 3,
             output: Some("done".to_owned()),
             error: None,
+            images: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"result\""), "got: {json}");

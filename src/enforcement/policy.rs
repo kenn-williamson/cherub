@@ -45,6 +45,8 @@ enum MatchSourceValue {
     HttpStructured,
     /// For MCP tools: extracts `"{server}:{tool}"` from params.
     McpStructured,
+    /// For the browser tool: extracts `"{action}:{host}"` if url present, else `"{action}"`.
+    BrowserStructured,
 }
 
 impl From<MatchSourceValue> for MatchSource {
@@ -54,6 +56,7 @@ impl From<MatchSourceValue> for MatchSource {
             MatchSourceValue::Structured => MatchSource::Structured,
             MatchSourceValue::HttpStructured => MatchSource::HttpStructured,
             MatchSourceValue::McpStructured => MatchSource::McpStructured,
+            MatchSourceValue::BrowserStructured => MatchSource::BrowserStructured,
         }
     }
 }

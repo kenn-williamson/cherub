@@ -247,6 +247,57 @@ match_source = "structured"
 tier = "act"
 patterns = ["^setup$"]
 
+# ─── Browser tool (Playwright in Docker) ──────────────────────────────────────
+#
+# Container-sandboxed Chromium browser for navigating JavaScript-heavy websites.
+# Uses match_source = "browser_structured" which extracts:
+#   - browse actions: "{action}:{host}" (e.g., "browse:sos.state.co.us")
+#   - other actions: "{action}" (e.g., "click", "fill")
+#
+# Domain enforcement: only explicitly listed hosts can be browsed.
+# evaluate (arbitrary JS execution) requires human approval (commit tier).
+#
+# Requires: Docker + cherub-browser:latest image.
+# Build: docker build -t cherub-browser:latest tools/container/browser/
+#
+# Example (uncomment to enable):
+#
+# [tools.browser]
+# enabled = true
+# match_source = "browser_structured"
+#
+# [tools.browser.actions.navigate]
+# # Allow browsing to specific domains. Add your target hosts here.
+# tier = "act"
+# patterns = [
+#     "^browse:",
+# ]
+#
+# [tools.browser.actions.interact]
+# # Page interactions (click, fill, etc.) — act tier.
+# tier = "act"
+# patterns = [
+#     "^click$",
+#     "^fill$",
+#     "^select$",
+#     "^wait_for$",
+#     "^scroll$",
+# ]
+#
+# [tools.browser.actions.read]
+# # Read-only actions — observe tier.
+# tier = "observe"
+# patterns = [
+#     "^get_text$",
+#     "^get_url$",
+#     "^screenshot$",
+# ]
+#
+# [tools.browser.actions.execute_js]
+# # Arbitrary JS execution — requires human approval.
+# tier = "commit"
+# patterns = ["^evaluate$"]
+
 # ─── Budget limits (M12) ──────────────────────────────────────────────────────
 #
 # Enforce cost ceilings on LLM API usage. When a limit is exceeded, the

@@ -3,6 +3,8 @@ pub mod bash;
 pub mod container;
 #[cfg(feature = "container")]
 pub mod container_bash;
+#[cfg(feature = "browser")]
+pub mod container_browser;
 #[cfg(feature = "credentials")]
 pub mod credential_broker;
 #[cfg(feature = "container")]
@@ -111,9 +113,21 @@ impl ToolInvocation<Evaluated> {
     }
 }
 
+/// An image returned by a tool (e.g. browser screenshot).
+#[derive(Debug, Clone)]
+pub struct ToolImage {
+    /// MIME type (e.g. `"image/png"`).
+    pub media_type: String,
+    /// Base64-encoded image data.
+    pub data: String,
+}
+
 #[derive(Debug)]
 pub struct ToolResult {
     pub output: String,
+    /// Images returned alongside text (e.g. browser screenshots).
+    /// Empty for most tools — only the browser tool populates this.
+    pub images: Vec<ToolImage>,
     /// Sub-agent cost data: (model_name, usage). Present only for SubAgent tools.
     pub sub_agent_usage: Option<(String, crate::providers::ApiUsage)>,
 }
@@ -122,6 +136,7 @@ impl ToolResult {
     pub fn text(output: String) -> Self {
         Self {
             output,
+            images: vec![],
             sub_agent_usage: None,
         }
     }

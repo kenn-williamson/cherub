@@ -3,7 +3,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{ApiUsage, ContentBlock, Message, StopReason, ToolDefinition, UserContent};
+use super::{
+    ApiUsage, ContentBlock, Message, StopReason, ToolDefinition, ToolResultImage, UserContent,
+};
 
 // --- Request types ---
 
@@ -54,7 +56,9 @@ pub(crate) enum WireContentBlock {
     #[serde(rename = "tool_result")]
     ToolResult {
         tool_use_id: String,
-        content: String,
+        /// Either a plain string (text-only) or an array of content blocks (text + images).
+        /// The Anthropic API accepts both formats for tool_result content.
+        content: WireToolResultContent,
         is_error: bool,
     },
     #[serde(rename = "image")]
@@ -71,6 +75,25 @@ pub(crate) struct WireImageSource {
     pub source_type: &'static str,
     pub media_type: String,
     pub data: String,
+}
+
+/// Content of a `tool_result` block. Either a plain string or an array of content blocks.
+/// The Anthropic API accepts both: `"content": "text"` or `"content": [{...}, ...]`.
+#[derive(Serialize)]
+#[serde(untagged)]
+pub(crate) enum WireToolResultContent {
+    Text(String),
+    Blocks(Vec<WireToolResultBlock>),
+}
+
+/// A content block inside a multi-block tool result (text or image).
+#[derive(Serialize)]
+#[serde(tag = "type")]
+pub(crate) enum WireToolResultBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image")]
+    Image { source: WireImageSource },
 }
 
 #[derive(Serialize)]
@@ -201,11 +224,17 @@ pub(crate) fn messages_to_wire(messages: &[Message]) -> Vec<WireMessage> {
             Message::ToolResult {
                 tool_use_id,
                 content,
+                images,
                 is_error,
             } => {
+                let wire_content = if images.is_empty() {
+                    WireToolResultContent::Text(content.clone())
+                } else {
+                    tool_result_content_to_wire(content, images)
+                };
                 pending_results.push(WireContentBlock::ToolResult {
                     tool_use_id: tool_use_id.clone(),
-                    content: content.clone(),
+                    content: wire_content,
                     is_error: *is_error,
                 });
             }
@@ -214,6 +243,26 @@ pub(crate) fn messages_to_wire(messages: &[Message]) -> Vec<WireMessage> {
 
     flush_results(&mut wire, &mut pending_results);
     wire
+}
+
+/// Build multi-block tool result content (text + images) for the Anthropic wire format.
+fn tool_result_content_to_wire(text: &str, images: &[ToolResultImage]) -> WireToolResultContent {
+    let mut blocks = Vec::with_capacity(1 + images.len());
+    if !text.is_empty() {
+        blocks.push(WireToolResultBlock::Text {
+            text: text.to_owned(),
+        });
+    }
+    for img in images {
+        blocks.push(WireToolResultBlock::Image {
+            source: WireImageSource {
+                source_type: "base64",
+                media_type: img.media_type.clone(),
+                data: img.data.clone(),
+            },
+        });
+    }
+    WireToolResultContent::Blocks(blocks)
 }
 
 fn flush_results(wire: &mut Vec<WireMessage>, pending: &mut Vec<WireContentBlock>) {
@@ -323,11 +372,13 @@ mod tests {
             Message::ToolResult {
                 tool_use_id: "id1".to_owned(),
                 content: "output1".to_owned(),
+                images: vec![],
                 is_error: false,
             },
             Message::ToolResult {
                 tool_use_id: "id2".to_owned(),
                 content: "output2".to_owned(),
+                images: vec![],
                 is_error: true,
             },
         ];

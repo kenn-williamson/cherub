@@ -35,6 +35,9 @@ container = ["dep:bollard", "dep:url", "dep:tempfile"]
 # Spawn MCP server processes, discover tools, route calls through enforcement.
 # Independent feature — does not imply postgres or credentials.
 mcp = ["dep:rmcp"]
+# browser: Container-sandboxed Playwright browser for web interaction.
+# Implies container (Docker runtime). No new Rust deps — browser runs inside Docker.
+browser = ["container"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

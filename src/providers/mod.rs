@@ -99,6 +99,11 @@ pub enum Message {
     ToolResult {
         tool_use_id: String,
         content: String,
+        /// Images returned by the tool (e.g. browser screenshots).
+        /// Empty for most tools. When non-empty, the wire serializer emits
+        /// image content blocks alongside the text content.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ToolResultImage>,
         is_error: bool,
     },
 }
@@ -110,6 +115,13 @@ impl Message {
             content: vec![UserContent::Text(s.to_owned())],
         }
     }
+}
+
+/// An image included in a tool result (e.g. browser screenshot).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolResultImage {
+    pub media_type: String,
+    pub data: String,
 }
 
 /// Why the model stopped generating.

@@ -182,6 +182,7 @@ async fn tool_result_round_trip() {
         Message::ToolResult {
             tool_use_id: "toolu_01".to_owned(),
             content: "file.txt\ndir/".to_owned(),
+            images: vec![],
             is_error: false,
         },
     ];

@@ -229,6 +229,7 @@ async fn compaction_does_not_split_tool_pairs() {
     session.push(Message::ToolResult {
         tool_use_id: "t1".to_owned(),
         content: "file1.txt\nfile2.txt".to_owned(),
+        images: vec![],
         is_error: false,
     });
     session.push(Message::Assistant {

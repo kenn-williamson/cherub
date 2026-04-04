@@ -265,6 +265,7 @@ mod tests {
         session.push(Message::ToolResult {
             tool_use_id: "t1".to_owned(),
             content: "file.txt".to_owned(),
+            images: vec![],
             is_error: false,
         });
         session.push(Message::Assistant {
@@ -347,6 +348,7 @@ mod tests {
             Message::ToolResult {
                 tool_use_id: "tool_abc".to_owned(),
                 content: "file.txt".to_owned(),
+                images: vec![],
                 is_error: false,
             },
         ];

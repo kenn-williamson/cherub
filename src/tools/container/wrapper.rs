@@ -224,7 +224,12 @@ impl ContainerTool {
                     ToolMessage::Log { level, message } => {
                         host_state.handle_log(&name, &level, &message);
                     }
-                    ToolMessage::Result { id, output, error } => {
+                    ToolMessage::Result {
+                        id,
+                        output,
+                        error,
+                        images,
+                    } => {
                         if id != call_id {
                             tracing::warn!(
                                 expected = call_id,
@@ -240,7 +245,19 @@ impl ContainerTool {
                                 name
                             )));
                         }
-                        return Ok(ToolResult::text(output.unwrap_or_default()));
+                        let tool_images: Vec<crate::tools::ToolImage> = images
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|img| crate::tools::ToolImage {
+                                media_type: img.media_type,
+                                data: img.data,
+                            })
+                            .collect();
+                        return Ok(ToolResult {
+                            output: output.unwrap_or_default(),
+                            images: tool_images,
+                            sub_agent_usage: None,
+                        });
                     }
                     ToolMessage::HostCall { id, function, args } => {
                         let result = host_state

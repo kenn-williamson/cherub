@@ -258,7 +258,9 @@ async fn ipc_execute_echo_roundtrip() {
         .expect("Result timeout")
         .expect("recv Result");
     match result_msg {
-        ToolMessage::Result { id, output, error } => {
+        ToolMessage::Result {
+            id, output, error, ..
+        } => {
             assert_eq!(id, 1);
             assert!(error.is_none(), "unexpected error: {error:?}");
             let out = output.expect("expected output");
@@ -328,7 +330,9 @@ async fn ipc_error_result_propagated() {
         .expect("timeout")
         .expect("recv");
     match result {
-        ToolMessage::Result { id, output, error } => {
+        ToolMessage::Result {
+            id, output, error, ..
+        } => {
             assert_eq!(id, 99);
             assert!(output.is_none());
             let err = error.expect("expected error");

@@ -41,6 +41,7 @@ cherub/
 │   │   ├── file.rs           # File tool: read/edit/glob/grep with workspace containment
 │   │   ├── path.rs           # Shared path validation: is_safe_relative_path, resolve_workspace_path, is_binary_content
 │   │   ├── container_bash.rs # Factory: container-sandboxed bash replacement (feature = "container")
+│   │   ├── container_browser.rs # Factory: container-sandboxed Playwright browser tool (feature = "browser")
 │   │   ├── dev_environment.rs # Dev environment tool: build sandbox images with language toolchains (feature = "container")
 │   │   ├── memory.rs         # Memory tool: store/recall/search/update/forget (feature = "memory")
 │   │   ├── http.rs           # HTTP tool: GET/POST/PUT/PATCH/DELETE with broker injection (feature = "credentials")
@@ -123,6 +124,7 @@ cherub/
 │   ├── hooks_integration.rs  # Hook lifecycle + stashing integration tests (M15a/b, 8 tests)
 │   ├── output_events.rs    # Output event integration tests: recapitulation, progress, turn lifecycle (M14b/c, 7 tests)
 │   ├── parallel_tools.rs   # Parallel tool execution tests (M18c)
+│   ├── browser_enforcement.rs  # Browser tool enforcement tests: BrowserStructured extraction, domain allowlist (feature = "browser")
 │   └── ui/
 │       ├── capability_token_private.rs      # Proves CapabilityToken can't be constructed outside enforcement
 │       └── capability_token_private.stderr  # Expected compiler error output
@@ -133,6 +135,10 @@ cherub/
 │   └── nextest.toml          # cargo-nextest config: 4 slots, retries, slow-test detection
 ├── examples/
 │   └── mock_mcp_server.rs    # Mock MCP server for integration tests (echo + add tools, rmcp ServerHandler)
+├── tools/
+│   └── container/
+│       ├── sandbox-bash/     # Dockerfile + entrypoint for container-sandboxed bash (feature = "container")
+│       └── browser/          # Dockerfile + ipc_client.mjs for Playwright browser tool (feature = "browser")
 ├── config/
 │   └── default_policy.toml   # Example policy file
 ├── DESIGN.md

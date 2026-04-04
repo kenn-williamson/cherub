@@ -1,6 +1,6 @@
 # Secure Agent Runtime — Design Document
 
-**Status:** Draft — M15 Complete (Lifecycle hooks, output stashing)
+**Status:** Draft — M15 Complete + browser tool (container-sandboxed Playwright, feature = "browser"; schedule runner stub)
 **Author:** Kenn Williamson  
 **Date:** February 2026
 

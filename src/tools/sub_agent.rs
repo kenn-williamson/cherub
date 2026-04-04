@@ -138,6 +138,7 @@ impl SubAgentTool {
                                     messages.push(Message::ToolResult {
                                         tool_use_id,
                                         content: result.output,
+                                        images: vec![],
                                         is_error: false,
                                     });
                                 }
@@ -150,6 +151,7 @@ impl SubAgentTool {
                                     messages.push(Message::ToolResult {
                                         tool_use_id,
                                         content: e.to_string(),
+                                        images: vec![],
                                         is_error: true,
                                     });
                                 }
@@ -164,6 +166,7 @@ impl SubAgentTool {
                             messages.push(Message::ToolResult {
                                 tool_use_id,
                                 content: "action not permitted".to_owned(),
+                                images: vec![],
                                 is_error: true,
                             });
                         }
@@ -188,6 +191,7 @@ impl SubAgentTool {
 
         Ok(ToolResult {
             output,
+            images: vec![],
             sub_agent_usage: Some((model_name, cumulative_usage)),
         })
     }

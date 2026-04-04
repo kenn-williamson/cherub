@@ -14,7 +14,8 @@ use crate::enforcement::policy::Policy;
 use crate::enforcement::{self, Decision};
 use crate::error::CherubError;
 use crate::providers::{
-    ApiUsage, ContentBlock, Message, Provider, StopReason, ToolDefinition, UserContent,
+    ApiUsage, ContentBlock, Message, Provider, StopReason, ToolDefinition, ToolResultImage,
+    UserContent,
 };
 use crate::tools::{Proposed, ToolContext, ToolInvocation, ToolRegistry};
 
@@ -988,6 +989,7 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                     }
                                 }
                                 // Hook: after_tool_call (success path).
+                                let result_images = result.images;
                                 let mut output = result.output;
                                 hooks::dispatch_after_tool_call(
                                     &self.hooks,
@@ -1002,9 +1004,17 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                 if !output.is_empty() {
                                     self.output.emit(OutputEvent::ToolOutput(&output)).await;
                                 }
+                                let images = result_images
+                                    .into_iter()
+                                    .map(|img| ToolResultImage {
+                                        media_type: img.media_type,
+                                        data: img.data,
+                                    })
+                                    .collect();
                                 self.session.push(Message::ToolResult {
                                     tool_use_id,
                                     content: output,
+                                    images,
                                     is_error: false,
                                 });
                                 #[cfg(feature = "sessions")]
@@ -1043,6 +1053,7 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                 self.session.push(Message::ToolResult {
                                     tool_use_id,
                                     content: err_output,
+                                    images: vec![],
                                     is_error: true,
                                 });
                                 #[cfg(feature = "sessions")]
@@ -1074,6 +1085,7 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                         self.session.push(Message::ToolResult {
                             tool_use_id,
                             content: "action not permitted".to_owned(),
+                            images: vec![],
                             is_error: true,
                         });
                         #[cfg(feature = "sessions")]
@@ -1150,6 +1162,7 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                         })
                                         .await;
                                         // Hook: after_tool_call (approved success path).
+                                        let result_images = result.images;
                                         let mut output = result.output;
                                         hooks::dispatch_after_tool_call(
                                             &self.hooks,
@@ -1166,9 +1179,17 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                                 .emit(OutputEvent::ToolOutput(&output))
                                                 .await;
                                         }
+                                        let images = result_images
+                                            .into_iter()
+                                            .map(|img| ToolResultImage {
+                                                media_type: img.media_type,
+                                                data: img.data,
+                                            })
+                                            .collect();
                                         self.session.push(Message::ToolResult {
                                             tool_use_id,
                                             content: output,
+                                            images,
                                             is_error: false,
                                         });
                                         #[cfg(feature = "sessions")]
@@ -1207,6 +1228,7 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                         self.session.push(Message::ToolResult {
                                             tool_use_id,
                                             content: err_output,
+                                            images: vec![],
                                             is_error: true,
                                         });
                                         #[cfg(feature = "sessions")]
@@ -1239,6 +1261,7 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                 self.session.push(Message::ToolResult {
                                     tool_use_id,
                                     content: "action not permitted".to_owned(),
+                                    images: vec![],
                                     is_error: true,
                                 });
                                 #[cfg(feature = "sessions")]

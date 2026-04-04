@@ -5,6 +5,8 @@
 //! - `memory` puts it in `params["action"]`, optionally qualified by `params["path"]`
 //! - `http` puts it in `params["action"]` (method) + `params["url"]` (host)
 //!
+//! - `browser` puts it in `params["action"]` + optional `params["url"]` (host)
+//!
 //! `MatchSource` selects the extraction strategy at policy-compile time.
 //! No changes to `evaluate()` are needed when adding new structured tools.
 
@@ -29,6 +31,11 @@ pub(super) enum MatchSource {
     /// Produces a single action string: `"{server}:{tool}"`, e.g. `"google-workspace:list_events"`.
     /// Missing/empty fields → `None` → Reject.
     McpStructured,
+    /// Extract `params["action"]`, optionally qualified by host from `params["url"]`.
+    /// If url present: `"{action}:{host}"` (e.g., `"browse:sos.state.co.us"`).
+    /// If url absent: `"{action}"` (e.g., `"click"`).
+    /// Missing/empty action → `None` → Reject.
+    BrowserStructured,
 }
 
 impl MatchSource {
@@ -91,6 +98,26 @@ impl MatchSource {
                     .filter(|s| !s.is_empty())?;
 
                 Some(vec![format!("{server}:{tool}")])
+            }
+            MatchSource::BrowserStructured => {
+                let action = params
+                    .get("action")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())?;
+
+                let action_str = match params
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    Some(url_str) => {
+                        let host = extract_url_host(url_str)?;
+                        format!("{action}:{host}")
+                    }
+                    None => action.to_owned(),
+                };
+
+                Some(vec![action_str])
             }
         }
     }
@@ -352,6 +379,91 @@ mod tests {
         assert_eq!(
             MatchSource::McpStructured.extract(&params),
             Some(vec!["fireflies:get_transcript".to_owned()])
+        );
+    }
+
+    // --- BrowserStructured extraction ---
+
+    #[test]
+    fn browser_browse_with_url() {
+        let params = json!({"action": "browse", "url": "https://sos.state.co.us/biz/search"});
+        assert_eq!(
+            MatchSource::BrowserStructured.extract(&params),
+            Some(vec!["browse:sos.state.co.us".to_owned()])
+        );
+    }
+
+    #[test]
+    fn browser_click_without_url() {
+        let params = json!({"action": "click", "selector": "#submit-btn"});
+        assert_eq!(
+            MatchSource::BrowserStructured.extract(&params),
+            Some(vec!["click".to_owned()])
+        );
+    }
+
+    #[test]
+    fn browser_fill_without_url() {
+        let params = json!({"action": "fill", "selector": "#name", "value": "ACME LLC"});
+        assert_eq!(
+            MatchSource::BrowserStructured.extract(&params),
+            Some(vec!["fill".to_owned()])
+        );
+    }
+
+    #[test]
+    fn browser_browse_strips_port() {
+        let params = json!({"action": "browse", "url": "https://example.com:8443/path"});
+        assert_eq!(
+            MatchSource::BrowserStructured.extract(&params),
+            Some(vec!["browse:example.com".to_owned()])
+        );
+    }
+
+    #[test]
+    fn browser_browse_missing_url_returns_action_only() {
+        // browse without url — no host to extract, returns just the action.
+        let params = json!({"action": "browse"});
+        assert_eq!(
+            MatchSource::BrowserStructured.extract(&params),
+            Some(vec!["browse".to_owned()])
+        );
+    }
+
+    #[test]
+    fn browser_missing_action_returns_none() {
+        let params = json!({"url": "https://example.com"});
+        assert!(MatchSource::BrowserStructured.extract(&params).is_none());
+    }
+
+    #[test]
+    fn browser_empty_action_returns_none() {
+        let params = json!({"action": "", "url": "https://example.com"});
+        assert!(MatchSource::BrowserStructured.extract(&params).is_none());
+    }
+
+    #[test]
+    fn browser_url_no_scheme_returns_none() {
+        // No "://" → extract_url_host returns None → entire extraction fails.
+        let params = json!({"action": "browse", "url": "example.com/path"});
+        assert!(MatchSource::BrowserStructured.extract(&params).is_none());
+    }
+
+    #[test]
+    fn browser_screenshot_without_url() {
+        let params = json!({"action": "screenshot"});
+        assert_eq!(
+            MatchSource::BrowserStructured.extract(&params),
+            Some(vec!["screenshot".to_owned()])
+        );
+    }
+
+    #[test]
+    fn browser_evaluate_without_url() {
+        let params = json!({"action": "evaluate", "script": "document.title"});
+        assert_eq!(
+            MatchSource::BrowserStructured.extract(&params),
+            Some(vec!["evaluate".to_owned()])
         );
     }
 }

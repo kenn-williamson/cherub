@@ -239,6 +239,7 @@ mod tests {
             Message::ToolResult {
                 tool_use_id: "t1".to_owned(),
                 content: "file.txt".to_owned(),
+                images: vec![],
                 is_error: false,
             },
         ];
@@ -253,6 +254,7 @@ mod tests {
         let messages = vec![Message::ToolResult {
             tool_use_id: "t1".to_owned(),
             content: "action not permitted".to_owned(),
+            images: vec![],
             is_error: true,
         }];
         let result = serialize_messages_for_prompt(&messages);
