@@ -2,6 +2,8 @@ pub mod approval;
 pub mod hooks;
 pub mod output;
 pub mod prompt;
+#[cfg(feature = "schedule")]
+pub mod schedule;
 pub mod session;
 pub mod tokens;
 

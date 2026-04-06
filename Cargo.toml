@@ -39,6 +39,11 @@ container = ["dep:bollard", "dep:url", "dep:tempfile"]
 # Spawn MCP server processes, discover tools, route calls through enforcement.
 # Independent feature — does not imply postgres or credentials.
 mcp = ["dep:rmcp"]
+# schedule: cron-based proactive agent triggers.
+# Independent feature — does not imply postgres or container deps.
+# Enables CHERUB_SCHEDULE_CONFIG + CHERUB_SCHEDULE_CHAT_ID for Telegram bot,
+# and --schedule <path> for the CLI.
+schedule = ["dep:cron", "dep:chrono"]
 # browser: Container-sandboxed Playwright browser for web interaction.
 # Implies container (Docker runtime). No new Rust deps — browser runs inside Docker.
 browser = ["container"]
@@ -89,6 +94,9 @@ tempfile = { version = "3", optional = true }
 
 # MCP server support dependencies (M11)
 rmcp = { version = "0.17", features = ["client", "transport-child-process"], optional = true }
+
+# Schedule feature dependency
+cron = { version = "0.16.0", optional = true }
 
 [[bin]]
 name = "cherub"

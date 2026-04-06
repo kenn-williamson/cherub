@@ -1,6 +1,6 @@
 # Secure Agent Runtime — Design Document
 
-**Status:** Draft — M15 Complete + browser tool (container-sandboxed Playwright, feature = "browser"; schedule runner stub)
+**Status:** Draft — M15 Complete + browser tool (container-sandboxed Playwright, feature = "browser") + schedule runner wired (feature = "schedule"; Telegram + CLI)
 **Author:** Kenn Williamson  
 **Date:** February 2026
 

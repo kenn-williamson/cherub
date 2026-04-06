@@ -543,7 +543,7 @@ Inspired by IronClaw's 13-dimension complexity scorer, but implemented as a deco
 
 These are real goals but not yet planned into milestones:
 
-- Schedule triggers (cron/interval): `tokio-cron-scheduler` injects "scheduled wake" messages into agent loop. Feature-gated (`schedule`). CLI flag `--schedule`.
+- ~~Schedule triggers~~ **Done** — `cron` crate, feature-gated (`schedule`). CLI `--schedule <path>` and Telegram via `CHERUB_SCHEDULE_CONFIG` + `CHERUB_SCHEDULE_CHAT_ID`.
 - Policy hot-reload (file watch + re-evaluate). Design exists in DESIGN.md Section 9.4.
 - Multi-agent routing (different policies per channel)
 - Per-task dynamic constraints (session-scoped, user-confirmed via approval gate — see DESIGN.md Section 3.5)

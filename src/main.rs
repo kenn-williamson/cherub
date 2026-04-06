@@ -49,6 +49,9 @@ enum Command {
         /// Optional MCP servers config file (M11).
         #[cfg(feature = "mcp")]
         mcp_config: Option<PathBuf>,
+        /// Optional schedule config file for cron-triggered turns.
+        #[cfg(feature = "schedule")]
+        schedule_config: Option<PathBuf>,
         /// Extended thinking budget in tokens (Anthropic-only, M14a).
         thinking_budget: Option<u32>,
         /// Whether to show thinking blocks in output (M14a).
@@ -166,6 +169,8 @@ fn parse_args() -> Result<Command> {
     let mut browser = false;
     #[cfg(feature = "mcp")]
     let mut mcp_config: Option<PathBuf> = None;
+    #[cfg(feature = "schedule")]
+    let mut schedule_config: Option<PathBuf> = None;
     let mut providers_config: Option<PathBuf> = None;
     let mut thinking_budget: Option<u32> = None;
     let mut show_thinking = false;
@@ -226,6 +231,13 @@ fn parse_args() -> Result<Command> {
                     mcp_config = Some(PathBuf::from(&args[i]));
                 }
             }
+            #[cfg(feature = "schedule")]
+            "--schedule" => {
+                i += 1;
+                if i < args.len() {
+                    schedule_config = Some(PathBuf::from(&args[i]));
+                }
+            }
             "--providers" => {
                 i += 1;
                 if i < args.len() {
@@ -271,6 +283,8 @@ fn parse_args() -> Result<Command> {
         browser,
         #[cfg(feature = "mcp")]
         mcp_config,
+        #[cfg(feature = "schedule")]
+        schedule_config,
         thinking_budget,
         show_thinking,
     })
@@ -926,6 +940,7 @@ async fn run_agent(
     #[cfg(feature = "container")] sandbox_bash: bool,
     #[cfg(feature = "browser")] browser: bool,
     #[cfg(feature = "mcp")] mcp_config: Option<PathBuf>,
+    #[cfg(feature = "schedule")] schedule_config: Option<PathBuf>,
     thinking_budget: Option<u32>,
     show_thinking: bool,
 ) -> Result<()> {
@@ -1408,12 +1423,98 @@ async fn run_agent(
         }
     }
 
+    // ── Schedule runner setup (feature = "schedule") ─────────────────────────
+    #[cfg(feature = "schedule")]
+    let mut schedule_rx: Option<
+        tokio::sync::mpsc::Receiver<cherub::runtime::schedule::ScheduledMessage>,
+    > = {
+        use cherub::runtime::schedule::{ScheduleConfig, parse_entries, schedule_runner};
+        if let Some(ref path) = schedule_config {
+            let path_str = path
+                .to_str()
+                .context("schedule config path is not valid UTF-8")?;
+            let config = ScheduleConfig::load(path_str)?;
+            let parsed = parse_entries(&config.schedules)?;
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(schedule_runner(parsed, tx));
+            info!(config = %path.display(), "schedule runner started");
+            Some(rx)
+        } else {
+            None
+        }
+    };
+
     info!(model = %model, user_id = %user_id, "cherub started");
     println!("cherub: secure agent runtime (model: {model})");
     println!("Type a message, Ctrl-D to exit, Ctrl-C to cancel input.\n");
 
     let mut rl = DefaultEditor::new().context("failed to init readline")?;
 
+    // ── Schedule-enabled path ─────────────────────────────────────────────────
+    // When a schedule channel is present, use a dedicated readline task that
+    // permanently owns `rl` and sends results through an mpsc channel, so we
+    // can `select!` on two receivers without any ownership juggling.
+    #[cfg(feature = "schedule")]
+    if let Some(mut sched_rx) = schedule_rx {
+        let (line_tx, mut line_rx) = tokio::sync::mpsc::channel::<rustyline::Result<String>>(1);
+
+        // Readline task: owns `rl` for the session lifetime.
+        tokio::task::spawn_blocking(move || {
+            loop {
+                let result = rl.readline("you> ");
+                match &result {
+                    Ok(line) if !line.trim().is_empty() => {
+                        let _ = rl.add_history_entry(line.trim());
+                    }
+                    _ => {}
+                }
+                let is_done = result.is_err();
+                if line_tx.blocking_send(result).is_err() || is_done {
+                    break;
+                }
+            }
+        });
+
+        'sched: loop {
+            tokio::select! {
+                line_result = line_rx.recv() => {
+                    match line_result {
+                        Some(Ok(line)) => {
+                            let line = line.trim();
+                            if line.is_empty() { continue; }
+                            if let Err(e) = agent.run_turn_text(line).await {
+                                eprintln!("[error] {e}");
+                            }
+                            println!();
+                        }
+                        Some(Err(ReadlineError::Interrupted)) => {
+                            println!("(Ctrl-C — type a message or Ctrl-D to exit)");
+                        }
+                        Some(Err(ReadlineError::Eof)) | None => {
+                            println!("Goodbye.");
+                            break 'sched;
+                        }
+                        Some(Err(e)) => {
+                            bail!("readline error: {e}");
+                        }
+                    }
+                }
+                msg = sched_rx.recv() => {
+                    if let Some(msg) = msg {
+                        println!("\n[schedule: {}] {}", msg.name, msg.message);
+                        if let Err(e) = agent.run_turn_text(&msg.message).await {
+                            eprintln!("[error] {e}");
+                        }
+                        println!();
+                    }
+                    // msg == None means schedule runner stopped; keep going with readline only.
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    // ── Default path (no schedule) ────────────────────────────────────────────
     loop {
         match rl.readline("you> ") {
             Ok(line) => {
@@ -1422,7 +1523,6 @@ async fn run_agent(
                     continue;
                 }
                 let _ = rl.add_history_entry(line);
-
                 if let Err(e) = agent.run_turn_text(line).await {
                     eprintln!("[error] {e}");
                 }
@@ -1471,6 +1571,8 @@ async fn main() -> Result<()> {
             browser,
             #[cfg(feature = "mcp")]
             mcp_config,
+            #[cfg(feature = "schedule")]
+            schedule_config,
             thinking_budget,
             show_thinking,
         } => {
@@ -1490,6 +1592,8 @@ async fn main() -> Result<()> {
                 browser,
                 #[cfg(feature = "mcp")]
                 mcp_config,
+                #[cfg(feature = "schedule")]
+                schedule_config,
                 thinking_budget,
                 show_thinking,
             )

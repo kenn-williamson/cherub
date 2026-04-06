@@ -193,6 +193,14 @@ async fn main() -> Result<()> {
         info!("verbose output enabled — events sent immediately");
     }
 
+    // Schedule runner target chat ID (feature = "schedule").
+    #[cfg(feature = "schedule")]
+    let schedule_chat_id: Option<teloxide::types::ChatId> =
+        std::env::var("CHERUB_SCHEDULE_CHAT_ID")
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .map(teloxide::types::ChatId);
+
     // Session config
     let config = SessionConfig {
         bot: bot.clone(),
@@ -220,6 +228,51 @@ async fn main() -> Result<()> {
         approval_tx.clone(),
     ));
     tokio::spawn(approval::approval_manager(approval_rx));
+
+    // Spawn schedule runner if CHERUB_SCHEDULE_CONFIG + CHERUB_SCHEDULE_CHAT_ID are set.
+    #[cfg(feature = "schedule")]
+    if let Some(chat_id) = schedule_chat_id {
+        if let Ok(schedule_path) = std::env::var("CHERUB_SCHEDULE_CONFIG") {
+            use cherub::runtime::schedule::{ScheduleConfig, parse_entries, schedule_runner};
+            match ScheduleConfig::load(&schedule_path)
+                .and_then(|c| parse_entries(&c.schedules).map_err(Into::into))
+            {
+                Ok(parsed) => {
+                    let (sched_tx, sched_rx) = tokio::sync::mpsc::channel(16);
+                    tokio::spawn(schedule_runner(parsed, sched_tx));
+                    info!(config = %schedule_path, chat_id = %chat_id, "schedule runner started");
+
+                    // Forward scheduled messages into the session manager as inbound user messages.
+                    let session_tx_sched = session_tx.clone();
+                    tokio::spawn(async move {
+                        let mut rx = sched_rx;
+                        while let Some(msg) = rx.recv().await {
+                            info!(schedule = %msg.name, "schedule trigger fired");
+                            let inbound = cherub::telegram::session::InboundMessage {
+                                content: vec![cherub::providers::UserContent::Text(msg.message)],
+                            };
+                            if session_tx_sched
+                                .send(cherub::telegram::session::SessionCommand::Message {
+                                    chat_id,
+                                    message: inbound,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                tracing::warn!(
+                                    "session manager channel closed, schedule runner stopping"
+                                );
+                                break;
+                            }
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load schedule config, running without schedule");
+                }
+            }
+        }
+    }
 
     // Set up teloxide dispatcher.
     let allowed_chats = Arc::new(allowed_chats);
