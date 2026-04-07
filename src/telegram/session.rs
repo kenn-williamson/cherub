@@ -18,9 +18,18 @@ use crate::tools::ToolRegistry;
 use super::approval::{ApprovalMessage, TelegramApprovalGate};
 use super::output::TelegramSink;
 
-/// Inbound message from a Telegram user to be routed to the appropriate session.
-pub struct InboundMessage {
-    pub content: Vec<UserContent>,
+/// Inbound message routed to a per-chat session task.
+pub enum InboundMessage {
+    /// A message to process with the agent.
+    /// `autonomous = true` for cron-triggered turns (commit-tier actions are queued).
+    /// `autonomous = false` for user-initiated turns (commit-tier actions block).
+    User {
+        content: Vec<UserContent>,
+        autonomous: bool,
+    },
+    /// Drain any approved tasks from the task queue for this chat.
+    /// Sent by the callback handler when the user approves a queued task.
+    DrainApprovedTasks,
 }
 
 /// Configuration for creating new per-chat agent sessions.
@@ -36,9 +45,9 @@ pub struct SessionConfig {
     pub base_url: Option<String>,
     /// Optional providers config (overrides provider_type/api_key/base_url).
     pub providers_config: Option<ProvidersConfig>,
-    /// PostgreSQL connection pool for session persistence and/or memory.
-    /// Present when `sessions` or `memory` feature is enabled.
-    #[cfg(any(feature = "sessions", feature = "memory"))]
+    /// PostgreSQL connection pool for session persistence, memory, and/or task queue.
+    /// Present when `sessions`, `memory`, or `postgres` feature is enabled.
+    #[cfg(any(feature = "sessions", feature = "memory", feature = "postgres"))]
     pub db_pool: Option<crate::storage::Pool>,
     /// Embedding provider for hybrid memory search (M6c).
     /// `None` = FTS-only search.
@@ -52,6 +61,10 @@ pub struct SessionConfig {
     pub thinking_budget: Option<u32>,
     /// Verbose output: send events immediately instead of batching per turn (M14d).
     pub verbose: bool,
+    /// Task queue store for async approval (autonomous turns).
+    /// When set, commit-tier actions during autonomous turns are queued instead of blocking.
+    #[cfg(feature = "postgres")]
+    pub task_store: Option<std::sync::Arc<dyn crate::storage::TaskStore>>,
 }
 
 /// Message sent to the session manager from the connector.
@@ -63,6 +76,13 @@ pub enum SessionCommand {
     },
     /// Route an approval callback to the approval manager.
     ApprovalCallback { id: u64, approved: bool },
+    /// Route a task queue callback: mark the task approved/rejected and drain.
+    #[cfg(feature = "postgres")]
+    TaskCallback {
+        chat_id: ChatId,
+        task_id: uuid::Uuid,
+        approved: bool,
+    },
 }
 
 /// Session manager task. Owns all per-chat sessions and approval routing.
@@ -92,7 +112,11 @@ pub async fn session_manager(
                         provider_type: config.provider_type.clone(),
                         base_url: config.base_url.clone(),
                         providers_config: config.providers_config.clone(),
-                        #[cfg(any(feature = "sessions", feature = "memory"))]
+                        #[cfg(any(
+                            feature = "sessions",
+                            feature = "memory",
+                            feature = "postgres"
+                        ))]
                         db_pool: config.db_pool.clone(),
                         #[cfg(feature = "memory")]
                         embedder: config.embedder.clone(),
@@ -100,6 +124,8 @@ pub async fn session_manager(
                         sandbox_bash_runtime: config.sandbox_bash_runtime.clone(),
                         thinking_budget: config.thinking_budget,
                         verbose: config.verbose,
+                        #[cfg(feature = "postgres")]
+                        task_store: config.task_store.clone(),
                     };
                     let approval_tx = approval_tx.clone();
 
@@ -119,6 +145,71 @@ pub async fn session_manager(
                 let _ = approval_tx
                     .send(ApprovalMessage::Resolve { id, approved })
                     .await;
+            }
+            #[cfg(feature = "postgres")]
+            SessionCommand::TaskCallback {
+                chat_id,
+                task_id,
+                approved,
+            } => {
+                // Update the task status in the store.
+                if let Some(ref store) = config.task_store {
+                    let result = if approved {
+                        store.mark_approved(task_id).await
+                    } else {
+                        store.mark_rejected(task_id).await
+                    };
+                    if let Err(e) = result {
+                        warn!(
+                            %task_id,
+                            error = %e,
+                            "failed to update task status (non-fatal)"
+                        );
+                    }
+                }
+
+                // If approved, send a DrainApprovedTasks signal to the chat.
+                if approved {
+                    if let Some(sender) = chat_senders.get(&chat_id) {
+                        let _ = sender.send(InboundMessage::DrainApprovedTasks).await;
+                    } else {
+                        // No active session yet — create one so it can drain.
+                        let sender = chat_senders.entry(chat_id).or_insert_with(|| {
+                            info!(chat_id = %chat_id, "creating chat session for task drain");
+                            let (tx, rx) = mpsc::channel::<InboundMessage>(32);
+                            let chat_config = SessionConfig {
+                                bot: config.bot.clone(),
+                                policy: config.policy.clone(),
+                                model: config.model.clone(),
+                                max_tokens: config.max_tokens,
+                                api_key: config.api_key.clone(),
+                                provider_type: config.provider_type.clone(),
+                                base_url: config.base_url.clone(),
+                                providers_config: config.providers_config.clone(),
+                                #[cfg(any(
+                                    feature = "sessions",
+                                    feature = "memory",
+                                    feature = "postgres"
+                                ))]
+                                db_pool: config.db_pool.clone(),
+                                #[cfg(feature = "memory")]
+                                embedder: config.embedder.clone(),
+                                #[cfg(feature = "container")]
+                                sandbox_bash_runtime: config.sandbox_bash_runtime.clone(),
+                                thinking_budget: config.thinking_budget,
+                                verbose: config.verbose,
+                                #[cfg(feature = "postgres")]
+                                task_store: config.task_store.clone(),
+                            };
+                            let approval_tx = approval_tx.clone();
+                            tokio::spawn(async move {
+                                chat_session(rx, chat_id, chat_config, approval_tx).await;
+                            });
+                            tx
+                        });
+                        let _ = sender.send(InboundMessage::DrainApprovedTasks).await;
+                    }
+                }
             }
         }
     }
@@ -300,7 +391,22 @@ async fn chat_session(
     let system_prompt = build_system_prompt(&cwd);
 
     let output = TelegramSink::new(config.bot.clone(), chat_id, config.verbose);
-    let approval_gate = TelegramApprovalGate::new(config.bot, chat_id, approval_tx);
+
+    #[cfg(feature = "postgres")]
+    let approval_gate = {
+        let gate = TelegramApprovalGate::new(config.bot.clone(), chat_id, approval_tx);
+        if let Some(ref store) = config.task_store {
+            gate.with_task_store(
+                std::sync::Arc::clone(store),
+                user_id.clone(),
+                None, // session_id is attached later; drain will use stored user_id
+            )
+        } else {
+            gate
+        }
+    };
+    #[cfg(not(feature = "postgres"))]
+    let approval_gate = TelegramApprovalGate::new(config.bot.clone(), chat_id, approval_tx);
 
     let mut agent = AgentLoop::new(
         config.policy,
@@ -354,6 +460,13 @@ async fn chat_session(
         agent.with_pricing_table(pricing_table);
     }
 
+    // Attach task queue store for async approval.
+    #[cfg(feature = "postgres")]
+    if let Some(ref store) = config.task_store {
+        agent.with_task_store(std::sync::Arc::clone(store));
+        info!(chat_id = %chat_id, "task queue store attached (async approval enabled)");
+    }
+
     // Attach session persistence per chat if a pool is available.
     #[cfg(feature = "sessions")]
     if let Some(pool) = config.db_pool {
@@ -380,8 +493,36 @@ async fn chat_session(
     }
 
     while let Some(msg) = rx.recv().await {
-        if let Err(e) = agent.run_turn(msg.content).await {
-            warn!(chat_id = %chat_id, error = %e, "agent turn error");
+        match msg {
+            InboundMessage::User {
+                content,
+                autonomous,
+            } => {
+                // Set autonomous mode before the turn; it resets to false after.
+                #[cfg(feature = "postgres")]
+                if autonomous {
+                    agent.set_autonomous_mode(true);
+                    // Drain any tasks approved since the last cycle before processing new work.
+                    let drained = agent.drain_approved_tasks().await;
+                    if drained > 0 {
+                        info!(chat_id = %chat_id, count = drained, "drained approved tasks before cron turn");
+                    }
+                }
+                if let Err(e) = agent.run_turn(content).await {
+                    warn!(chat_id = %chat_id, error = %e, "agent turn error");
+                }
+            }
+            InboundMessage::DrainApprovedTasks => {
+                #[cfg(feature = "postgres")]
+                {
+                    let drained = agent.drain_approved_tasks().await;
+                    info!(chat_id = %chat_id, count = drained, "drained approved tasks on callback");
+                }
+                #[cfg(not(feature = "postgres"))]
+                {
+                    warn!(chat_id = %chat_id, "DrainApprovedTasks received but postgres feature not enabled");
+                }
+            }
         }
     }
 }

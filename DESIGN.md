@@ -1,6 +1,6 @@
 # Secure Agent Runtime — Design Document
 
-**Status:** Draft — M15 Complete + browser tool (container-sandboxed Playwright, feature = "browser") + schedule runner wired (feature = "schedule"; Telegram + CLI)
+**Status:** Draft — M15.5 Complete — async approval task queue + proactive autonomous operation
 **Author:** Kenn Williamson  
 **Date:** February 2026
 

@@ -110,6 +110,15 @@ pub struct AgentLoop<A: ApprovalGate, O: OutputSink> {
     /// Lifecycle hooks (M15a). Dispatched at 6 points in the agent loop.
     /// Errors are non-fatal — logged and skipped, never blocking execution.
     hooks: Vec<Box<dyn hooks::Hook>>,
+    /// Optional task queue store for async approval.
+    /// When set with `autonomous_mode`, commit-tier actions are queued instead
+    /// of blocking the turn waiting for human input.
+    #[cfg(feature = "postgres")]
+    task_store: Option<std::sync::Arc<dyn crate::storage::TaskStore>>,
+    /// When true, escalated actions are queued to `task_store` instead of blocking.
+    /// Set by the caller for cron/autonomous turns; false for interactive turns.
+    #[cfg(feature = "postgres")]
+    autonomous_mode: bool,
 }
 
 impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
@@ -143,6 +152,10 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
             pricing_table: std::collections::HashMap::new(),
             show_thinking: false,
             hooks: Vec::new(),
+            #[cfg(feature = "postgres")]
+            task_store: None,
+            #[cfg(feature = "postgres")]
+            autonomous_mode: false,
         }
     }
 
@@ -230,6 +243,119 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
     /// Hook errors are non-fatal — logged and skipped, never blocking execution.
     pub fn with_hook(&mut self, hook: Box<dyn hooks::Hook>) {
         self.hooks.push(hook);
+    }
+
+    /// Attach a task queue store for async approval.
+    ///
+    /// When attached and `with_autonomous_mode()` is set, commit-tier actions during
+    /// the turn are queued to the store instead of blocking for user input.
+    #[cfg(feature = "postgres")]
+    pub fn with_task_store(&mut self, store: std::sync::Arc<dyn crate::storage::TaskStore>) {
+        self.task_store = Some(store);
+    }
+
+    /// Enable autonomous mode for the next turn.
+    ///
+    /// In autonomous mode, escalated (commit-tier) actions are queued to `task_store`
+    /// instead of blocking. The user is notified via the approval gate. The turn
+    /// continues with remaining work rather than waiting.
+    ///
+    /// Call this before each cron-triggered turn; the flag is reset to `false` after
+    /// each `run_turn()` completes (interactive turns are always non-autonomous).
+    #[cfg(feature = "postgres")]
+    pub fn set_autonomous_mode(&mut self, enabled: bool) {
+        self.autonomous_mode = enabled;
+    }
+
+    /// Execute all tasks in the queue that have been approved by the user.
+    ///
+    /// Called after an approval callback is received (immediate) or at the start of
+    /// a cron turn (catches any approvals that arrived between cycles). Each approved
+    /// task is re-evaluated through the enforcement layer (policy may have changed),
+    /// executed with the human-approval token, and marked done or failed.
+    ///
+    /// Returns the number of tasks that were executed (successfully or not).
+    #[cfg(feature = "postgres")]
+    pub async fn drain_approved_tasks(&mut self) -> usize {
+        use crate::enforcement;
+        use crate::tools::{Proposed, ToolContext, ToolInvocation};
+
+        let store = match &self.task_store {
+            Some(s) => std::sync::Arc::clone(s),
+            None => return 0,
+        };
+
+        let tasks = match store.list_approved(&self.session.user_id).await {
+            Ok(t) => t,
+            Err(e) => {
+                warn!(error = %e, "drain_approved_tasks: failed to list approved tasks");
+                return 0;
+            }
+        };
+
+        let mut executed = 0usize;
+        for task in tasks {
+            if let Err(e) = store.mark_running(task.id).await {
+                warn!(task_id = %task.id, error = %e, "drain: failed to mark running");
+                continue;
+            }
+
+            let action_str = task.action.as_deref().unwrap_or("");
+            let proposal =
+                ToolInvocation::<Proposed>::new(&task.tool, action_str, task.params.clone());
+            let (evaluated, decision) = enforcement::evaluate(proposal, &self.policy, None);
+
+            let ctx = ToolContext {
+                user_id: self.session.user_id.clone(),
+                session_id: self.session.id,
+                turn_number: self.session.next_ordinal,
+            };
+
+            match decision {
+                crate::enforcement::Decision::Escalate { tier } => {
+                    let token = enforcement::approve_escalation(tier);
+                    match evaluated.execute(token, &self.registry, &ctx).await {
+                        Ok(result) => {
+                            info!(task_id = %task.id, tool = %task.tool, "approved task executed");
+                            executed += 1;
+                            let output = result.output;
+                            self.output
+                                .emit(output::OutputEvent::Text(&format!(
+                                    "✓ Completed: {}\n\n{}",
+                                    task.description, output
+                                )))
+                                .await;
+                            if let Err(e) = store.mark_done(task.id, &output).await {
+                                warn!(task_id = %task.id, error = %e, "drain: failed to mark done");
+                            }
+                        }
+                        Err(e) => {
+                            warn!(task_id = %task.id, error = %e, "approved task execution failed");
+                            let err_msg = e.to_string();
+                            self.output
+                                .emit(output::OutputEvent::Text(&format!(
+                                    "✗ Failed: {}\n\n{}",
+                                    task.description, err_msg
+                                )))
+                                .await;
+                            if let Err(e2) = store.mark_failed(task.id, &err_msg).await {
+                                warn!(task_id = %task.id, error = %e2, "drain: failed to mark failed");
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    // Policy changed since the task was queued — action is no longer commit-tier.
+                    let msg = "policy changed: action no longer requires approval (tier changed)";
+                    warn!(task_id = %task.id, "drain: {}", msg);
+                    if let Err(e) = store.mark_failed(task.id, msg).await {
+                        warn!(task_id = %task.id, error = %e, "drain: failed to mark failed");
+                    }
+                }
+            }
+        }
+
+        executed
     }
 
     /// Read-only view of the conversation history.
@@ -962,32 +1088,32 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                 .await;
                                 // Record sub-agent cost under the sub-agent's model name (M13d).
                                 #[cfg(feature = "postgres")]
-                                if let Some((ref model_name, ref usage)) = result.sub_agent_usage {
-                                    if let Some(ref store) = self.cost_store {
-                                        use crate::providers::pricing;
-                                        let cost_usd = pricing::lookup_pricing(
-                                            &self.pricing_table,
-                                            model_name,
-                                        )
-                                        .map_or(0.0, |p| pricing::compute_cost(usage, &p));
-                                        if let Err(e) = store
-                                            .record(NewTokenUsage {
-                                                session_id: Some(self.session.id),
-                                                user_id: self.session.user_id.clone(),
-                                                turn_number: Some(self.session.next_ordinal),
-                                                model_name: model_name.clone(),
-                                                input_tokens: usage.input_tokens,
-                                                output_tokens: usage.output_tokens,
-                                                cost_usd,
-                                                call_type: CallType::Inference,
-                                            })
-                                            .await
-                                        {
-                                            warn!(
-                                                error = %e,
-                                                "sub-agent cost recording failed (non-fatal)"
-                                            );
-                                        }
+                                if let Some((ref model_name, ref usage)) = result.sub_agent_usage
+                                    && let Some(ref store) = self.cost_store
+                                {
+                                    use crate::providers::pricing;
+                                    let cost_usd = pricing::lookup_pricing(
+                                        &self.pricing_table,
+                                        model_name,
+                                    )
+                                    .map_or(0.0, |p| pricing::compute_cost(usage, &p));
+                                    if let Err(e) = store
+                                        .record(NewTokenUsage {
+                                            session_id: Some(self.session.id),
+                                            user_id: self.session.user_id.clone(),
+                                            turn_number: Some(self.session.next_ordinal),
+                                            model_name: model_name.clone(),
+                                            input_tokens: usage.input_tokens,
+                                            output_tokens: usage.output_tokens,
+                                            cost_usd,
+                                            call_type: CallType::Inference,
+                                        })
+                                        .await
+                                    {
+                                        warn!(
+                                            error = %e,
+                                            "sub-agent cost recording failed (non-fatal)"
+                                        );
                                     }
                                 }
                                 // Hook: after_tool_call (success path).
@@ -1115,6 +1241,10 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                             tool: &name,
                             command: display_str,
                             params: &input,
+                            #[cfg(feature = "postgres")]
+                            autonomous: self.autonomous_mode,
+                            #[cfg(not(feature = "postgres"))]
+                            autonomous: false,
                         };
                         match self.approval_gate.request_approval(&context).await {
                             ApprovalResult::Approved => {
@@ -1269,6 +1399,42 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                 #[cfg(feature = "sessions")]
                                 self.session.persist_last().await;
                             }
+                            ApprovalResult::Queued(task_id) => {
+                                info!(
+                                    decision = "QUEUED",
+                                    tool = %name,
+                                    action = %display_str,
+                                    %task_id,
+                                    "action queued for async approval"
+                                );
+                                #[cfg(feature = "postgres")]
+                                self.audit(NewAuditEvent {
+                                    session_id: Some(ctx.session_id),
+                                    user_id: ctx.user_id.clone(),
+                                    turn_number: Some(ctx.turn_number),
+                                    tool: name.clone(),
+                                    action: Some(display_str.to_owned()),
+                                    decision: AuditDecision::Escalate,
+                                    tier: Some(tier_str),
+                                    duration_ms: None,
+                                    is_error: None,
+                                })
+                                .await;
+                                // Inform the model that the action has been queued.
+                                // The model can continue with other work items.
+                                self.session.push(Message::ToolResult {
+                                    tool_use_id,
+                                    content: format!(
+                                        "Action queued for your approval (task id: {task_id}). \
+                                         I'll execute it once you approve the Telegram notification. \
+                                         Continuing with other work."
+                                    ),
+                                    images: vec![],
+                                    is_error: false,
+                                });
+                                #[cfg(feature = "sessions")]
+                                self.session.persist_last().await;
+                            }
                         }
                     }
                 }
@@ -1285,6 +1451,13 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                     ))
                     .await;
             }
+        }
+
+        // Reset autonomous mode after each turn so interactive turns are never
+        // accidentally treated as autonomous. Cron turns re-set it before calling.
+        #[cfg(feature = "postgres")]
+        {
+            self.autonomous_mode = false;
         }
 
         Ok(())

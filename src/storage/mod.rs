@@ -4,6 +4,7 @@ pub mod pg_cost_store;
 pub mod pg_memory_store;
 pub mod pg_pricing_store;
 pub mod pg_session_store;
+pub mod pg_task_store;
 pub mod search;
 
 #[cfg(feature = "credentials")]
@@ -566,6 +567,75 @@ pub trait PricingStore: Send + Sync {
 
     /// Delete a pricing entry. Returns `true` if a row was deleted.
     async fn delete(&self, model_pattern: &str) -> Result<bool, CherubError>;
+}
+
+// ─── Task queue types (async approval) ───────────────────────────────────────
+
+/// Input for creating a new queued task. `id`, `status`, and timestamps are DB-generated.
+#[derive(Debug)]
+pub struct NewTask {
+    pub user_id: String,
+    pub session_id: Option<Uuid>,
+    pub tool: String,
+    pub action: Option<String>,
+    pub params: serde_json::Value,
+    pub tier: String,
+    /// Human-readable description for the Telegram approval notification.
+    pub description: String,
+}
+
+/// A fully-loaded task row.
+#[derive(Debug, Clone)]
+pub struct Task {
+    pub id: Uuid,
+    pub user_id: String,
+    pub session_id: Option<Uuid>,
+    pub status: String,
+    pub tool: String,
+    pub action: Option<String>,
+    pub params: serde_json::Value,
+    pub tier: String,
+    pub description: String,
+    pub result_output: Option<String>,
+    pub error_message: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Storage backend for the autonomous task queue.
+///
+/// Tracks tool invocations that need human approval during autonomous (cron) turns.
+/// The agent queues instead of blocking; user approves via Telegram; drain executes.
+///
+/// This is a true `dyn Trait` boundary — backend selected at runtime.
+#[async_trait]
+pub trait TaskStore: Send + Sync {
+    /// Create a new task in `awaiting_approval` status. Returns the DB-assigned UUID.
+    async fn create(&self, task: NewTask) -> Result<Uuid, CherubError>;
+
+    /// Record the Telegram message ID of the sent approval notification.
+    /// Called after the notification is sent so we have a reference for editing.
+    async fn set_tg_message_id(&self, id: Uuid, tg_message_id: &str) -> Result<(), CherubError>;
+
+    /// List all tasks with `approved` status for the given user. These are ready to execute.
+    async fn list_approved(&self, user_id: &str) -> Result<Vec<Task>, CherubError>;
+
+    /// List all tasks with `awaiting_approval` status for the given user.
+    async fn list_pending(&self, user_id: &str) -> Result<Vec<Task>, CherubError>;
+
+    /// Transition a task from `awaiting_approval` to `approved`.
+    async fn mark_approved(&self, id: Uuid) -> Result<(), CherubError>;
+
+    /// Transition a task from `awaiting_approval` to `rejected`.
+    async fn mark_rejected(&self, id: Uuid) -> Result<(), CherubError>;
+
+    /// Transition a task from `approved` to `running`.
+    async fn mark_running(&self, id: Uuid) -> Result<(), CherubError>;
+
+    /// Transition a task from `running` to `done` with the execution output.
+    async fn mark_done(&self, id: Uuid, output: &str) -> Result<(), CherubError>;
+
+    /// Transition a task to `failed` with the error message.
+    async fn mark_failed(&self, id: Uuid, error: &str) -> Result<(), CherubError>;
 }
 
 /// Connect to PostgreSQL, run pending migrations, and return a connection pool.

@@ -9,11 +9,17 @@ pub struct EscalationContext<'a> {
     pub tool: &'a str,
     pub command: &'a str,
     pub params: &'a serde_json::Value,
+    /// When true, the gate should queue instead of blocking (autonomous/cron turns).
+    /// Gates that don't support queuing ignore this and block as normal.
+    pub autonomous: bool,
 }
 
 pub enum ApprovalResult {
     Approved,
     Denied,
+    /// Action was stored in the task queue instead of blocking.
+    /// The user has been notified; execution will resume once they approve.
+    Queued(uuid::Uuid),
 }
 
 /// Abstraction over approval gates. Allows mock gates for testing.

@@ -8,7 +8,7 @@ use tracing::{info, warn};
 
 use crate::providers::UserContent;
 
-use super::approval::parse_callback_data;
+use super::approval::{parse_callback_data, parse_task_callback_data};
 use super::session::{InboundMessage, SessionCommand};
 
 /// Handle an incoming Telegram message. Extracts text and photos,
@@ -71,7 +71,11 @@ pub async fn handle_message(
     let _ = session_tx
         .send(SessionCommand::Message {
             chat_id,
-            message: InboundMessage { content },
+            // User-initiated messages are never autonomous.
+            message: InboundMessage::User {
+                content,
+                autonomous: false,
+            },
         })
         .await;
 
@@ -84,14 +88,50 @@ pub async fn handle_callback(
     query: CallbackQuery,
     session_tx: mpsc::Sender<SessionCommand>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if let Some(data) = &query.data
-        && let Some((id, approved)) = parse_callback_data(data)
-    {
+    let Some(data) = &query.data else {
+        return Ok(());
+    };
+
+    // Task queue callbacks (async approval): "task_approve:{uuid}" / "task_deny:{uuid}"
+    #[cfg(feature = "postgres")]
+    if let Some((task_id, approved)) = parse_task_callback_data(data) {
+        // The chat_id comes from the message the keyboard was attached to.
+        let chat_id = query
+            .message
+            .as_ref()
+            .map(|m| m.chat().id)
+            .unwrap_or_else(|| {
+                warn!("task callback missing message chat_id, using 0");
+                ChatId(0)
+            });
+
+        let _ = session_tx
+            .send(SessionCommand::TaskCallback {
+                chat_id,
+                task_id,
+                approved,
+            })
+            .await;
+
+        let answer_text = if approved {
+            "Approved \u{2713}"
+        } else {
+            "Denied"
+        };
+        let _ = bot
+            .answer_callback_query(query.id.clone())
+            .text(answer_text)
+            .await;
+
+        return Ok(());
+    }
+
+    // Blocking approval callbacks (interactive turns): "approve:{u64}" / "deny:{u64}"
+    if let Some((id, approved)) = parse_callback_data(data) {
         let _ = session_tx
             .send(SessionCommand::ApprovalCallback { id, approved })
             .await;
 
-        // Acknowledge the callback to remove the loading indicator.
         let answer_text = if approved { "Approved" } else { "Denied" };
         let _ = bot
             .answer_callback_query(query.id.clone())

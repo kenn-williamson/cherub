@@ -480,6 +480,39 @@ Six interception points, matching the natural boundaries in `run_turn()`:
 
 ---
 
+## Milestone 15.5: Async Approval + Proactive Operation ✓
+
+**Goal:** The agent operates in two modes: reactive (always-on Telegram, responds immediately) and proactive (cron-triggered, works autonomously, queues commit-tier actions instead of blocking). Both modes share one persistent task queue. When the user approves a queued action via Telegram, execution resumes immediately.
+
+### Task Queue (complete)
+- [x] `task_queue` DB migration: status lifecycle (`awaiting_approval → approved → running → done/failed`)
+- [x] `TaskStore` trait + `NewTask`/`Task` types (feature = "postgres")
+- [x] `PgTaskStore` implementation following PgAuditStore pattern
+
+### Async Approval Gate (complete)
+- [x] `ApprovalResult::Queued(Uuid)` variant — returns immediately without blocking
+- [x] `QueuedApprovalGate`: stores task in DB, sends Telegram inline-keyboard notification with [Approve][Deny] buttons
+- [x] `TelegramApprovalGate::request_approval()` routes to queue path when `context.autonomous && task_store.is_some()`
+- [x] `parse_task_callback_data()` for `task_approve:{uuid}` / `task_deny:{uuid}` callback patterns
+
+### Autonomous Mode (complete)
+- [x] `AgentLoop::autonomous_mode` flag — set before cron turns, reset after each `run_turn()`
+- [x] `AgentLoop::with_task_store()` builder method
+- [x] `AgentLoop::drain_approved_tasks()` — re-evaluates approved tasks through enforcement layer, executes, emits results
+- [x] Queued task result produces informational ToolResult to session (not an error)
+
+### Telegram Wiring (complete)
+- [x] `InboundMessage` enum: `User { content, autonomous }` and `DrainApprovedTasks` variants
+- [x] `SessionCommand::TaskCallback { chat_id, task_id, approved }` — routes approval callbacks to session manager
+- [x] Session manager handles `TaskCallback`: updates DB status, sends drain signal to chat session
+- [x] Schedule runner sends `autonomous: true` on cron turns; user messages always `autonomous: false`
+- [x] `chat_session` loop: drains approved tasks before each user-initiated turn; immediate drain on `DrainApprovedTasks`
+
+### Key Invariant Preserved
+- `drain_approved_tasks()` still calls `enforcement::evaluate()` then `approve_escalation()` — CapabilityToken only issued after `Decision::Escalate` match. The DB task record is the human's authorization; the enforcement layer converts it to a token.
+
+---
+
 ## Milestone 16: Smart Routing
 
 **Goal:** Automatically route simple queries to cheaper/faster models, reserving the primary model for complex reasoning. Cost optimization without manual sub-agent delegation.

@@ -586,13 +586,13 @@ async fn run_audit_command(sub: AuditSubcommand) -> Result<()> {
         } => {
             let parsed_decision = decision
                 .as_deref()
-                .map(|s| AuditDecision::from_str(s))
+                .map(AuditDecision::from_str)
                 .transpose()
                 .context("invalid --decision value; use: allow, reject, escalate, approve, deny")?;
 
             let parsed_session = session_id
                 .as_deref()
-                .map(|s| Uuid::parse_str(s))
+                .map(Uuid::parse_str)
                 .transpose()
                 .context("invalid --session value; must be a UUID")?;
 
@@ -613,10 +613,7 @@ async fn run_audit_command(sub: AuditSubcommand) -> Result<()> {
             if events.is_empty() {
                 println!("No audit events found.");
             } else {
-                println!(
-                    "{:<26}  {:<10}  {:<8}  {:<10}  {}",
-                    "timestamp", "tool", "decision", "tier", "action"
-                );
+                println!("{:<26}  {:<10}  {:<8}  {:<10}  action", "timestamp", "tool", "decision", "tier");
                 println!("{}", "-".repeat(80));
                 for ev in &events {
                     let ts = ev.created_at.format("%Y-%m-%d %H:%M:%S%.3f");
@@ -646,14 +643,11 @@ fn parse_cost_args(args: &[String]) -> Result<Command> {
             let mut days: u32 = 7;
             let mut i = 1;
             while i < args.len() {
-                match args[i].as_str() {
-                    "--days" => {
-                        i += 1;
-                        if let Some(v) = args.get(i) {
-                            days = v.parse().context("--days must be a positive number")?;
-                        }
+                if args[i].as_str() == "--days" {
+                    i += 1;
+                    if let Some(v) = args.get(i) {
+                        days = v.parse().context("--days must be a positive number")?;
                     }
-                    _ => {}
                 }
                 i += 1;
             }
@@ -929,6 +923,8 @@ async fn run_pricing_command(sub: PricingSubcommand) -> Result<()> {
 
 // ─── Agent REPL ───────────────────────────────────────────────────────────────
 
+// TODO: bundle args into a RunAgentConfig struct
+#[allow(clippy::too_many_arguments)]
 async fn run_agent(
     policy_path: PathBuf,
     model: String,
@@ -1012,8 +1008,13 @@ async fn run_agent(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| ".".to_owned());
 
-    // Connect to PostgreSQL if DATABASE_URL is set (needed for sessions, memory, or credentials).
-    #[cfg(any(feature = "sessions", feature = "memory", feature = "credentials"))]
+    // Connect to PostgreSQL if DATABASE_URL is set (needed for sessions, memory, credentials, or task queue).
+    #[cfg(any(
+        feature = "sessions",
+        feature = "memory",
+        feature = "credentials",
+        feature = "postgres"
+    ))]
     let db_pool = {
         match std::env::var("DATABASE_URL") {
             Ok(db_url_raw) => {
@@ -1425,7 +1426,7 @@ async fn run_agent(
 
     // ── Schedule runner setup (feature = "schedule") ─────────────────────────
     #[cfg(feature = "schedule")]
-    let mut schedule_rx: Option<
+    let schedule_rx: Option<
         tokio::sync::mpsc::Receiver<cherub::runtime::schedule::ScheduledMessage>,
     > = {
         use cherub::runtime::schedule::{ScheduleConfig, parse_entries, schedule_runner};

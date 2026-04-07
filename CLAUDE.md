@@ -90,7 +90,8 @@ cherub/
 │   │   ├── pg_credential_store.rs  # PgCredentialStore: PostgreSQL CredentialStore impl (feature = "credentials")
 │   │   ├── pg_audit_store.rs    # PgAuditStore: PostgreSQL AuditStore impl, append-only event log (M10)
 │   │   ├── pg_cost_store.rs     # PgCostStore: PostgreSQL CostStore impl, append-only token usage (M12)
-│   │   └── pg_pricing_store.rs  # PgPricingStore: PostgreSQL PricingStore impl, model pricing rates
+│   │   ├── pg_pricing_store.rs  # PgPricingStore: PostgreSQL PricingStore impl, model pricing rates
+│   │   └── pg_task_store.rs     # PgTaskStore: PostgreSQL TaskStore impl, async approval task queue
 │   └── telegram/             # Feature-gated: #[cfg(feature = "telegram")]
 │       ├── mod.rs             # Module declarations
 │       ├── approval.rs        # TelegramApprovalGate (inline keyboard + oneshot channels)
@@ -130,7 +131,9 @@ cherub/
 │       └── capability_token_private.stderr  # Expected compiler error output
 ├── migrations/
 │   ├── 20260309000000_initial_schema.up.sql    # Consolidated schema: sessions, memories, credentials, audit, cost, pricing
-│   └── 20260309000000_initial_schema.down.sql  # Reversible rollback: drop all tables + vector extension
+│   ├── 20260309000000_initial_schema.down.sql  # Reversible rollback: drop all tables + vector extension
+│   ├── 20260407000000_task_queue.up.sql        # task_queue table: async approval queue for autonomous turns
+│   └── 20260407000000_task_queue.down.sql      # Drops task_queue table
 ├── .config/
 │   └── nextest.toml          # cargo-nextest config: 4 slots, retries, slow-test detection
 ├── examples/

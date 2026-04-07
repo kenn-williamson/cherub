@@ -317,24 +317,24 @@ impl ContainerTool {
     /// Respawns if the container has crashed or was never started.
     async fn ensure_running(&self, state: &mut ContainerState) -> Result<(), CherubError> {
         // Fast path: already running with a live transport.
-        if state.transport.is_some() {
-            if let Some(ref cid) = state.container_id {
-                match self.runtime.is_running(cid).await {
-                    Ok(true) => return Ok(()),
-                    Ok(false) => {
-                        tracing::warn!(
-                            tool = %self.metadata.name,
-                            container_id = %cid,
-                            "container crashed — respawning"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            tool = %self.metadata.name,
-                            error = %e,
-                            "failed to inspect container — respawning"
-                        );
-                    }
+        if state.transport.is_some()
+            && let Some(ref cid) = state.container_id
+        {
+            match self.runtime.is_running(cid).await {
+                Ok(true) => return Ok(()),
+                Ok(false) => {
+                    tracing::warn!(
+                        tool = %self.metadata.name,
+                        container_id = %cid,
+                        "container crashed — respawning"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        tool = %self.metadata.name,
+                        error = %e,
+                        "failed to inspect container — respawning"
+                    );
                 }
             }
         }

@@ -128,14 +128,17 @@ pub fn image_tag(languages: &[String]) -> String {
 
 /// Check if a Docker image exists locally.
 async fn image_exists(tag: &str) -> bool {
-    tokio::process::Command::new("docker")
-        .args(["image", "inspect", tag])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::process::Command::new("docker")
+            .args(["image", "inspect", tag])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .status(),
+    )
+    .await;
+    matches!(result, Ok(Ok(s)) if s.success())
 }
 
 /// Generate the Dockerfile content for the given languages.
