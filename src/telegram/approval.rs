@@ -83,8 +83,10 @@ pub struct TelegramApprovalGate {
     task_store: Option<Arc<dyn TaskStore>>,
     #[cfg(feature = "postgres")]
     user_id: String,
+    /// Shared cell filled in by session.rs after with_persistence() attaches a session.
+    /// Allows queued tasks to record the originating session_id for audit provenance.
     #[cfg(feature = "postgres")]
-    session_id: Option<Uuid>,
+    session_id_cell: Option<Arc<std::sync::Mutex<Option<Uuid>>>>,
 }
 
 impl TelegramApprovalGate {
@@ -100,21 +102,25 @@ impl TelegramApprovalGate {
             #[cfg(feature = "postgres")]
             user_id: chat_id.to_string(),
             #[cfg(feature = "postgres")]
-            session_id: None,
+            session_id_cell: None,
         }
     }
 
     /// Attach a task store to enable async queuing for autonomous turns.
+    ///
+    /// `session_id_cell` is a shared cell that session.rs fills in after
+    /// `with_persistence()` attaches a session. Queued tasks read the cell at
+    /// queue time so they can record the originating session for audit provenance.
     #[cfg(feature = "postgres")]
     pub fn with_task_store(
         mut self,
         store: Arc<dyn TaskStore>,
         user_id: String,
-        session_id: Option<Uuid>,
+        session_id_cell: Arc<std::sync::Mutex<Option<Uuid>>>,
     ) -> Self {
         self.task_store = Some(store);
         self.user_id = user_id;
-        self.session_id = session_id;
+        self.session_id_cell = Some(session_id_cell);
         self
     }
 
@@ -127,10 +133,15 @@ impl TelegramApprovalGate {
             return ApprovalResult::Denied;
         };
 
+        let session_id = self
+            .session_id_cell
+            .as_ref()
+            .and_then(|cell| *cell.lock().unwrap());
+
         let task_id = match store
             .create(NewTask {
                 user_id: self.user_id.clone(),
-                session_id: self.session_id,
+                session_id,
                 tool: context.tool.to_owned(),
                 action: Some(context.command.to_owned()),
                 params: context.params.clone(),

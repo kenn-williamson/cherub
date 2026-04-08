@@ -629,7 +629,10 @@ pub trait TaskStore: Send + Sync {
     async fn mark_rejected(&self, id: Uuid) -> Result<(), CherubError>;
 
     /// Transition a task from `approved` to `running`.
-    async fn mark_running(&self, id: Uuid) -> Result<(), CherubError>;
+    ///
+    /// Returns `true` if this caller claimed the task, `false` if another drainer
+    /// already claimed it (concurrent drain race). Callers must skip on `false`.
+    async fn mark_running(&self, id: Uuid) -> Result<bool, CherubError>;
 
     /// Transition a task from `running` to `done` with the execution output.
     async fn mark_done(&self, id: Uuid, output: &str) -> Result<(), CherubError>;

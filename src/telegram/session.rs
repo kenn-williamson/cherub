@@ -392,6 +392,12 @@ async fn chat_session(
 
     let output = TelegramSink::new(config.bot.clone(), chat_id, config.verbose);
 
+    // Shared cell filled in after with_persistence() so queued tasks record the
+    // correct session_id for audit provenance.
+    #[cfg(feature = "postgres")]
+    let session_id_cell: Arc<std::sync::Mutex<Option<uuid::Uuid>>> =
+        Arc::new(std::sync::Mutex::new(None));
+
     #[cfg(feature = "postgres")]
     let approval_gate = {
         let gate = TelegramApprovalGate::new(config.bot.clone(), chat_id, approval_tx);
@@ -399,7 +405,7 @@ async fn chat_session(
             gate.with_task_store(
                 std::sync::Arc::clone(store),
                 user_id.clone(),
-                None, // session_id is attached later; drain will use stored user_id
+                Arc::clone(&session_id_cell),
             )
         } else {
             gate
@@ -478,13 +484,16 @@ async fn chat_session(
             .await
         {
             Ok(()) => {
+                let sid = agent.session_id();
                 let msg_count = agent.session_messages().len();
                 info!(
                     chat_id = %chat_id,
-                    session_id = %agent.session_id(),
+                    session_id = %sid,
                     message_count = msg_count,
                     "session persistence attached"
                 );
+                // Fill in the shared cell so queued tasks record the correct session_id.
+                *session_id_cell.lock().unwrap() = Some(sid);
             }
             Err(e) => {
                 warn!(chat_id = %chat_id, error = %e, "session persistence unavailable, running ephemeral");

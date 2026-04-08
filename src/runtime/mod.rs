@@ -295,9 +295,16 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
 
         let mut executed = 0usize;
         for task in tasks {
-            if let Err(e) = store.mark_running(task.id).await {
-                warn!(task_id = %task.id, error = %e, "drain: failed to mark running");
-                continue;
+            match store.mark_running(task.id).await {
+                Ok(true) => {} // claimed — proceed
+                Ok(false) => {
+                    info!(task_id = %task.id, "drain: lost race, task already claimed by another drainer");
+                    continue;
+                }
+                Err(e) => {
+                    warn!(task_id = %task.id, error = %e, "drain: failed to mark running");
+                    continue;
+                }
             }
 
             let action_str = task.action.as_deref().unwrap_or("");
@@ -762,6 +769,12 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
 
         self.output.turn_start().await;
         let result = self.run_turn_inner(content).await;
+        // Always clear autonomous_mode — even if the turn errored — so a failed
+        // autonomous turn cannot contaminate the next user-driven interactive turn.
+        #[cfg(feature = "postgres")]
+        {
+            self.autonomous_mode = false;
+        }
         self.output.turn_end().await;
         result
     }
@@ -1240,7 +1253,9 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                         let context = EscalationContext {
                             tool: &name,
                             command: display_str,
-                            params: &input,
+                            // Use enriched params (MCP metadata injected) so that
+                            // drain_approved_tasks() re-evaluation succeeds on MCP tools.
+                            params: &evaluated.params,
                             #[cfg(feature = "postgres")]
                             autonomous: self.autonomous_mode,
                             #[cfg(not(feature = "postgres"))]
@@ -1451,13 +1466,6 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                     ))
                     .await;
             }
-        }
-
-        // Reset autonomous mode after each turn so interactive turns are never
-        // accidentally treated as autonomous. Cron turns re-set it before calling.
-        #[cfg(feature = "postgres")]
-        {
-            self.autonomous_mode = false;
         }
 
         Ok(())

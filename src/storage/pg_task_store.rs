@@ -101,8 +101,8 @@ impl TaskStore for PgTaskStore {
         Ok(())
     }
 
-    async fn mark_running(&self, id: Uuid) -> Result<(), CherubError> {
-        sqlx::query(
+    async fn mark_running(&self, id: Uuid) -> Result<bool, CherubError> {
+        let result = sqlx::query(
             "UPDATE task_queue \
              SET status = 'running', updated_at = $1 \
              WHERE id = $2 AND status = 'approved'",
@@ -113,7 +113,7 @@ impl TaskStore for PgTaskStore {
         .await
         .map_err(query_err)?;
 
-        Ok(())
+        Ok(result.rows_affected() == 1)
     }
 
     async fn mark_done(&self, id: Uuid, output: &str) -> Result<(), CherubError> {
