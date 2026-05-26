@@ -58,12 +58,12 @@ impl BashTool {
         let start = Instant::now();
 
         let result = tokio::time::timeout(self.timeout, async {
-            Command::new("bash")
-                .arg("-c")
-                .arg(command)
-                .kill_on_drop(true)
-                .output()
-                .await
+            let mut cmd = Command::new("bash");
+            cmd.arg("-c").arg(command).kill_on_drop(true);
+            if let Ok(ws) = std::env::var("CHERUB_WORKSPACE") {
+                cmd.current_dir(ws);
+            }
+            cmd.output().await
         })
         .await;
 

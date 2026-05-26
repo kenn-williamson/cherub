@@ -61,6 +61,8 @@ pub struct SessionConfig {
     pub thinking_budget: Option<u32>,
     /// Verbose output: send events immediately instead of batching per turn (M14d).
     pub verbose: bool,
+    /// Custom system prompt (overrides default coding-assistant prompt).
+    pub system_prompt_override: Option<String>,
     /// Task queue store for async approval (autonomous turns).
     /// When set, commit-tier actions during autonomous turns are queued instead of blocking.
     #[cfg(feature = "postgres")]
@@ -124,6 +126,7 @@ pub async fn session_manager(
                         sandbox_bash_runtime: config.sandbox_bash_runtime.clone(),
                         thinking_budget: config.thinking_budget,
                         verbose: config.verbose,
+                        system_prompt_override: config.system_prompt_override.clone(),
                         #[cfg(feature = "postgres")]
                         task_store: config.task_store.clone(),
                     };
@@ -198,6 +201,7 @@ pub async fn session_manager(
                                 sandbox_bash_runtime: config.sandbox_bash_runtime.clone(),
                                 thinking_budget: config.thinking_budget,
                                 verbose: config.verbose,
+                                system_prompt_override: config.system_prompt_override.clone(),
                                 #[cfg(feature = "postgres")]
                                 task_store: config.task_store.clone(),
                             };
@@ -385,10 +389,14 @@ async fn chat_session(
         registry
     };
 
-    let cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| ".".to_owned());
-    let system_prompt = build_system_prompt(&cwd);
+    let cwd = std::env::var("CHERUB_WORKSPACE").unwrap_or_else(|_| {
+        std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| ".".to_owned())
+    });
+    let system_prompt = config
+        .system_prompt_override
+        .unwrap_or_else(|| build_system_prompt(&cwd));
 
     let output = TelegramSink::new(config.bot.clone(), chat_id, config.verbose);
 

@@ -389,9 +389,16 @@ pub struct ToolRegistry {
     tools: Vec<ToolImpl>,
 }
 
-/// Returns the workspace root directory (current working directory).
+/// Returns the workspace root directory.
+///
+/// Uses `CHERUB_WORKSPACE` if set, otherwise falls back to the current
+/// working directory. The workspace root is the containment boundary for
+/// the file tool — all relative paths are resolved against it and must
+/// stay inside it.
 fn workspace_root() -> std::path::PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    std::env::var("CHERUB_WORKSPACE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
 }
 
 impl ToolRegistry {

@@ -17,7 +17,7 @@ use cherub::runtime::prompt::build_system_prompt;
 use cherub::tools::ToolRegistry;
 
 const DEFAULT_POLICY_PATH: &str = "config/default_policy.toml";
-const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
+const DEFAULT_MODEL: &str = "claude-opus-4-7";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
 // ─── CLI argument parsing ─────────────────────────────────────────────────────
@@ -1324,7 +1324,17 @@ async fn run_agent(
         registry
     };
 
-    let system_prompt = build_system_prompt(&cwd);
+    let system_prompt = std::env::var("CHERUB_SYSTEM_PROMPT_FILE")
+        .ok()
+        .and_then(|path| {
+            std::fs::read_to_string(&path)
+                .map_err(|e| {
+                    tracing::warn!(path = %path, error = %e, "failed to read system prompt file, using default");
+                    e
+                })
+                .ok()
+        })
+        .unwrap_or_else(|| build_system_prompt(&cwd));
 
     let approval_gate = CliApprovalGate::new();
     let output = StdoutSink;

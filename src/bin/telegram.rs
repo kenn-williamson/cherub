@@ -13,7 +13,7 @@ use cherub::telegram::connector;
 use cherub::telegram::session::{SessionCommand, SessionConfig};
 
 const DEFAULT_POLICY_PATH: &str = "config/default_policy.toml";
-const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
+const DEFAULT_MODEL: &str = "claude-opus-4-7";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
 #[tokio::main]
@@ -212,6 +212,17 @@ async fn main() -> Result<()> {
             .and_then(|s| s.trim().parse::<i64>().ok())
             .map(teloxide::types::ChatId);
 
+    // Custom system prompt file (overrides default).
+    let system_prompt_override: Option<String> = std::env::var("CHERUB_SYSTEM_PROMPT_FILE")
+        .ok()
+        .map(|path| {
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("failed to read system prompt file '{path}': {e}"))
+        });
+    if system_prompt_override.is_some() {
+        info!("custom system prompt loaded from CHERUB_SYSTEM_PROMPT_FILE");
+    }
+
     // Session config
     let config = SessionConfig {
         bot: bot.clone(),
@@ -230,6 +241,7 @@ async fn main() -> Result<()> {
         sandbox_bash_runtime,
         thinking_budget,
         verbose,
+        system_prompt_override,
         #[cfg(feature = "postgres")]
         task_store,
     };
