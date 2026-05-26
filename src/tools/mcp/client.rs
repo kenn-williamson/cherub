@@ -44,14 +44,13 @@ impl McpClient {
         tool_name: &str,
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<CallToolResult, CherubError> {
+        let mut params = CallToolRequestParams::new(tool_name.to_owned());
+        if let Some(args) = arguments {
+            params = params.with_arguments(args);
+        }
         self.service
             .peer()
-            .call_tool(CallToolRequestParams {
-                meta: None,
-                name: tool_name.to_owned().into(),
-                arguments,
-                task: None,
-            })
+            .call_tool(params)
             .await
             .map_err(|e| {
                 CherubError::Mcp(format!(

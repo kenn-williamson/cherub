@@ -133,7 +133,9 @@ cherub/
 │   ├── 20260309000000_initial_schema.up.sql    # Consolidated schema: sessions, memories, credentials, audit, cost, pricing
 │   ├── 20260309000000_initial_schema.down.sql  # Reversible rollback: drop all tables + vector extension
 │   ├── 20260407000000_task_queue.up.sql        # task_queue table: async approval queue for autonomous turns
-│   └── 20260407000000_task_queue.down.sql      # Drops task_queue table
+│   ├── 20260407000000_task_queue.down.sql      # Drops task_queue table
+│   ├── 20260526000000_task_queue_status_check.up.sql   # CHECK constraint on task_queue.status
+│   └── 20260526000000_task_queue_status_check.down.sql # Drops task_queue status CHECK constraint
 ├── .config/
 │   └── nextest.toml          # cargo-nextest config: 4 slots, retries, slow-test detection
 ├── examples/

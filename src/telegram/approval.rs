@@ -136,7 +136,7 @@ impl TelegramApprovalGate {
         let session_id = self
             .session_id_cell
             .as_ref()
-            .and_then(|cell| *cell.lock().unwrap());
+            .and_then(|cell| *cell.lock().expect("session_id_cell poisoned"));
 
         let task_id = match store
             .create(NewTask {

@@ -493,7 +493,7 @@ async fn chat_session(
                     "session persistence attached"
                 );
                 // Fill in the shared cell so queued tasks record the correct session_id.
-                *session_id_cell.lock().unwrap() = Some(sid);
+                *session_id_cell.lock().expect("session_id_cell poisoned") = Some(sid);
             }
             Err(e) => {
                 warn!(chat_id = %chat_id, error = %e, "session persistence unavailable, running ephemeral");

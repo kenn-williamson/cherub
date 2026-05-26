@@ -90,7 +90,7 @@ impl ResourceLimiter for WasmResourceLimiter {
         current: usize,
         desired: usize,
         _maximum: Option<usize>,
-    ) -> anyhow::Result<bool> {
+    ) -> Result<bool, wasmtime::Error> {
         let desired_u64 = desired as u64;
         if desired_u64 > self.memory_limit {
             tracing::warn!(
@@ -111,7 +111,7 @@ impl ResourceLimiter for WasmResourceLimiter {
         _current: usize,
         desired: usize,
         _maximum: Option<usize>,
-    ) -> anyhow::Result<bool> {
+    ) -> Result<bool, wasmtime::Error> {
         if desired > 10_000 {
             tracing::warn!(desired, "WASM table growth denied: too large");
             return Ok(false);
