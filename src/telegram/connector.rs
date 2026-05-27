@@ -48,6 +48,60 @@ pub async fn handle_message(
         }
     }
 
+    // Handle slash commands before passing to the agent.
+    if let Some(text) = msg.text() {
+        if text.starts_with("/stop") {
+            let _ = session_tx
+                .send(SessionCommand::Message {
+                    chat_id,
+                    message: InboundMessage::StopTurn,
+                })
+                .await;
+            return Ok(());
+        }
+        if text.starts_with("/clear") {
+            let _ = session_tx
+                .send(SessionCommand::Message {
+                    chat_id,
+                    message: InboundMessage::ClearSession,
+                })
+                .await;
+            return Ok(());
+        }
+        if let Some(model_cmd) = text.strip_prefix("/model") {
+            let arg = model_cmd.trim();
+            if arg.is_empty() {
+                // /model with no arg — query current model. Send as regular message
+                // so the agent can report it (we don't have access to the agent here).
+                let _ = session_tx
+                    .send(SessionCommand::Message {
+                        chat_id,
+                        message: InboundMessage::User {
+                            content: vec![UserContent::Text(
+                                "What model are you currently using?".to_owned(),
+                            )],
+                            autonomous: false,
+                        },
+                    })
+                    .await;
+                return Ok(());
+            }
+            let model = match arg {
+                "sonnet" => "claude-sonnet-4-6".to_owned(),
+                "haiku" => "claude-haiku-4-5".to_owned(),
+                "opus" => "claude-opus-4-7".to_owned(),
+                other => other.to_owned(),
+            };
+            let _ = session_tx
+                .send(SessionCommand::Message {
+                    chat_id,
+                    message: InboundMessage::ModelSwitch { model },
+                })
+                .await;
+            return Ok(());
+        }
+    }
+
     // Handle text content (including captions on photos).
     if let Some(text) = msg.text().or(msg.caption())
         && !text.is_empty()

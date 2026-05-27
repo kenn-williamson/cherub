@@ -81,6 +81,41 @@ impl Session {
             );
         }
     }
+    /// Clear all conversation messages, resetting the session to a blank state.
+    ///
+    /// Only affects in-memory message history. Memories (PostgreSQL MemoryStore)
+    /// and files on disk are not touched.
+    pub fn clear_messages(&mut self) {
+        self.messages.clear();
+        self.next_ordinal = 0;
+    }
+
+    /// Start a new session, preserving the store attachment but generating a
+    /// fresh ID. The old session remains in the database untouched.
+    pub fn start_new_session(&mut self) {
+        self.id = Uuid::now_v7();
+        self.messages.clear();
+        self.next_ordinal = 0;
+        self.compaction_count = 0;
+    }
+
+    /// Persist a new session to the store after rotation.
+    /// Archives the old session and creates the new one in a single transaction.
+    #[cfg(feature = "sessions")]
+    pub async fn persist_new_session(&self, old_session_id: Uuid) {
+        let Some(ref store) = self.store else {
+            return;
+        };
+        if let Err(e) = store.rotate_session(old_session_id, self.id).await {
+            tracing::warn!(
+                error = %e,
+                old_session = %old_session_id,
+                new_session = %self.id,
+                "failed to rotate session in DB (non-fatal)"
+            );
+        }
+    }
+
     /// Read-only view of the session messages.
     pub fn messages(&self) -> &[Message] {
         &self.messages

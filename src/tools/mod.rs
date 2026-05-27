@@ -236,7 +236,7 @@ impl ToolImpl {
             },
             Self::File(_) => ToolDefinition {
                 name: "file".to_owned(),
-                description: "Read, edit, search, and find files in the workspace. \
+                description: "Read, write, edit, search, and find files in the workspace. \
                     All paths are relative to the workspace root. \
                     Use this instead of bash for file operations."
                     .to_owned(),
@@ -245,12 +245,16 @@ impl ToolImpl {
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["read", "edit", "glob", "grep"],
+                            "enum": ["read", "write", "edit", "glob", "grep"],
                             "description": "Operation to perform"
                         },
                         "path": {
                             "type": "string",
-                            "description": "Relative file path (required for read/edit; optional base dir for glob/grep)"
+                            "description": "Relative file path (required for read/write/edit; optional base dir for glob/grep)"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "File content to write (for write action; creates parent dirs)"
                         },
                         "offset": {
                             "type": "integer",

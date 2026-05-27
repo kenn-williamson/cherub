@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use teloxide::prelude::*;
-use teloxide::types::{MessageId, ParseMode};
+use teloxide::types::{ChatAction, MessageId, ParseMode};
 
 use crate::runtime::output::{OutputEvent, OutputSink};
 
@@ -88,18 +88,20 @@ impl TelegramSink {
         }
     }
 
-    /// Send or edit the status message (progress indicator).
-    async fn update_status(&self, text: &str) {
-        let existing = { *self.status_message_id.lock().unwrap() };
-        if let Some(msg_id) = existing {
-            // Edit existing status message.
-            let _ = self.bot.edit_message_text(self.chat_id, msg_id, text).await;
-        } else {
-            // Send new status message.
-            if let Ok(msg) = self.bot.send_message(self.chat_id, text).await {
-                *self.status_message_id.lock().unwrap() = Some(msg.id);
+    /// Edit the status message into the final response text, or send new if no status exists.
+    async fn finalize_status(&self, text: &str) {
+        let msg_id = { self.status_message_id.lock().unwrap().take() };
+        if let Some(msg_id) = msg_id {
+            // Try to edit the status message into the response.
+            // If the text is too long or edit fails, delete status and send fresh.
+            if text.len() <= MAX_MESSAGE_LEN {
+                if self.bot.edit_message_text(self.chat_id, msg_id, text).await.is_ok() {
+                    return;
+                }
             }
+            let _ = self.bot.delete_message(self.chat_id, msg_id).await;
         }
+        self.send_plain(text).await;
     }
 
     /// Delete the status message if present.
@@ -118,15 +120,13 @@ impl TelegramSink {
 
 impl OutputSink for TelegramSink {
     async fn emit(&self, event: OutputEvent<'_>) {
-        // Progress/ProgressClear always go through status message, regardless of mode.
+        // Progress events just send a typing indicator — no message edits, no notifications.
         match &event {
-            OutputEvent::Progress { tool, status } => {
-                let text = format!("⏳ {tool}: {status}");
-                self.update_status(&text).await;
+            OutputEvent::Progress { .. } => {
+                let _ = self.bot.send_chat_action(self.chat_id, ChatAction::Typing).await;
                 return;
             }
             OutputEvent::ProgressClear => {
-                self.clear_status().await;
                 return;
             }
             _ => {}
@@ -232,19 +232,26 @@ impl OutputSink for TelegramSink {
     async fn turn_start(&self) {
         if !self.verbose {
             *self.batch.lock().unwrap() = Some(TurnBatch::new());
-            self.update_status("Working...").await;
+            // One acknowledgement message, then typing indicator handles "alive" signal.
+            if let Ok(msg) = self.bot.send_message(self.chat_id, "Working...").await {
+                *self.status_message_id.lock().unwrap() = Some(msg.id);
+            }
+            let _ = self.bot.send_chat_action(self.chat_id, ChatAction::Typing).await;
         }
     }
 
     async fn turn_end(&self) {
         if !self.verbose {
             let batch = { self.batch.lock().unwrap().take() };
-            self.clear_status().await;
             if let Some(batch) = batch {
                 let msg = compose_turn_message(&batch);
                 if !msg.is_empty() {
-                    self.send_plain(&msg).await;
+                    self.finalize_status(&msg).await;
+                } else {
+                    self.clear_status().await;
                 }
+            } else {
+                self.clear_status().await;
             }
         }
     }

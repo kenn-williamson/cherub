@@ -17,7 +17,7 @@ use cherub::runtime::prompt::build_system_prompt;
 use cherub::tools::ToolRegistry;
 
 const DEFAULT_POLICY_PATH: &str = "config/default_policy.toml";
-const DEFAULT_MODEL: &str = "claude-opus-4-7";
+const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
 // ─── CLI argument parsing ─────────────────────────────────────────────────────

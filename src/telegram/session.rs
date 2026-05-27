@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-#[cfg(any(feature = "postgres", feature = "memory", feature = "container"))]
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use teloxide::prelude::*;
 use tokio::sync::mpsc;
@@ -30,6 +30,12 @@ pub enum InboundMessage {
     /// Drain any approved tasks from the task queue for this chat.
     /// Sent by the callback handler when the user approves a queued task.
     DrainApprovedTasks,
+    /// Switch the model. The string is the resolved model ID.
+    ModelSwitch { model: String },
+    /// Clear conversation history (preserves memories and files).
+    ClearSession,
+    /// Cancel the current turn's iteration loop.
+    StopTurn,
 }
 
 /// Configuration for creating new per-chat agent sessions.
@@ -95,15 +101,34 @@ pub async fn session_manager(
     approval_tx: mpsc::Sender<ApprovalMessage>,
 ) {
     let mut chat_senders: HashMap<ChatId, mpsc::Sender<InboundMessage>> = HashMap::new();
+    let mut chat_cancel_flags: HashMap<ChatId, Arc<AtomicBool>> = HashMap::new();
 
     while let Some(cmd) = rx.recv().await {
         match cmd {
+            SessionCommand::Message { chat_id, message: InboundMessage::StopTurn } => {
+                if let Some(flag) = chat_cancel_flags.get(&chat_id) {
+                    flag.store(true, Ordering::Relaxed);
+                    info!(chat_id = %chat_id, "stop signal sent to running turn");
+                }
+            }
+            SessionCommand::Message { chat_id, message: InboundMessage::ClearSession } => {
+                // Set cancel flag first so any running turn exits.
+                if let Some(flag) = chat_cancel_flags.get(&chat_id) {
+                    flag.store(true, Ordering::Relaxed);
+                }
+                // Queue the actual clear for after the turn finishes.
+                if let Some(sender) = chat_senders.get(&chat_id) {
+                    let _ = sender.send(InboundMessage::ClearSession).await;
+                }
+            }
             SessionCommand::Message { chat_id, message } => {
                 // Get or create the per-chat sender.
                 let sender = chat_senders.entry(chat_id).or_insert_with(|| {
                     info!(chat_id = %chat_id, "creating new chat session");
 
                     let (tx, rx) = mpsc::channel::<InboundMessage>(32);
+                    let cancel_flag = Arc::new(AtomicBool::new(false));
+                    chat_cancel_flags.insert(chat_id, Arc::clone(&cancel_flag));
 
                     let chat_config = SessionConfig {
                         bot: config.bot.clone(),
@@ -133,7 +158,7 @@ pub async fn session_manager(
                     let approval_tx = approval_tx.clone();
 
                     tokio::spawn(async move {
-                        chat_session(rx, chat_id, chat_config, approval_tx).await;
+                        chat_session(rx, chat_id, chat_config, approval_tx, cancel_flag).await;
                     });
 
                     tx
@@ -180,6 +205,8 @@ pub async fn session_manager(
                         let sender = chat_senders.entry(chat_id).or_insert_with(|| {
                             info!(chat_id = %chat_id, "creating chat session for task drain");
                             let (tx, rx) = mpsc::channel::<InboundMessage>(32);
+                            let cancel_flag = Arc::new(AtomicBool::new(false));
+                            chat_cancel_flags.insert(chat_id, Arc::clone(&cancel_flag));
                             let chat_config = SessionConfig {
                                 bot: config.bot.clone(),
                                 policy: config.policy.clone(),
@@ -207,7 +234,7 @@ pub async fn session_manager(
                             };
                             let approval_tx = approval_tx.clone();
                             tokio::spawn(async move {
-                                chat_session(rx, chat_id, chat_config, approval_tx).await;
+                                chat_session(rx, chat_id, chat_config, approval_tx, cancel_flag).await;
                             });
                             tx
                         });
@@ -225,7 +252,12 @@ async fn chat_session(
     chat_id: ChatId,
     config: SessionConfig,
     approval_tx: mpsc::Sender<ApprovalMessage>,
+    cancel_flag: Arc<AtomicBool>,
 ) {
+    // Keep clones for model-switch later — initial provider construction moves these.
+    let saved_api_key = config.api_key.clone();
+    let saved_base_url = config.base_url.clone();
+
     let provider: Box<dyn crate::providers::Provider> = if let Some(ref providers_config) =
         config.providers_config
     {
@@ -431,6 +463,7 @@ async fn chat_session(
         output,
         &user_id,
     );
+    agent.with_cancel_flag(cancel_flag);
 
     // Attach output stashing hook (M15b).
     agent.with_hook(Box::new(crate::runtime::hooks::OutputStashingHook::new(
@@ -539,6 +572,61 @@ async fn chat_session(
                 {
                     warn!(chat_id = %chat_id, "DrainApprovedTasks received but postgres feature not enabled");
                 }
+            }
+            InboundMessage::ClearSession => {
+                agent.clear_session().await;
+                let _ = config
+                    .bot
+                    .send_message(chat_id, "Session cleared. Memories and files are preserved.")
+                    .await;
+            }
+            InboundMessage::ModelSwitch { model } => {
+                let api_key = saved_api_key.clone();
+                let new_provider: Result<Box<dyn crate::providers::Provider>, _> =
+                    match config.provider_type.as_str() {
+                        "openai" => OpenAiProvider::new(api_key, &model, config.max_tokens)
+                            .map(|mut p| {
+                                if let Some(url) = &saved_base_url {
+                                    p = p.with_base_url(url.clone());
+                                }
+                                Box::new(p) as Box<dyn crate::providers::Provider>
+                            }),
+                        _ => match api_key {
+                            Some(key) => {
+                                AnthropicProvider::new(key, &model, config.max_tokens).map(|p| {
+                                    let p = if let Some(budget) = config.thinking_budget {
+                                        p.with_thinking_budget(budget)
+                                    } else {
+                                        p
+                                    };
+                                    Box::new(p) as Box<dyn crate::providers::Provider>
+                                })
+                            }
+                            None => Err(crate::error::CherubError::Provider(
+                                "no API key for model switch".to_owned(),
+                            )),
+                        },
+                    };
+                match new_provider {
+                    Ok(p) => {
+                        let name = p.model_name().to_owned();
+                        agent.swap_provider(p);
+                        let _ = config
+                            .bot
+                            .send_message(chat_id, format!("Switched to {name}"))
+                            .await;
+                    }
+                    Err(e) => {
+                        warn!(chat_id = %chat_id, error = %e, "model switch failed");
+                        let _ = config
+                            .bot
+                            .send_message(chat_id, format!("Model switch failed: {e}"))
+                            .await;
+                    }
+                }
+            }
+            InboundMessage::StopTurn => {
+                // Handled by session_manager before dispatch.
             }
         }
     }

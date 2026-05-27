@@ -173,6 +173,57 @@ impl SessionStore for PgSessionStore {
 
         Ok(())
     }
+
+    async fn rotate_session(
+        &self,
+        old_session_id: Uuid,
+        new_session_id: Uuid,
+    ) -> Result<(), CherubError> {
+        let mut txn = self.pool.begin().await.map_err(Self::query_err)?;
+
+        // Read connector info from the old session.
+        let row = sqlx::query(
+            "SELECT connector, connector_id FROM sessions WHERE id = $1",
+        )
+        .bind(old_session_id)
+        .fetch_one(&mut *txn)
+        .await
+        .map_err(Self::query_err)?;
+
+        let connector: String = row.get("connector");
+        let connector_id: String = row.get("connector_id");
+
+        // Unlink the old session from the connector so it becomes archived.
+        sqlx::query(
+            "UPDATE sessions SET connector_id = connector_id || ':archived:' || $1::text WHERE id = $1",
+        )
+        .bind(old_session_id)
+        .execute(&mut *txn)
+        .await
+        .map_err(Self::query_err)?;
+
+        // Create the new session with the same connector mapping.
+        sqlx::query(
+            "INSERT INTO sessions (id, connector, connector_id) VALUES ($1, $2, $3)",
+        )
+        .bind(new_session_id)
+        .bind(&connector)
+        .bind(&connector_id)
+        .execute(&mut *txn)
+        .await
+        .map_err(Self::query_err)?;
+
+        txn.commit().await.map_err(Self::query_err)?;
+
+        tracing::info!(
+            old_session = %old_session_id,
+            new_session = %new_session_id,
+            connector = %connector,
+            "session rotated — old session archived"
+        );
+
+        Ok(())
+    }
 }
 
 /// Extract the role string from a message for the denormalized `role` column.

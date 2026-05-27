@@ -65,6 +65,16 @@ pub trait SessionStore: Send + Sync {
     /// Load all messages for a session in ordinal order.
     async fn load_messages(&self, session_id: Uuid) -> Result<Vec<Message>, CherubError>;
 
+    /// Archive the current session and create a new one for the same connector channel.
+    ///
+    /// The old session's messages are preserved in the DB. The connector mapping
+    /// is updated to point to the new session ID.
+    async fn rotate_session(
+        &self,
+        old_session_id: Uuid,
+        new_session_id: Uuid,
+    ) -> Result<(), CherubError>;
+
     /// Replace all messages for a session atomically (used after compaction).
     ///
     /// Deletes all existing messages and inserts the new set in a single transaction.

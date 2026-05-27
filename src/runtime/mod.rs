@@ -8,18 +8,21 @@ pub mod session;
 pub mod tokens;
 
 use std::future::Future;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tracing::{info, info_span, warn};
 
 use crate::enforcement::policy::Policy;
+use crate::enforcement::capability::CapabilityToken;
 use crate::enforcement::{self, Decision};
 use crate::error::CherubError;
 use crate::providers::{
     ApiUsage, ContentBlock, Message, Provider, StopReason, ToolDefinition, ToolResultImage,
     UserContent,
 };
-use crate::tools::{Proposed, ToolContext, ToolInvocation, ToolRegistry};
+use crate::tools::{Evaluated, Proposed, ToolContext, ToolInvocation, ToolRegistry};
 
 use approval::{ApprovalGate, ApprovalResult, EscalationContext};
 use output::{OutputEvent, OutputSink};
@@ -30,7 +33,7 @@ use crate::storage::{
     AuditDecision, AuditStore, CallType, CostStore, NewAuditEvent, NewTokenUsage,
 };
 
-const MAX_ITERATIONS: usize = 25;
+const MAX_ITERATIONS: usize = 50;
 
 /// Compact when estimated tokens exceed this fraction of the context window.
 const COMPACTION_THRESHOLD_RATIO: f32 = 0.75;
@@ -45,6 +48,11 @@ const COMPACTION_PRESERVE_RECENT: usize = 6;
 
 /// Minimum message count before compaction is even considered.
 const COMPACTION_MIN_MESSAGES: usize = 10;
+
+
+/// Tool results larger than this are truncated in context. Full output is
+/// written to `.cherub-stash/{tool_use_id}.txt` for retrieval via file read.
+const TOOL_RESULT_MAX_BYTES: usize = 50 * 1024; // 50KB
 
 /// Maximum number of memories injected into the system prompt per turn.
 #[cfg(feature = "memory")]
@@ -119,6 +127,9 @@ pub struct AgentLoop<A: ApprovalGate, O: OutputSink> {
     /// Set by the caller for cron/autonomous turns; false for interactive turns.
     #[cfg(feature = "postgres")]
     autonomous_mode: bool,
+    /// Shared cancellation flag. When set to true, the iteration loop exits at the
+    /// next check point. Reset to false at the start of each turn.
+    cancel_flag: Arc<AtomicBool>,
 }
 
 impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
@@ -156,7 +167,14 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
             task_store: None,
             #[cfg(feature = "postgres")]
             autonomous_mode: false,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Replace the cancellation flag with a shared one.
+    /// Call this after construction to share the flag with the connector.
+    pub fn with_cancel_flag(&mut self, flag: Arc<AtomicBool>) {
+        self.cancel_flag = flag;
     }
 
     /// Attach a memory store for proactive injection.
@@ -196,6 +214,61 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
     #[cfg(feature = "postgres")]
     pub fn with_cost_tracking(&mut self, store: std::sync::Arc<dyn CostStore>) {
         self.cost_store = Some(store);
+    }
+
+    /// Hot-swap the LLM provider (e.g. for /model command).
+    /// Conversation history is preserved — only the backend changes.
+    pub fn swap_provider(&mut self, provider: Box<dyn Provider>) {
+        info!(model = %provider.model_name(), "provider swapped");
+        self.provider = provider;
+    }
+
+    /// The current model name.
+    pub fn model_name(&self) -> &str {
+        self.provider.model_name()
+    }
+
+    /// Truncate a tool result if it exceeds TOOL_RESULT_MAX_BYTES.
+    /// Full output is written to `.cherub-stash/{tool_use_id}.txt`.
+    /// Returns the (possibly truncated) content to put in context.
+    fn truncate_tool_result(&self, tool_use_id: &str, output: &str) -> String {
+        if output.len() <= TOOL_RESULT_MAX_BYTES {
+            return output.to_owned();
+        }
+
+        let workspace = std::env::var("CHERUB_WORKSPACE")
+            .unwrap_or_else(|_| ".".to_owned());
+        let stash_dir = std::path::Path::new(&workspace).join(".cherub-stash");
+        if std::fs::create_dir_all(&stash_dir).is_err() {
+            // Can't stash — return hard-truncated output.
+            let mut truncated = output[..TOOL_RESULT_MAX_BYTES].to_owned();
+            truncated.push_str("\n[truncated]");
+            return truncated;
+        }
+
+        let stash_path = format!(".cherub-stash/{tool_use_id}.txt");
+        let filepath = stash_dir.join(format!("{tool_use_id}.txt"));
+        if std::fs::write(&filepath, output).is_err() {
+            let mut truncated = output[..TOOL_RESULT_MAX_BYTES].to_owned();
+            truncated.push_str("\n[truncated]");
+            return truncated;
+        }
+
+        let total_bytes = output.len();
+        let total_lines = output.lines().count();
+        info!(
+            tool_use_id,
+            file = %stash_path,
+            total_bytes,
+            "tool result truncated, full output stashed"
+        );
+
+        // Keep the first 50KB in context, append a notice.
+        let mut truncated = output[..TOOL_RESULT_MAX_BYTES].to_owned();
+        truncated.push_str(&format!(
+            "\n[truncated: showing {TOOL_RESULT_MAX_BYTES}/{total_bytes} bytes, {total_lines} lines total. Full output: file read {stash_path} (use offset/limit to page)]"
+        ));
+        truncated
     }
 
     /// Set the in-memory pricing table for cost computation.
@@ -365,6 +438,37 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
         executed
     }
 
+    /// Clear the conversation history, resetting the session to a blank state.
+    ///
+    /// Start a fresh session, leaving the old one intact in the database.
+    /// Memories (MemoryStore) and files on disk are not touched.
+    pub async fn clear_session(&mut self) {
+        let old_id = self.session.id;
+        self.session.start_new_session();
+        self.last_usage = None;
+        #[cfg(feature = "sessions")]
+        self.session.persist_new_session(old_id).await;
+
+        // Clean up stash files from the old session.
+        let workspace = std::env::var("CHERUB_WORKSPACE").unwrap_or_else(|_| ".".to_owned());
+        let stash_dir = std::path::Path::new(&workspace).join(".cherub-stash");
+        if let Ok(entries) = std::fs::read_dir(&stash_dir) {
+            let mut removed = 0u32;
+            for entry in entries.flatten() {
+                if entry.path().extension().and_then(|e| e.to_str()) == Some("txt") {
+                    if std::fs::remove_file(entry.path()).is_ok() {
+                        removed += 1;
+                    }
+                }
+            }
+            if removed > 0 {
+                info!(removed, "cleaned up stash files");
+            }
+        }
+
+        info!(old_session = %old_id, new_session = %self.session.id, "session cleared — old session preserved in DB");
+    }
+
     /// Read-only view of the conversation history.
     pub fn session_messages(&self) -> &[Message] {
         &self.session.messages
@@ -423,7 +527,6 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
             return Ok(());
         }
 
-        // Use API-reported usage if available, otherwise estimate.
         let input_tokens = self.last_usage.map(|u| u.input_tokens).unwrap_or_else(|| {
             tokens::estimate_tokens(
                 effective_system,
@@ -446,6 +549,24 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
             "context window threshold exceeded, compacting"
         );
 
+        self.run_compaction(effective_system).await
+    }
+
+    /// Force compaction regardless of token estimates. Called when an API
+    /// call fails with a timeout/connection error — strong signal the
+    /// payload is too large.
+    async fn force_compact(&mut self, effective_system: &str) -> Result<(), CherubError> {
+        if self.session.messages.len() < COMPACTION_MIN_MESSAGES {
+            return Ok(());
+        }
+        info!(
+            message_count = self.session.messages.len(),
+            "force-compacting after API failure"
+        );
+        self.run_compaction(effective_system).await
+    }
+
+    async fn run_compaction(&mut self, effective_system: &str) -> Result<(), CherubError> {
         let Some((old, recent)) = self
             .session
             .split_for_compaction(COMPACTION_PRESERVE_RECENT)
@@ -454,7 +575,6 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
             return Ok(());
         };
 
-        // Hook: before_compaction.
         hooks::dispatch_before_compaction(
             &self.hooks,
             &hooks::CompactionContext {
@@ -464,11 +584,9 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
         )
         .await;
 
-        // Pre-compaction memory flush (feature-gated, non-fatal).
         #[cfg(feature = "memory")]
         self.flush_to_memory(&old, effective_system).await;
 
-        // Summarize the old messages.
         let summary = self.summarize(&old, effective_system).await?;
 
         let compaction_number = self.session.compaction_count + 1;
@@ -488,7 +606,6 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
         #[cfg(feature = "sessions")]
         self.session.persist_compacted().await;
 
-        // Clear last usage since the message list changed dramatically.
         self.last_usage = None;
 
         info!(
@@ -854,7 +971,13 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
         // Runs before the iteration loop — mid-turn compaction would break tool_use/tool_result.
         self.maybe_compact(&effective_system).await?;
 
+        self.cancel_flag.store(false, Ordering::Relaxed);
+
         for iteration in 0..MAX_ITERATIONS {
+            if self.cancel_flag.load(Ordering::Relaxed) {
+                warn!("turn cancelled by user");
+                break;
+            }
             let _iter_span = info_span!("iteration", n = iteration);
 
             // Hard-stop safety net: if mid-turn tool results pushed us past 95%
@@ -891,14 +1014,51 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
             )
             .await;
 
-            let (assistant_msg, usage) = self
-                .provider
-                .complete(
+            self.output
+                .emit(OutputEvent::Progress {
+                    tool: "model",
+                    status: "thinking",
+                })
+                .await;
+
+            // Run the API call with a concurrent typing heartbeat.
+            // On connection/timeout failure, compact and retry once.
+            let (assistant_msg, usage) = {
+                let output = &self.output;
+                let api_fut = self.provider.complete(
                     &effective_system,
                     &self.session.messages,
                     &self.tool_definitions,
-                )
-                .await?;
+                );
+                let heartbeat = async {
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(4)).await;
+                        output
+                            .emit(OutputEvent::Progress {
+                                tool: "model",
+                                status: "thinking",
+                            })
+                            .await;
+                    }
+                };
+                let result = tokio::select! {
+                    result = api_fut => result,
+                    _ = heartbeat => unreachable!(),
+                };
+                match result {
+                    Ok(msg_usage) => msg_usage,
+                    Err(ref e) if e.to_string().contains("connection error") || e.to_string().contains("timeout") => {
+                        warn!("API call failed (likely payload too large), compacting and retrying");
+                        self.force_compact(&effective_system).await?;
+                        self.provider.complete(
+                            &effective_system,
+                            &self.session.messages,
+                            &self.tool_definitions,
+                        ).await?
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
 
             if let Some(u) = usage {
                 self.last_usage = Some(u);
@@ -1027,7 +1187,60 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
             #[cfg(not(feature = "postgres"))]
             let budget_ctx: Option<crate::enforcement::BudgetContext> = None;
 
-            // Process tool calls through enforcement
+            // ── M18c: Parallel tool execution — 4-phase pipeline ─────────────────
+            //
+            // Phase 1+2 (sequential): Enforce every tool_use; handle Reject/Deny/Queue
+            //   immediately and build an exec queue for Allow/Approved cases.
+            //   before_tool_call hooks fire here (sequential, in original order).
+            // Phase 3 (parallel): Execute exec_queue items concurrently via join_all.
+            //   join_all drives all futures cooperatively on the current task — no Send required.
+            // Phase 4 (sequential): after_tool_call hooks fire; push results to session
+            //   in original tool_use order.
+
+            // Items to execute (built in Phase 1+2, consumed in Phase 3).
+            struct ExecItem {
+                index: usize,
+                tool_use_id: String,
+                name: String,
+                display_str: String,
+                evaluated: ToolInvocation<Evaluated>,
+                token: CapabilityToken,
+                #[cfg(feature = "postgres")]
+                tier_str: String,
+                #[cfg(feature = "postgres")]
+                audit_decision: AuditDecision,
+            }
+
+            // Outcome of executing one item (built in Phase 3, consumed in Phase 4).
+            struct ExecOutcome {
+                index: usize,
+                tool_use_id: String,
+                name: String,
+                display_str: String,
+                start: Instant,
+                result: Result<crate::tools::ToolResult, CherubError>,
+                #[cfg(feature = "postgres")]
+                tier_str: String,
+                #[cfg(feature = "postgres")]
+                audit_decision: AuditDecision,
+            }
+
+            // Session ordering: one entry per tool_use, preserving original order.
+            enum Phase4Entry {
+                // Execute result looked up by index.
+                Exec { index: usize },
+                // Pre-built result (Reject/Deny/Queue) — push directly to session.
+                Fixed {
+                    tool_use_id: String,
+                    content: String,
+                    is_error: bool,
+                },
+            }
+
+            let mut exec_items: Vec<ExecItem> = Vec::new();
+            let mut phase4: Vec<Phase4Entry> = Vec::new();
+
+            // ── Phase 1+2: Enforce + Approve (sequential) ────────────────────────
             for (tool_use_id, name, input) in tool_uses {
                 // Map composite tool name → enforcement policy name (MCP: server name).
                 let enforcement_name = self.registry.enforcement_name(&name);
@@ -1042,7 +1255,6 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("<no action>")
                     .to_owned();
-                let display_str = display_str.as_str();
 
                 let proposal =
                     ToolInvocation::<Proposed>::new(enforcement_name, "execute", enriched);
@@ -1059,32 +1271,270 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                         self.output
                             .emit(OutputEvent::ToolAllowed {
                                 tool: &name,
-                                command: display_str,
+                                command: &display_str,
                             })
                             .await;
 
-                        // Hook: before_tool_call (fires only for allowed tools).
+                        // Hook: before_tool_call fires here (sequential, before Phase 3).
                         hooks::dispatch_before_tool_call(
                             &self.hooks,
                             &hooks::BeforeToolCallContext {
                                 tool: &name,
-                                action: display_str,
+                                action: &display_str,
                                 params: &evaluated.params,
                             },
                         )
                         .await;
 
-                        let exec_start = Instant::now();
-                        match self
-                            .execute_with_progress(
-                                &name,
-                                display_str,
-                                evaluated.execute(token, &self.registry, &ctx),
-                            )
-                            .await
-                        {
+                        let index = exec_items.len();
+                        phase4.push(Phase4Entry::Exec { index });
+                        exec_items.push(ExecItem {
+                            index,
+                            tool_use_id,
+                            name,
+                            display_str,
+                            evaluated,
+                            token,
+                            #[cfg(feature = "postgres")]
+                            tier_str,
+                            #[cfg(feature = "postgres")]
+                            audit_decision: AuditDecision::Allow,
+                        });
+                    }
+                    Decision::Reject => {
+                        info!(decision = "REJECTED", tool = %name, action = %display_str);
+                        #[cfg(feature = "postgres")]
+                        self.audit(NewAuditEvent {
+                            session_id: Some(ctx.session_id),
+                            user_id: ctx.user_id.clone(),
+                            turn_number: Some(ctx.turn_number),
+                            tool: name.clone(),
+                            action: Some(display_str.clone()),
+                            decision: AuditDecision::Reject,
+                            tier: None,
+                            duration_ms: None,
+                            is_error: None,
+                        })
+                        .await;
+                        self.output
+                            .emit(OutputEvent::ToolRejected {
+                                tool: &name,
+                                command: &display_str,
+                            })
+                            .await;
+                        phase4.push(Phase4Entry::Fixed {
+                            tool_use_id,
+                            content: "action not permitted".to_owned(),
+                            is_error: true,
+                        });
+                    }
+                    Decision::Escalate { tier } => {
+                        #[cfg(feature = "postgres")]
+                        let tier_str = tier.as_str().to_owned();
+                        info!(decision = "ESCALATED", tool = %name, action = %display_str);
+                        #[cfg(feature = "postgres")]
+                        self.audit(NewAuditEvent {
+                            session_id: Some(ctx.session_id),
+                            user_id: ctx.user_id.clone(),
+                            turn_number: Some(ctx.turn_number),
+                            tool: name.clone(),
+                            action: Some(display_str.clone()),
+                            decision: AuditDecision::Escalate,
+                            tier: Some(tier_str.clone()),
+                            duration_ms: None,
+                            is_error: None,
+                        })
+                        .await;
+
+                        let context = EscalationContext {
+                            tool: &name,
+                            command: &display_str,
+                            // Use enriched params (MCP metadata injected) so that
+                            // drain_approved_tasks() re-evaluation succeeds on MCP tools.
+                            params: &evaluated.params,
+                            #[cfg(feature = "postgres")]
+                            autonomous: self.autonomous_mode,
+                            #[cfg(not(feature = "postgres"))]
+                            autonomous: false,
+                        };
+                        match self.approval_gate.request_approval(&context).await {
+                            ApprovalResult::Approved => {
+                                let token = enforcement::approve_escalation(tier);
+                                info!(decision = "APPROVED", tool = %name, action = %display_str);
+                                self.output
+                                    .emit(OutputEvent::ToolApproved {
+                                        tool: &name,
+                                        command: &display_str,
+                                    })
+                                    .await;
+
+                                // Hook: before_tool_call fires here (sequential, before Phase 3).
+                                hooks::dispatch_before_tool_call(
+                                    &self.hooks,
+                                    &hooks::BeforeToolCallContext {
+                                        tool: &name,
+                                        action: &display_str,
+                                        params: &evaluated.params,
+                                    },
+                                )
+                                .await;
+
+                                let index = exec_items.len();
+                                phase4.push(Phase4Entry::Exec { index });
+                                exec_items.push(ExecItem {
+                                    index,
+                                    tool_use_id,
+                                    name,
+                                    display_str,
+                                    evaluated,
+                                    token,
+                                    #[cfg(feature = "postgres")]
+                                    tier_str,
+                                    #[cfg(feature = "postgres")]
+                                    audit_decision: AuditDecision::Approve,
+                                });
+                            }
+                            ApprovalResult::Denied => {
+                                info!(decision = "DENIED", tool = %name, action = %display_str);
+                                #[cfg(feature = "postgres")]
+                                self.audit(NewAuditEvent {
+                                    session_id: Some(ctx.session_id),
+                                    user_id: ctx.user_id.clone(),
+                                    turn_number: Some(ctx.turn_number),
+                                    tool: name.clone(),
+                                    action: Some(display_str.clone()),
+                                    decision: AuditDecision::Deny,
+                                    tier: Some(tier_str),
+                                    duration_ms: None,
+                                    is_error: None,
+                                })
+                                .await;
+                                self.output
+                                    .emit(OutputEvent::ToolDenied {
+                                        tool: &name,
+                                        command: &display_str,
+                                    })
+                                    .await;
+                                phase4.push(Phase4Entry::Fixed {
+                                    tool_use_id,
+                                    content: "action not permitted".to_owned(),
+                                    is_error: true,
+                                });
+                            }
+                            ApprovalResult::Queued(task_id) => {
+                                info!(
+                                    decision = "QUEUED",
+                                    tool = %name,
+                                    action = %display_str,
+                                    %task_id,
+                                    "action queued for async approval"
+                                );
+                                #[cfg(feature = "postgres")]
+                                self.audit(NewAuditEvent {
+                                    session_id: Some(ctx.session_id),
+                                    user_id: ctx.user_id.clone(),
+                                    turn_number: Some(ctx.turn_number),
+                                    tool: name.clone(),
+                                    action: Some(display_str.clone()),
+                                    decision: AuditDecision::Escalate,
+                                    tier: Some(tier_str),
+                                    duration_ms: None,
+                                    is_error: None,
+                                })
+                                .await;
+                                // Inform the model that the action has been queued.
+                                // The model can continue with other work items.
+                                phase4.push(Phase4Entry::Fixed {
+                                    tool_use_id,
+                                    content: format!(
+                                        "Action queued for your approval (task id: {task_id}). \
+                                         I'll execute it once you approve the Telegram notification. \
+                                         Continuing with other work."
+                                    ),
+                                    is_error: false,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Phase 3: Execute concurrently ────────────────────────────────────
+            // Borrows &self.registry and &self.output immutably within a scoped block.
+            // join_all drives all futures cooperatively on the current task — no Send bound.
+            let exec_outcomes: Vec<ExecOutcome> = {
+                let registry = &self.registry;
+                let output = &self.output;
+                let ctx_ref = &ctx;
+                let futs: Vec<_> = exec_items
+                    .into_iter()
+                    .map(|item| async move {
+                        output
+                            .emit(OutputEvent::Progress {
+                                tool: item.name.as_str(),
+                                status: item.display_str.as_str(),
+                            })
+                            .await;
+                        let start = Instant::now();
+                        let result = item
+                            .evaluated
+                            .execute(item.token, registry, ctx_ref)
+                            .await;
+                        output.emit(OutputEvent::ProgressClear).await;
+                        ExecOutcome {
+                            index: item.index,
+                            tool_use_id: item.tool_use_id,
+                            name: item.name,
+                            display_str: item.display_str,
+                            start,
+                            result,
+                            #[cfg(feature = "postgres")]
+                            tier_str: item.tier_str,
+                            #[cfg(feature = "postgres")]
+                            audit_decision: item.audit_decision,
+                        }
+                    })
+                    .collect();
+                futures_util::future::join_all(futs).await
+            };
+
+            // Index by position for O(1) Phase 4 lookup.
+            let mut outcomes_by_index: std::collections::HashMap<usize, ExecOutcome> =
+                exec_outcomes.into_iter().map(|o| (o.index, o)).collect();
+
+            // ── Phase 4: Session push (sequential, original tool_use order) ───────
+            // after_tool_call hooks fire here; results pushed in original order.
+            for entry in phase4 {
+                match entry {
+                    Phase4Entry::Fixed {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => {
+                        self.session.push(Message::ToolResult {
+                            tool_use_id,
+                            content,
+                            images: vec![],
+                            is_error,
+                        });
+                        #[cfg(feature = "sessions")]
+                        self.session.persist_last().await;
+                    }
+                    Phase4Entry::Exec { index } => {
+                        let outcome = outcomes_by_index
+                            .remove(&index)
+                            .expect("exec outcome missing — index mismatch");
+                        let duration_ms = outcome.start.elapsed().as_millis() as i64;
+                        // Destructure fields needed across both match arms.
+                        let tool_use_id = outcome.tool_use_id;
+                        let name = outcome.name;
+                        let display_str = outcome.display_str;
+                        #[cfg(feature = "postgres")]
+                        let tier_str = outcome.tier_str;
+                        #[cfg(feature = "postgres")]
+                        let audit_decision = outcome.audit_decision;
+                        match outcome.result {
                             Ok(result) => {
-                                let duration_ms = exec_start.elapsed().as_millis() as i64;
                                 info!(duration_ms = %duration_ms, "tool execution complete");
                                 #[cfg(feature = "postgres")]
                                 self.audit(NewAuditEvent {
@@ -1092,8 +1542,8 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                     user_id: ctx.user_id.clone(),
                                     turn_number: Some(ctx.turn_number),
                                     tool: name.clone(),
-                                    action: Some(display_str.to_owned()),
-                                    decision: AuditDecision::Allow,
+                                    action: Some(display_str.clone()),
+                                    decision: audit_decision,
                                     tier: Some(tier_str),
                                     duration_ms: Some(duration_ms),
                                     is_error: Some(false),
@@ -1136,7 +1586,7 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                     &self.hooks,
                                     &mut hooks::AfterToolCallContext {
                                         tool: &name,
-                                        action: display_str,
+                                        action: &display_str,
                                         result: &mut output,
                                         is_error: false,
                                     },
@@ -1145,6 +1595,7 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                 if !output.is_empty() {
                                     self.output.emit(OutputEvent::ToolOutput(&output)).await;
                                 }
+                                let truncated = self.truncate_tool_result(&tool_use_id, &output);
                                 let images = result_images
                                     .into_iter()
                                     .map(|img| ToolResultImage {
@@ -1154,7 +1605,7 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                     .collect();
                                 self.session.push(Message::ToolResult {
                                     tool_use_id,
-                                    content: output,
+                                    content: truncated,
                                     images,
                                     is_error: false,
                                 });
@@ -1162,7 +1613,6 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                 self.session.persist_last().await;
                             }
                             Err(e) => {
-                                let duration_ms = exec_start.elapsed().as_millis() as i64;
                                 let err_msg = e.to_string();
                                 warn!(duration_ms = %duration_ms, error = %err_msg, "tool execution failed");
                                 #[cfg(feature = "postgres")]
@@ -1171,8 +1621,8 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                     user_id: ctx.user_id.clone(),
                                     turn_number: Some(ctx.turn_number),
                                     tool: name.clone(),
-                                    action: Some(display_str.to_owned()),
-                                    decision: AuditDecision::Allow,
+                                    action: Some(display_str.clone()),
+                                    decision: audit_decision,
                                     tier: Some(tier_str),
                                     duration_ms: Some(duration_ms),
                                     is_error: Some(true),
@@ -1184,7 +1634,7 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                     &self.hooks,
                                     &mut hooks::AfterToolCallContext {
                                         tool: &name,
-                                        action: display_str,
+                                        action: &display_str,
                                         result: &mut err_output,
                                         is_error: true,
                                     },
@@ -1196,256 +1646,6 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                     content: err_output,
                                     images: vec![],
                                     is_error: true,
-                                });
-                                #[cfg(feature = "sessions")]
-                                self.session.persist_last().await;
-                            }
-                        }
-                    }
-                    Decision::Reject => {
-                        info!(decision = "REJECTED", tool = %name, action = %display_str);
-                        #[cfg(feature = "postgres")]
-                        self.audit(NewAuditEvent {
-                            session_id: Some(ctx.session_id),
-                            user_id: ctx.user_id.clone(),
-                            turn_number: Some(ctx.turn_number),
-                            tool: name.clone(),
-                            action: Some(display_str.to_owned()),
-                            decision: AuditDecision::Reject,
-                            tier: None,
-                            duration_ms: None,
-                            is_error: None,
-                        })
-                        .await;
-                        self.output
-                            .emit(OutputEvent::ToolRejected {
-                                tool: &name,
-                                command: display_str,
-                            })
-                            .await;
-                        self.session.push(Message::ToolResult {
-                            tool_use_id,
-                            content: "action not permitted".to_owned(),
-                            images: vec![],
-                            is_error: true,
-                        });
-                        #[cfg(feature = "sessions")]
-                        self.session.persist_last().await;
-                    }
-                    Decision::Escalate { tier } => {
-                        #[cfg(feature = "postgres")]
-                        let tier_str = tier.as_str().to_owned();
-                        info!(decision = "ESCALATED", tool = %name, action = %display_str);
-                        #[cfg(feature = "postgres")]
-                        self.audit(NewAuditEvent {
-                            session_id: Some(ctx.session_id),
-                            user_id: ctx.user_id.clone(),
-                            turn_number: Some(ctx.turn_number),
-                            tool: name.clone(),
-                            action: Some(display_str.to_owned()),
-                            decision: AuditDecision::Escalate,
-                            tier: Some(tier_str.clone()),
-                            duration_ms: None,
-                            is_error: None,
-                        })
-                        .await;
-
-                        let context = EscalationContext {
-                            tool: &name,
-                            command: display_str,
-                            // Use enriched params (MCP metadata injected) so that
-                            // drain_approved_tasks() re-evaluation succeeds on MCP tools.
-                            params: &evaluated.params,
-                            #[cfg(feature = "postgres")]
-                            autonomous: self.autonomous_mode,
-                            #[cfg(not(feature = "postgres"))]
-                            autonomous: false,
-                        };
-                        match self.approval_gate.request_approval(&context).await {
-                            ApprovalResult::Approved => {
-                                let token = enforcement::approve_escalation(tier);
-                                info!(decision = "APPROVED", tool = %name, action = %display_str);
-                                self.output
-                                    .emit(OutputEvent::ToolApproved {
-                                        tool: &name,
-                                        command: display_str,
-                                    })
-                                    .await;
-
-                                // Hook: before_tool_call (fires only for approved tools).
-                                hooks::dispatch_before_tool_call(
-                                    &self.hooks,
-                                    &hooks::BeforeToolCallContext {
-                                        tool: &name,
-                                        action: display_str,
-                                        params: &evaluated.params,
-                                    },
-                                )
-                                .await;
-
-                                let exec_start = Instant::now();
-                                match self
-                                    .execute_with_progress(
-                                        &name,
-                                        display_str,
-                                        evaluated.execute(token, &self.registry, &ctx),
-                                    )
-                                    .await
-                                {
-                                    Ok(result) => {
-                                        let duration_ms = exec_start.elapsed().as_millis() as i64;
-                                        info!(duration_ms = %duration_ms, "tool execution complete");
-                                        #[cfg(feature = "postgres")]
-                                        self.audit(NewAuditEvent {
-                                            session_id: Some(ctx.session_id),
-                                            user_id: ctx.user_id.clone(),
-                                            turn_number: Some(ctx.turn_number),
-                                            tool: name.clone(),
-                                            action: Some(display_str.to_owned()),
-                                            decision: AuditDecision::Approve,
-                                            tier: Some(tier_str.clone()),
-                                            duration_ms: Some(duration_ms),
-                                            is_error: Some(false),
-                                        })
-                                        .await;
-                                        // Hook: after_tool_call (approved success path).
-                                        let result_images = result.images;
-                                        let mut output = result.output;
-                                        hooks::dispatch_after_tool_call(
-                                            &self.hooks,
-                                            &mut hooks::AfterToolCallContext {
-                                                tool: &name,
-                                                action: display_str,
-                                                result: &mut output,
-                                                is_error: false,
-                                            },
-                                        )
-                                        .await;
-                                        if !output.is_empty() {
-                                            self.output
-                                                .emit(OutputEvent::ToolOutput(&output))
-                                                .await;
-                                        }
-                                        let images = result_images
-                                            .into_iter()
-                                            .map(|img| ToolResultImage {
-                                                media_type: img.media_type,
-                                                data: img.data,
-                                            })
-                                            .collect();
-                                        self.session.push(Message::ToolResult {
-                                            tool_use_id,
-                                            content: output,
-                                            images,
-                                            is_error: false,
-                                        });
-                                        #[cfg(feature = "sessions")]
-                                        self.session.persist_last().await;
-                                    }
-                                    Err(e) => {
-                                        let duration_ms = exec_start.elapsed().as_millis() as i64;
-                                        let err_msg = e.to_string();
-                                        warn!(duration_ms = %duration_ms, error = %err_msg, "tool execution failed");
-                                        #[cfg(feature = "postgres")]
-                                        self.audit(NewAuditEvent {
-                                            session_id: Some(ctx.session_id),
-                                            user_id: ctx.user_id.clone(),
-                                            turn_number: Some(ctx.turn_number),
-                                            tool: name.clone(),
-                                            action: Some(display_str.to_owned()),
-                                            decision: AuditDecision::Approve,
-                                            tier: Some(tier_str.clone()),
-                                            duration_ms: Some(duration_ms),
-                                            is_error: Some(true),
-                                        })
-                                        .await;
-                                        // Hook: after_tool_call (approved error path).
-                                        let mut err_output = err_msg;
-                                        hooks::dispatch_after_tool_call(
-                                            &self.hooks,
-                                            &mut hooks::AfterToolCallContext {
-                                                tool: &name,
-                                                action: display_str,
-                                                result: &mut err_output,
-                                                is_error: true,
-                                            },
-                                        )
-                                        .await;
-                                        self.output.emit(OutputEvent::ToolError(&err_output)).await;
-                                        self.session.push(Message::ToolResult {
-                                            tool_use_id,
-                                            content: err_output,
-                                            images: vec![],
-                                            is_error: true,
-                                        });
-                                        #[cfg(feature = "sessions")]
-                                        self.session.persist_last().await;
-                                    }
-                                }
-                            }
-                            ApprovalResult::Denied => {
-                                info!(decision = "DENIED", tool = %name, action = %display_str);
-                                #[cfg(feature = "postgres")]
-                                self.audit(NewAuditEvent {
-                                    session_id: Some(ctx.session_id),
-                                    user_id: ctx.user_id.clone(),
-                                    turn_number: Some(ctx.turn_number),
-                                    tool: name.clone(),
-                                    action: Some(display_str.to_owned()),
-                                    decision: AuditDecision::Deny,
-                                    tier: Some(tier_str),
-                                    duration_ms: None,
-                                    is_error: None,
-                                })
-                                .await;
-                                self.output
-                                    .emit(OutputEvent::ToolDenied {
-                                        tool: &name,
-                                        command: display_str,
-                                    })
-                                    .await;
-                                // Policy opacity: identical message to Reject
-                                self.session.push(Message::ToolResult {
-                                    tool_use_id,
-                                    content: "action not permitted".to_owned(),
-                                    images: vec![],
-                                    is_error: true,
-                                });
-                                #[cfg(feature = "sessions")]
-                                self.session.persist_last().await;
-                            }
-                            ApprovalResult::Queued(task_id) => {
-                                info!(
-                                    decision = "QUEUED",
-                                    tool = %name,
-                                    action = %display_str,
-                                    %task_id,
-                                    "action queued for async approval"
-                                );
-                                #[cfg(feature = "postgres")]
-                                self.audit(NewAuditEvent {
-                                    session_id: Some(ctx.session_id),
-                                    user_id: ctx.user_id.clone(),
-                                    turn_number: Some(ctx.turn_number),
-                                    tool: name.clone(),
-                                    action: Some(display_str.to_owned()),
-                                    decision: AuditDecision::Escalate,
-                                    tier: Some(tier_str),
-                                    duration_ms: None,
-                                    is_error: None,
-                                })
-                                .await;
-                                // Inform the model that the action has been queued.
-                                // The model can continue with other work items.
-                                self.session.push(Message::ToolResult {
-                                    tool_use_id,
-                                    content: format!(
-                                        "Action queued for your approval (task id: {task_id}). \
-                                         I'll execute it once you approve the Telegram notification. \
-                                         Continuing with other work."
-                                    ),
-                                    images: vec![],
-                                    is_error: false,
                                 });
                                 #[cfg(feature = "sessions")]
                                 self.session.persist_last().await;

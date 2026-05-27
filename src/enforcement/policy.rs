@@ -65,12 +65,18 @@ fn default_match_source() -> MatchSourceValue {
     MatchSourceValue::Command
 }
 
+fn default_approval_floor() -> TierValue {
+    TierValue::Commit
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ToolConfig {
     enabled: bool,
     #[serde(default = "default_match_source")]
     match_source: MatchSourceValue,
+    #[serde(default = "default_approval_floor")]
+    approval_floor: TierValue,
     #[serde(default)]
     actions: HashMap<String, ActionConfig>,
     #[serde(default)]
@@ -116,7 +122,7 @@ enum OnConstraintFailureValue {
     Escalate,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 enum TierValue {
     Observe,
@@ -164,6 +170,7 @@ pub(super) struct CompiledTool {
     name: String,
     enabled: bool,
     match_source: MatchSource, // How to extract action strings from params
+    approval_floor: Tier,      // Actions at or above this tier require approval
     actions: Vec<CompiledAction>, // Ordered: Commit first, then Act, then Observe
     constraints: Vec<CompiledConstraint>, // Tool-level: hard reject on failure
 }
@@ -307,6 +314,10 @@ impl CompiledTool {
 
     pub(super) fn match_source(&self) -> MatchSource {
         self.match_source
+    }
+
+    pub(super) fn approval_floor(&self) -> Tier {
+        self.approval_floor
     }
 
     /// Check tool-level constraints against params.
@@ -497,6 +508,7 @@ fn compile_tool(name: String, config: ToolConfig) -> Result<CompiledTool, Cherub
         name,
         enabled: config.enabled,
         match_source: config.match_source.into(),
+        approval_floor: config.approval_floor.into(),
         actions,
         constraints: tool_constraints,
     })

@@ -58,6 +58,7 @@ impl FileTool {
 
         match action {
             "read" => self.op_read(params),
+            "write" => self.op_write(params),
             "edit" => self.op_edit(params),
             "glob" => self.op_glob(params),
             "grep" => self.op_grep(params),
@@ -135,6 +136,30 @@ impl FileTool {
         }
 
         Ok(ToolResult::text(output))
+    }
+
+    fn op_write(&self, params: &serde_json::Value) -> Result<ToolResult, CherubError> {
+        let path_str = require_str(params, "path", "write")?;
+        let content = require_str(params, "content", "write")?;
+        let _span = info_span!("file_write", path = %path_str);
+
+        let resolved = resolve_workspace_path(&self.workspace_root, path_str)?;
+
+        if let Some(parent) = resolved.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                CherubError::ToolExecution(format!(
+                    "cannot create directories for '{path_str}': {e}"
+                ))
+            })?;
+        }
+
+        fs::write(&resolved, content.as_bytes())
+            .map_err(|e| CherubError::ToolExecution(format!("cannot write '{path_str}': {e}")))?;
+
+        let lines = content.lines().count();
+        Ok(ToolResult::text(format!(
+            "wrote '{path_str}' ({lines} lines)"
+        )))
     }
 
     fn op_edit(&self, params: &serde_json::Value) -> Result<ToolResult, CherubError> {

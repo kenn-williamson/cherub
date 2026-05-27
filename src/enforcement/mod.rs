@@ -87,11 +87,11 @@ pub fn evaluate(
                     return (proposal.transition(), Decision::Reject);
                 }
                 Some(actions) => {
-                    // Evaluate each action. Most restrictive decision wins.
+                    let floor = tool.approval_floor();
                     combine_decisions(
                         actions
                             .iter()
-                            .map(|action| evaluate_single_action(action, tool, &proposal.params)),
+                            .map(|action| evaluate_single_action(action, tool, &proposal.params, floor)),
                     )
                 }
             }
@@ -106,6 +106,7 @@ fn evaluate_single_action(
     action: &str,
     tool: &policy::CompiledTool,
     params: &serde_json::Value,
+    approval_floor: Tier,
 ) -> Decision {
     match tool.match_action(action) {
         None => {
@@ -124,10 +125,10 @@ fn evaluate_single_action(
                 };
             }
 
-            // Commit always escalates, others allow.
-            if tier == Tier::Commit {
-                info!(decision = "escalate", reason = "commit_tier", action = %action);
-                Decision::Escalate { tier: Tier::Commit }
+            // Escalate if the action's tier meets or exceeds the tool's approval floor.
+            if tier >= approval_floor {
+                info!(decision = "escalate", reason = "at_or_above_approval_floor", action = %action);
+                Decision::Escalate { tier }
             } else {
                 info!(decision = "allow", action = %action);
                 Decision::Allow(CapabilityToken::new(tier))
