@@ -48,9 +48,9 @@ pub async fn handle_message(
         }
     }
 
-    // Handle slash commands before passing to the agent.
+    // Handle commands (/ or ! prefix).
     if let Some(text) = msg.text() {
-        if text.starts_with("/stop") {
+        if text.starts_with("/stop") || text.starts_with("!stop") || text == "stop" {
             let _ = session_tx
                 .send(SessionCommand::Message {
                     chat_id,
@@ -59,7 +59,7 @@ pub async fn handle_message(
                 .await;
             return Ok(());
         }
-        if text.starts_with("/clear") {
+        if text.starts_with("/clear") || text.starts_with("!clear") || text == "clear" {
             let _ = session_tx
                 .send(SessionCommand::Message {
                     chat_id,
@@ -68,7 +68,10 @@ pub async fn handle_message(
                 .await;
             return Ok(());
         }
-        if let Some(model_cmd) = text.strip_prefix("/model") {
+        let model_cmd = text.strip_prefix("/model")
+            .or_else(|| text.strip_prefix("!model"))
+            .or_else(|| text.strip_prefix("model "));
+        if let Some(model_cmd) = model_cmd {
             let arg = model_cmd.trim();
             if arg.is_empty() {
                 // /model with no arg — query current model. Send as regular message

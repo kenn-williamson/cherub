@@ -302,6 +302,19 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Register bot commands with Telegram so they appear in the menu.
+    use teloxide::types::BotCommand;
+    let commands = vec![
+        BotCommand::new("clear", "Start a new session (preserves memories and files)"),
+        BotCommand::new("stop", "Cancel the current operation"),
+        BotCommand::new("model", "Switch model (sonnet/haiku/opus or any model ID)"),
+    ];
+    if let Err(e) = bot.set_my_commands(commands).await {
+        tracing::warn!(error = %e, "failed to register bot commands (non-fatal)");
+    } else {
+        info!("bot commands registered with Telegram");
+    }
+
     // Set up teloxide dispatcher.
     let allowed_chats = Arc::new(allowed_chats);
 
