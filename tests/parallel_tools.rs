@@ -127,8 +127,36 @@ fn default_policy() -> Policy {
     Policy::load(std::path::Path::new("config/default_policy.toml")).unwrap()
 }
 
+/// Inline policy that allows `sleep` and `echo` so the timing test can actually execute.
+const SLEEP_POLICY: &str = r#"
+[tools.bash]
+enabled = true
+
+[tools.bash.actions.run]
+tier = "observe"
+patterns = ["^sleep ", "^echo "]
+"#;
+
 fn make_agent<A: ApprovalGate>(responses: Vec<Message>, gate: A) -> AgentLoop<A, NullSink> {
     let policy = default_policy();
+    let provider = Box::new(MockProvider::new(responses));
+    let registry = ToolRegistry::new();
+    AgentLoop::new(
+        policy,
+        provider,
+        registry,
+        "test".to_owned(),
+        gate,
+        NullSink,
+        "test-user",
+    )
+}
+
+fn make_agent_with_policy<A: ApprovalGate>(
+    policy: Policy,
+    responses: Vec<Message>,
+    gate: A,
+) -> AgentLoop<A, NullSink> {
     let provider = Box::new(MockProvider::new(responses));
     let registry = ToolRegistry::new();
     AgentLoop::new(
@@ -282,8 +310,12 @@ async fn parallel_escalation_then_execute() {
 
 /// Parallel execution actually runs concurrently (timing test).
 /// Two `sleep 1` commands should complete in ~1s, not ~2s.
+/// Uses an inline policy that allows `sleep` (not in the default policy).
 #[tokio::test]
 async fn parallel_execution_is_concurrent() {
+    use std::str::FromStr;
+    let policy = Policy::from_str(SLEEP_POLICY).unwrap();
+
     let responses = vec![
         multi_tool_msg(vec![
             ("t1", "bash", json!({"command": "sleep 1 && echo a"})),
@@ -292,7 +324,7 @@ async fn parallel_execution_is_concurrent() {
         end_turn(),
     ];
 
-    let mut agent = make_agent(responses, AlwaysApproveGate);
+    let mut agent = make_agent_with_policy(policy, responses, AlwaysApproveGate);
     let start = Instant::now();
     let result = agent.run_turn_text("concurrent sleep").await;
     let elapsed = start.elapsed();
