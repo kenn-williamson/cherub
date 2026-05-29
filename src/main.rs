@@ -613,7 +613,10 @@ async fn run_audit_command(sub: AuditSubcommand) -> Result<()> {
             if events.is_empty() {
                 println!("No audit events found.");
             } else {
-                println!("{:<26}  {:<10}  {:<8}  {:<10}  action", "timestamp", "tool", "decision", "tier");
+                println!(
+                    "{:<26}  {:<10}  {:<8}  {:<10}  action",
+                    "timestamp", "tool", "decision", "tier"
+                );
                 println!("{}", "-".repeat(80));
                 for ev in &events {
                     let ts = ev.created_at.format("%Y-%m-%d %H:%M:%S%.3f");

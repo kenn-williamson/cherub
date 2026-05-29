@@ -48,16 +48,12 @@ impl McpClient {
         if let Some(args) = arguments {
             params = params.with_arguments(args);
         }
-        self.service
-            .peer()
-            .call_tool(params)
-            .await
-            .map_err(|e| {
-                CherubError::Mcp(format!(
-                    "server '{}', tool '{}': call failed: {e}",
-                    self.server_name, tool_name
-                ))
-            })
+        self.service.peer().call_tool(params).await.map_err(|e| {
+            CherubError::Mcp(format!(
+                "server '{}', tool '{}': call failed: {e}",
+                self.server_name, tool_name
+            ))
+        })
     }
 
     /// Shut down the server process gracefully.

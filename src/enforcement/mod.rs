@@ -88,11 +88,9 @@ pub fn evaluate(
                 }
                 Some(actions) => {
                     let floor = tool.approval_floor();
-                    combine_decisions(
-                        actions
-                            .iter()
-                            .map(|action| evaluate_single_action(action, tool, &proposal.params, floor)),
-                    )
+                    combine_decisions(actions.iter().map(|action| {
+                        evaluate_single_action(action, tool, &proposal.params, floor)
+                    }))
                 }
             }
         }

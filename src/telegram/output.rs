@@ -95,7 +95,12 @@ impl TelegramSink {
             // Try to edit the status message into the response.
             // If the text is too long or edit fails, delete status and send fresh.
             if text.len() <= MAX_MESSAGE_LEN {
-                if self.bot.edit_message_text(self.chat_id, msg_id, text).await.is_ok() {
+                if self
+                    .bot
+                    .edit_message_text(self.chat_id, msg_id, text)
+                    .await
+                    .is_ok()
+                {
                     return;
                 }
             }
@@ -123,7 +128,10 @@ impl OutputSink for TelegramSink {
         // Progress events just send a typing indicator — no message edits, no notifications.
         match &event {
             OutputEvent::Progress { .. } => {
-                let _ = self.bot.send_chat_action(self.chat_id, ChatAction::Typing).await;
+                let _ = self
+                    .bot
+                    .send_chat_action(self.chat_id, ChatAction::Typing)
+                    .await;
                 return;
             }
             OutputEvent::ProgressClear => {
@@ -236,7 +244,10 @@ impl OutputSink for TelegramSink {
             if let Ok(msg) = self.bot.send_message(self.chat_id, "Working...").await {
                 *self.status_message_id.lock().unwrap() = Some(msg.id);
             }
-            let _ = self.bot.send_chat_action(self.chat_id, ChatAction::Typing).await;
+            let _ = self
+                .bot
+                .send_chat_action(self.chat_id, ChatAction::Typing)
+                .await;
         }
     }
 

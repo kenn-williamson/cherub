@@ -105,13 +105,19 @@ pub async fn session_manager(
 
     while let Some(cmd) = rx.recv().await {
         match cmd {
-            SessionCommand::Message { chat_id, message: InboundMessage::StopTurn } => {
+            SessionCommand::Message {
+                chat_id,
+                message: InboundMessage::StopTurn,
+            } => {
                 if let Some(flag) = chat_cancel_flags.get(&chat_id) {
                     flag.store(true, Ordering::Relaxed);
                     info!(chat_id = %chat_id, "stop signal sent to running turn");
                 }
             }
-            SessionCommand::Message { chat_id, message: InboundMessage::ClearSession } => {
+            SessionCommand::Message {
+                chat_id,
+                message: InboundMessage::ClearSession,
+            } => {
                 // Set cancel flag first so any running turn exits.
                 if let Some(flag) = chat_cancel_flags.get(&chat_id) {
                     flag.store(true, Ordering::Relaxed);
@@ -234,7 +240,8 @@ pub async fn session_manager(
                             };
                             let approval_tx = approval_tx.clone();
                             tokio::spawn(async move {
-                                chat_session(rx, chat_id, chat_config, approval_tx, cancel_flag).await;
+                                chat_session(rx, chat_id, chat_config, approval_tx, cancel_flag)
+                                    .await;
                             });
                             tx
                         });
@@ -577,31 +584,34 @@ async fn chat_session(
                 agent.clear_session().await;
                 let _ = config
                     .bot
-                    .send_message(chat_id, "Session cleared. Memories and files are preserved.")
+                    .send_message(
+                        chat_id,
+                        "Session cleared. Memories and files are preserved.",
+                    )
                     .await;
             }
             InboundMessage::ModelSwitch { model } => {
                 let api_key = saved_api_key.clone();
                 let new_provider: Result<Box<dyn crate::providers::Provider>, _> =
                     match config.provider_type.as_str() {
-                        "openai" => OpenAiProvider::new(api_key, &model, config.max_tokens)
-                            .map(|mut p| {
+                        "openai" => {
+                            OpenAiProvider::new(api_key, &model, config.max_tokens).map(|mut p| {
                                 if let Some(url) = &saved_base_url {
                                     p = p.with_base_url(url.clone());
                                 }
                                 Box::new(p) as Box<dyn crate::providers::Provider>
-                            }),
+                            })
+                        }
                         _ => match api_key {
-                            Some(key) => {
-                                AnthropicProvider::new(key, &model, config.max_tokens).map(|p| {
+                            Some(key) => AnthropicProvider::new(key, &model, config.max_tokens)
+                                .map(|p| {
                                     let p = if let Some(budget) = config.thinking_budget {
                                         p.with_thinking_budget(budget)
                                     } else {
                                         p
                                     };
                                     Box::new(p) as Box<dyn crate::providers::Provider>
-                                })
-                            }
+                                }),
                             None => Err(crate::error::CherubError::Provider(
                                 "no API key for model switch".to_owned(),
                             )),

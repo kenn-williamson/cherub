@@ -182,13 +182,11 @@ impl SessionStore for PgSessionStore {
         let mut txn = self.pool.begin().await.map_err(Self::query_err)?;
 
         // Read connector info from the old session.
-        let row = sqlx::query(
-            "SELECT connector, connector_id FROM sessions WHERE id = $1",
-        )
-        .bind(old_session_id)
-        .fetch_one(&mut *txn)
-        .await
-        .map_err(Self::query_err)?;
+        let row = sqlx::query("SELECT connector, connector_id FROM sessions WHERE id = $1")
+            .bind(old_session_id)
+            .fetch_one(&mut *txn)
+            .await
+            .map_err(Self::query_err)?;
 
         let connector: String = row.get("connector");
         let connector_id: String = row.get("connector_id");
@@ -203,15 +201,13 @@ impl SessionStore for PgSessionStore {
         .map_err(Self::query_err)?;
 
         // Create the new session with the same connector mapping.
-        sqlx::query(
-            "INSERT INTO sessions (id, connector, connector_id) VALUES ($1, $2, $3)",
-        )
-        .bind(new_session_id)
-        .bind(&connector)
-        .bind(&connector_id)
-        .execute(&mut *txn)
-        .await
-        .map_err(Self::query_err)?;
+        sqlx::query("INSERT INTO sessions (id, connector, connector_id) VALUES ($1, $2, $3)")
+            .bind(new_session_id)
+            .bind(&connector)
+            .bind(&connector_id)
+            .execute(&mut *txn)
+            .await
+            .map_err(Self::query_err)?;
 
         txn.commit().await.map_err(Self::query_err)?;
 

@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 
 use tracing::{info, info_span, warn};
 
-use crate::enforcement::policy::Policy;
 use crate::enforcement::capability::CapabilityToken;
+use crate::enforcement::policy::Policy;
 use crate::enforcement::{self, Decision};
 use crate::error::CherubError;
 use crate::providers::{
@@ -48,7 +48,6 @@ const COMPACTION_PRESERVE_RECENT: usize = 6;
 
 /// Minimum message count before compaction is even considered.
 const COMPACTION_MIN_MESSAGES: usize = 10;
-
 
 /// Tool results larger than this are truncated in context. Full output is
 /// written to `.cherub-stash/{tool_use_id}.txt` for retrieval via file read.
@@ -236,8 +235,7 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
             return output.to_owned();
         }
 
-        let workspace = std::env::var("CHERUB_WORKSPACE")
-            .unwrap_or_else(|_| ".".to_owned());
+        let workspace = std::env::var("CHERUB_WORKSPACE").unwrap_or_else(|_| ".".to_owned());
         let stash_dir = std::path::Path::new(&workspace).join(".cherub-stash");
         if std::fs::create_dir_all(&stash_dir).is_err() {
             // Can't stash — return hard-truncated output.
@@ -1047,14 +1045,21 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                 };
                 match result {
                     Ok(msg_usage) => msg_usage,
-                    Err(ref e) if e.to_string().contains("connection error") || e.to_string().contains("timeout") => {
-                        warn!("API call failed (likely payload too large), compacting and retrying");
+                    Err(ref e)
+                        if e.to_string().contains("connection error")
+                            || e.to_string().contains("timeout") =>
+                    {
+                        warn!(
+                            "API call failed (likely payload too large), compacting and retrying"
+                        );
                         self.force_compact(&effective_system).await?;
-                        self.provider.complete(
-                            &effective_system,
-                            &self.session.messages,
-                            &self.tool_definitions,
-                        ).await?
+                        self.provider
+                            .complete(
+                                &effective_system,
+                                &self.session.messages,
+                                &self.tool_definitions,
+                            )
+                            .await?
                     }
                     Err(e) => return Err(e),
                 }
@@ -1228,7 +1233,9 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
             // Session ordering: one entry per tool_use, preserving original order.
             enum Phase4Entry {
                 // Execute result looked up by index.
-                Exec { index: usize },
+                Exec {
+                    index: usize,
+                },
                 // Pre-built result (Reject/Deny/Queue) — push directly to session.
                 Fixed {
                     tool_use_id: String,
@@ -1476,10 +1483,7 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                             })
                             .await;
                         let start = Instant::now();
-                        let result = item
-                            .evaluated
-                            .execute(item.token, registry, ctx_ref)
-                            .await;
+                        let result = item.evaluated.execute(item.token, registry, ctx_ref).await;
                         output.emit(OutputEvent::ProgressClear).await;
                         ExecOutcome {
                             index: item.index,
@@ -1555,11 +1559,9 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                                     && let Some(ref store) = self.cost_store
                                 {
                                     use crate::providers::pricing;
-                                    let cost_usd = pricing::lookup_pricing(
-                                        &self.pricing_table,
-                                        model_name,
-                                    )
-                                    .map_or(0.0, |p| pricing::compute_cost(usage, &p));
+                                    let cost_usd =
+                                        pricing::lookup_pricing(&self.pricing_table, model_name)
+                                            .map_or(0.0, |p| pricing::compute_cost(usage, &p));
                                     if let Err(e) = store
                                         .record(NewTokenUsage {
                                             session_id: Some(self.session.id),

@@ -402,7 +402,9 @@ pub struct ToolRegistry {
 fn workspace_root() -> std::path::PathBuf {
     std::env::var("CHERUB_WORKSPACE")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
+        .unwrap_or_else(|_| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        })
 }
 
 impl ToolRegistry {
