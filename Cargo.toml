@@ -57,7 +57,7 @@ toml = "1.0"
 regex = "1.12"
 tokio = { version = "1.52", features = ["full"] }
 async-trait = "0.1"
-reqwest = { version = "0.13.4", features = ["json"] }
+reqwest = { version = "0.13.4", features = ["json", "stream"] }
 glob = "0.3"
 secrecy = "0.10.3"
 tracing = "0.1.44"

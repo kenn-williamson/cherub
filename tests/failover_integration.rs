@@ -12,8 +12,19 @@ use cherub::providers::Provider;
 use cherub::providers::anthropic::AnthropicProvider;
 use cherub::providers::failover::FailoverProvider;
 
-/// Valid mock 200 response body matching the Anthropic API wire format.
-const MOCK_SUCCESS_BODY: &str = r#"{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}"#;
+/// Valid mock 200 response as an Anthropic SSE stream (the provider streams).
+const MOCK_SUCCESS_BODY: &str = concat!(
+    "event: message_start\n",
+    "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n",
+    "event: content_block_start\n",
+    "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+    "event: content_block_delta\n",
+    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+    "event: message_delta\n",
+    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n",
+    "event: message_stop\n",
+    "data: {\"type\":\"message_stop\"}\n\n",
+);
 
 fn anthropic_provider(url: &str) -> Box<dyn Provider> {
     Box::new(

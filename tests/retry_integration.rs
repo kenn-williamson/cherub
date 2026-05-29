@@ -10,8 +10,21 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use cherub::providers::Provider;
 use cherub::providers::anthropic::AnthropicProvider;
 
-/// Valid mock 200 response body that matches the Anthropic API wire format.
-const MOCK_SUCCESS_BODY: &str = r#"{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}"#;
+/// Valid mock 200 response as an Anthropic SSE stream (the provider streams).
+const MOCK_SUCCESS_BODY: &str = concat!(
+    "event: message_start\n",
+    "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n",
+    "event: content_block_start\n",
+    "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+    "event: content_block_delta\n",
+    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+    "event: content_block_stop\n",
+    "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+    "event: message_delta\n",
+    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n",
+    "event: message_stop\n",
+    "data: {\"type\":\"message_stop\"}\n\n",
+);
 
 fn test_provider(url: &str) -> AnthropicProvider {
     AnthropicProvider::new(SecretString::from("test-key"), "claude-test", 1024)
@@ -43,6 +56,18 @@ async fn retry_succeeds_after_transient_429() {
 
     let result = provider.complete("system", &messages, &[]).await;
     assert!(result.is_ok(), "should succeed after retry: {result:?}");
+    // Verify the SSE stream was actually parsed into the expected message.
+    let (msg, usage) = result.unwrap();
+    match msg {
+        cherub::providers::Message::Assistant { content, .. } => match &content[0] {
+            cherub::providers::ContentBlock::Text { text } => assert_eq!(text, "ok"),
+            other => panic!("expected text block, got {other:?}"),
+        },
+        other => panic!("expected assistant message, got {other:?}"),
+    }
+    let usage = usage.expect("usage should be present");
+    assert_eq!(usage.input_tokens, 10);
+    assert_eq!(usage.output_tokens, 5);
 }
 
 #[tokio::test]

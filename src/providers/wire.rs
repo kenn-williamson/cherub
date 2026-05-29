@@ -17,10 +17,28 @@ pub(crate) struct ThinkingConfig {
 }
 
 #[derive(Serialize)]
+#[serde(tag = "type")]
+pub(crate) enum CacheControl {
+    #[serde(rename = "ephemeral")]
+    Ephemeral,
+}
+
+/// System prompt as a list of text blocks. Allows attaching cache_control to
+/// the last block so the system prompt + preceding tools are cached together.
+#[derive(Serialize)]
+pub(crate) struct SystemBlock<'a> {
+    #[serde(rename = "type")]
+    pub block_type: &'static str,
+    pub text: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+}
+
+#[derive(Serialize)]
 pub(crate) struct RequestBody<'a> {
     pub model: &'a str,
     pub max_tokens: u32,
-    pub system: &'a str,
+    pub system: Vec<SystemBlock<'a>>,
     pub messages: Vec<WireMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<WireTool>,
@@ -46,12 +64,18 @@ pub(crate) enum WireContent {
 #[serde(tag = "type")]
 pub(crate) enum WireContentBlock {
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
         name: String,
         input: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     #[serde(rename = "tool_result")]
     ToolResult {
@@ -60,13 +84,35 @@ pub(crate) enum WireContentBlock {
         /// The Anthropic API accepts both formats for tool_result content.
         content: WireToolResultContent,
         is_error: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     #[serde(rename = "image")]
-    Image { source: WireImageSource },
+    Image {
+        source: WireImageSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
     #[serde(rename = "thinking")]
     Thinking { thinking: String },
     #[serde(rename = "redacted_thinking")]
     RedactedThinking { data: String },
+}
+
+impl WireContentBlock {
+    /// Mark this content block as a cache breakpoint, if it supports it.
+    /// Thinking blocks don't support cache_control — they are no-ops.
+    pub(crate) fn mark_cache(&mut self) {
+        match self {
+            Self::Text { cache_control, .. }
+            | Self::ToolUse { cache_control, .. }
+            | Self::ToolResult { cache_control, .. }
+            | Self::Image { cache_control, .. } => {
+                *cache_control = Some(CacheControl::Ephemeral);
+            }
+            Self::Thinking { .. } | Self::RedactedThinking { .. } => {}
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -101,6 +147,8 @@ pub(crate) struct WireTool {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 // --- Response types ---
@@ -139,6 +187,289 @@ pub(crate) enum ResponseContentBlock {
     RedactedThinking { data: String },
 }
 
+// --- Streaming (SSE) types ---
+//
+// The Anthropic streaming API emits server-sent events as `event: <type>` /
+// `data: <json>` line pairs separated by blank lines. The `data` JSON always
+// carries its own `type` field (redundant with the `event:` line), so the
+// parser ignores `event:` lines and deserializes each `data:` payload straight
+// into `StreamEvent`. Events are accumulated into a `ResponseBody` identical to
+// what the non-streaming endpoint would have returned in one shot.
+
+/// A single streaming event, deserialized from a `data:` payload.
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+pub(crate) enum StreamEvent {
+    #[serde(rename = "message_start")]
+    MessageStart { message: StreamMessageStart },
+    #[serde(rename = "content_block_start")]
+    ContentBlockStart {
+        index: usize,
+        content_block: StreamBlockStart,
+    },
+    #[serde(rename = "content_block_delta")]
+    ContentBlockDelta { index: usize, delta: StreamDelta },
+    #[serde(rename = "content_block_stop")]
+    ContentBlockStop,
+    #[serde(rename = "message_delta")]
+    MessageDelta {
+        delta: StreamMessageDelta,
+        // `usage` is a top-level sibling of `delta` in this event, not nested.
+        #[serde(default)]
+        usage: Option<StreamDeltaUsage>,
+    },
+    #[serde(rename = "message_stop")]
+    MessageStop,
+    #[serde(rename = "ping")]
+    Ping,
+    #[serde(rename = "error")]
+    Error { error: StreamError },
+}
+
+#[derive(Deserialize)]
+pub(crate) struct StreamMessageStart {
+    #[serde(default)]
+    pub usage: Option<WireUsage>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+pub(crate) enum StreamBlockStart {
+    #[serde(rename = "text")]
+    Text {
+        #[serde(default)]
+        text: String,
+    },
+    #[serde(rename = "tool_use")]
+    ToolUse { id: String, name: String },
+    #[serde(rename = "thinking")]
+    Thinking {
+        #[serde(default)]
+        thinking: String,
+    },
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking { data: String },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+pub(crate) enum StreamDelta {
+    #[serde(rename = "text_delta")]
+    Text { text: String },
+    #[serde(rename = "input_json_delta")]
+    InputJson { partial_json: String },
+    #[serde(rename = "thinking_delta")]
+    Thinking { thinking: String },
+    // Signature deltas accompany thinking blocks but aren't surfaced in
+    // ResponseContentBlock (the non-streaming path drops them too) — ignored.
+    #[serde(rename = "signature_delta")]
+    Signature {},
+}
+
+#[derive(Deserialize)]
+pub(crate) struct StreamMessageDelta {
+    #[serde(default)]
+    pub stop_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct StreamDeltaUsage {
+    #[serde(default)]
+    pub output_tokens: u32,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct StreamError {
+    #[serde(rename = "type")]
+    pub error_type: String,
+    #[serde(default)]
+    pub message: String,
+}
+
+/// A failure while consuming the stream. `retryable` distinguishes transient
+/// problems (overloaded, dropped mid-stream) from fatal ones (malformed data).
+pub(crate) struct StreamFailure {
+    pub retryable: bool,
+    pub message: String,
+}
+
+/// In-progress content block, accumulated from deltas.
+enum BlockBuilder {
+    Text(String),
+    ToolUse {
+        id: String,
+        name: String,
+        json: String,
+    },
+    Thinking(String),
+    RedactedThinking(String),
+}
+
+/// Accumulates streaming events into a complete `ResponseBody`.
+#[derive(Default)]
+pub(crate) struct StreamAccumulator {
+    blocks: Vec<BlockBuilder>,
+    stop_reason: Option<String>,
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_creation_tokens: u32,
+    cache_read_tokens: u32,
+}
+
+impl StreamAccumulator {
+    /// Apply one event. Returns `Err` only for an `error` event.
+    pub(crate) fn apply(&mut self, event: StreamEvent) -> Result<(), StreamFailure> {
+        match event {
+            StreamEvent::MessageStart { message } => {
+                if let Some(u) = message.usage {
+                    self.input_tokens = u.input_tokens;
+                    self.output_tokens = u.output_tokens;
+                    self.cache_creation_tokens = u.cache_creation_input_tokens;
+                    self.cache_read_tokens = u.cache_read_input_tokens;
+                }
+            }
+            StreamEvent::ContentBlockStart {
+                index,
+                content_block,
+            } => {
+                let builder = match content_block {
+                    StreamBlockStart::Text { text } => BlockBuilder::Text(text),
+                    StreamBlockStart::ToolUse { id, name } => BlockBuilder::ToolUse {
+                        id,
+                        name,
+                        json: String::new(),
+                    },
+                    StreamBlockStart::Thinking { thinking } => BlockBuilder::Thinking(thinking),
+                    StreamBlockStart::RedactedThinking { data } => {
+                        BlockBuilder::RedactedThinking(data)
+                    }
+                };
+                // Indices arrive in order; fill any gap defensively.
+                while self.blocks.len() <= index {
+                    self.blocks.push(BlockBuilder::Text(String::new()));
+                }
+                self.blocks[index] = builder;
+            }
+            StreamEvent::ContentBlockDelta { index, delta } => {
+                if let Some(block) = self.blocks.get_mut(index) {
+                    match (block, delta) {
+                        (BlockBuilder::Text(s), StreamDelta::Text { text }) => {
+                            s.push_str(&text);
+                        }
+                        (
+                            BlockBuilder::ToolUse { json, .. },
+                            StreamDelta::InputJson { partial_json },
+                        ) => {
+                            json.push_str(&partial_json);
+                        }
+                        (BlockBuilder::Thinking(s), StreamDelta::Thinking { thinking }) => {
+                            s.push_str(&thinking);
+                        }
+                        // Mismatched delta/block or signature_delta — ignore.
+                        _ => {}
+                    }
+                }
+            }
+            StreamEvent::MessageDelta { delta, usage } => {
+                if let Some(sr) = delta.stop_reason {
+                    self.stop_reason = Some(sr);
+                }
+                if let Some(u) = usage {
+                    self.output_tokens = u.output_tokens;
+                }
+            }
+            StreamEvent::ContentBlockStop | StreamEvent::MessageStop | StreamEvent::Ping => {}
+            StreamEvent::Error { error } => {
+                let retryable =
+                    matches!(error.error_type.as_str(), "overloaded_error" | "api_error");
+                return Err(StreamFailure {
+                    retryable,
+                    message: format!("{}: {}", error.error_type, error.message),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Assemble the accumulated blocks into a `ResponseBody`.
+    pub(crate) fn finish(self) -> ResponseBody {
+        let content = self
+            .blocks
+            .into_iter()
+            .map(|b| match b {
+                BlockBuilder::Text(text) => ResponseContentBlock::Text { text },
+                BlockBuilder::ToolUse { id, name, json } => {
+                    // Empty input arrives as no deltas; treat as `{}`.
+                    let input = if json.trim().is_empty() {
+                        serde_json::Value::Object(serde_json::Map::new())
+                    } else {
+                        serde_json::from_str(&json)
+                            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()))
+                    };
+                    ResponseContentBlock::ToolUse { id, name, input }
+                }
+                BlockBuilder::Thinking(thinking) => ResponseContentBlock::Thinking { thinking },
+                BlockBuilder::RedactedThinking(data) => {
+                    ResponseContentBlock::RedactedThinking { data }
+                }
+            })
+            .collect();
+
+        ResponseBody {
+            content,
+            stop_reason: self.stop_reason.unwrap_or_else(|| "end_turn".to_owned()),
+            usage: Some(WireUsage {
+                input_tokens: self.input_tokens,
+                output_tokens: self.output_tokens,
+                cache_creation_input_tokens: self.cache_creation_tokens,
+                cache_read_input_tokens: self.cache_read_tokens,
+            }),
+        }
+    }
+}
+
+/// Feed a chunk of raw SSE bytes into the accumulator. `buf` holds bytes not yet
+/// forming a complete line across calls; `data_lines` holds `data:` payloads of
+/// the event currently being assembled. Complete events are applied immediately.
+pub(crate) fn feed_sse(
+    acc: &mut StreamAccumulator,
+    buf: &mut Vec<u8>,
+    data_lines: &mut Vec<String>,
+    chunk: &[u8],
+) -> Result<(), StreamFailure> {
+    buf.extend_from_slice(chunk);
+    while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+        let raw: Vec<u8> = buf.drain(..=pos).collect();
+        // Drop the trailing '\n' and an optional preceding '\r'.
+        let mut line = &raw[..raw.len() - 1];
+        if line.last() == Some(&b'\r') {
+            line = &line[..line.len() - 1];
+        }
+        if line.is_empty() {
+            // Blank line: end of an event. Dispatch if we collected data.
+            if !data_lines.is_empty() {
+                let payload = data_lines.join("\n");
+                data_lines.clear();
+                let event: StreamEvent =
+                    serde_json::from_str(&payload).map_err(|e| StreamFailure {
+                        retryable: false,
+                        message: format!("SSE JSON parse error: {e}"),
+                    })?;
+                acc.apply(event)?;
+            }
+        } else if let Some(rest) = line.strip_prefix(b"data:") {
+            let rest = rest.strip_prefix(b" ").unwrap_or(rest);
+            let text = std::str::from_utf8(rest).map_err(|_| StreamFailure {
+                retryable: false,
+                message: "invalid UTF-8 in SSE data".to_owned(),
+            })?;
+            data_lines.push(text.to_owned());
+        }
+        // `event:` / `id:` / comment lines are ignored.
+    }
+    Ok(())
+}
+
 // --- Conversions ---
 
 impl From<&ToolDefinition> for WireTool {
@@ -147,6 +478,7 @@ impl From<&ToolDefinition> for WireTool {
             name: def.name.clone(),
             description: def.description.clone(),
             input_schema: def.input_schema.clone(),
+            cache_control: None,
         }
     }
 }
@@ -165,13 +497,17 @@ fn user_content_to_wire(content: &[UserContent]) -> WireContent {
     let blocks = content
         .iter()
         .map(|c| match c {
-            UserContent::Text(text) => WireContentBlock::Text { text: text.clone() },
+            UserContent::Text(text) => WireContentBlock::Text {
+                text: text.clone(),
+                cache_control: None,
+            },
             UserContent::Image { media_type, data } => WireContentBlock::Image {
                 source: WireImageSource {
                     source_type: "base64",
                     media_type: media_type.clone(),
                     data: data.clone(),
                 },
+                cache_control: None,
             },
         })
         .collect();
@@ -200,13 +536,15 @@ pub(crate) fn messages_to_wire(messages: &[Message]) -> Vec<WireMessage> {
                 let blocks = content
                     .iter()
                     .map(|block| match block {
-                        ContentBlock::Text { text } => {
-                            WireContentBlock::Text { text: text.clone() }
-                        }
+                        ContentBlock::Text { text } => WireContentBlock::Text {
+                            text: text.clone(),
+                            cache_control: None,
+                        },
                         ContentBlock::ToolUse { id, name, input } => WireContentBlock::ToolUse {
                             id: id.clone(),
                             name: name.clone(),
                             input: input.clone(),
+                            cache_control: None,
                         },
                         ContentBlock::Thinking { thinking } => WireContentBlock::Thinking {
                             thinking: thinking.clone(),
@@ -236,6 +574,7 @@ pub(crate) fn messages_to_wire(messages: &[Message]) -> Vec<WireMessage> {
                     tool_use_id: tool_use_id.clone(),
                     content: wire_content,
                     is_error: *is_error,
+                    cache_control: None,
                 });
             }
         }
@@ -243,6 +582,46 @@ pub(crate) fn messages_to_wire(messages: &[Message]) -> Vec<WireMessage> {
 
     flush_results(&mut wire, &mut pending_results);
     wire
+}
+
+/// Mark the last content block of the last message as a cache breakpoint.
+/// This caches the entire conversation prefix on each turn — subsequent turns
+/// read from this point and only pay full price for new content.
+pub(crate) fn mark_conversation_cache(messages: &mut [WireMessage]) {
+    let Some(last_msg) = messages.last_mut() else {
+        return;
+    };
+    match &mut last_msg.content {
+        WireContent::Text(_) => {
+            // Text-only content can't carry cache_control; convert to a single-block form.
+            let text = std::mem::take(&mut last_msg.content);
+            let WireContent::Text(s) = text else {
+                unreachable!()
+            };
+            last_msg.content = WireContent::Blocks(vec![WireContentBlock::Text {
+                text: s,
+                cache_control: Some(CacheControl::Ephemeral),
+            }]);
+        }
+        WireContent::Blocks(blocks) => {
+            // Find the last cacheable block (skip Thinking which can't be marked).
+            for block in blocks.iter_mut().rev() {
+                if !matches!(
+                    block,
+                    WireContentBlock::Thinking { .. } | WireContentBlock::RedactedThinking { .. }
+                ) {
+                    block.mark_cache();
+                    break;
+                }
+            }
+        }
+    }
+}
+
+impl Default for WireContent {
+    fn default() -> Self {
+        WireContent::Blocks(Vec::new())
+    }
 }
 
 /// Build multi-block tool result content (text + images) for the Anthropic wire format.
@@ -400,7 +779,11 @@ mod tests {
         let body = RequestBody {
             model: "claude-sonnet-4-20250514",
             max_tokens: 4096,
-            system: "You are helpful.",
+            system: vec![SystemBlock {
+                block_type: "text",
+                text: "You are helpful.",
+                cache_control: None,
+            }],
             messages: vec![WireMessage {
                 role: "user",
                 content: WireContent::Text("hi".to_owned()),
@@ -409,6 +792,7 @@ mod tests {
                 name: "bash".to_owned(),
                 description: "Run bash".to_owned(),
                 input_schema: json!({"type": "object", "properties": {"command": {"type": "string"}}}),
+                cache_control: None,
             }],
             stream: false,
             thinking: None,
@@ -756,7 +1140,11 @@ mod tests {
         let body = RequestBody {
             model: "claude-sonnet-4-20250514",
             max_tokens: 16000,
-            system: "test",
+            system: vec![SystemBlock {
+                block_type: "text",
+                text: "test",
+                cache_control: None,
+            }],
             messages: vec![],
             tools: vec![],
             stream: false,
@@ -775,7 +1163,11 @@ mod tests {
         let body = RequestBody {
             model: "claude-sonnet-4-20250514",
             max_tokens: 4096,
-            system: "test",
+            system: vec![SystemBlock {
+                block_type: "text",
+                text: "test",
+                cache_control: None,
+            }],
             messages: vec![],
             tools: vec![],
             stream: false,
@@ -797,5 +1189,107 @@ mod tests {
         let usage = usage.expect("usage should be present");
         assert_eq!(usage.cache_creation_tokens, 0);
         assert_eq!(usage.cache_read_tokens, 0);
+    }
+
+    /// Drive the SSE parser with `chunks` and assemble the result.
+    fn run_sse(chunks: &[&[u8]]) -> Result<ResponseBody, String> {
+        let mut acc = StreamAccumulator::default();
+        let mut buf = Vec::new();
+        let mut data_lines = Vec::new();
+        for chunk in chunks {
+            feed_sse(&mut acc, &mut buf, &mut data_lines, chunk).map_err(|f| f.message)?;
+        }
+        Ok(acc.finish())
+    }
+
+    #[test]
+    fn sse_assembles_text_with_usage() {
+        let sse = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":100,\"output_tokens\":1,\"cache_read_input_tokens\":80}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        let resp = run_sse(&[sse]).expect("stream should assemble");
+        let (msg, usage) = response_to_message(resp);
+        match msg {
+            Message::Assistant {
+                content,
+                stop_reason,
+            } => {
+                assert!(matches!(stop_reason, StopReason::EndTurn));
+                assert_eq!(content.len(), 1);
+                match &content[0] {
+                    ContentBlock::Text { text } => assert_eq!(text, "Hello world"),
+                    other => panic!("expected text, got {other:?}"),
+                }
+            }
+            other => panic!("expected assistant, got {other:?}"),
+        }
+        let usage = usage.expect("usage present");
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.cache_read_tokens, 80);
+    }
+
+    #[test]
+    fn sse_assembles_tool_use_from_partial_json() {
+        // tool_use input arrives as input_json_delta fragments that must concatenate.
+        let sse = b"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"read\"}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\"}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"a.txt\\\"}\"}}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n";
+        let resp = run_sse(&[sse]).expect("stream should assemble");
+        let (msg, _) = response_to_message(resp);
+        let Message::Assistant {
+            content,
+            stop_reason,
+        } = msg
+        else {
+            panic!("expected assistant");
+        };
+        assert!(matches!(stop_reason, StopReason::ToolUse));
+        match &content[0] {
+            ContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "toolu_1");
+                assert_eq!(name, "read");
+                assert_eq!(input["path"], "a.txt");
+            }
+            other => panic!("expected tool_use, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sse_survives_event_split_across_chunks() {
+        // Split mid-line to prove bytes are buffered until a line is complete
+        // (UTF-8 is only decoded on whole lines, so a multibyte char that lands
+        // before the newline is reassembled intact regardless of chunk boundary).
+        let full = "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"caf\u{00e9}\"}}\n\n";
+        let bytes = full.as_bytes();
+        // Split at an arbitrary boundary partway through the first event's line.
+        let (a, b) = bytes.split_at(40);
+        let resp = run_sse(&[a, b]).expect("stream should assemble across chunks");
+        let (msg, _) = response_to_message(resp);
+        let Message::Assistant { content, .. } = msg else {
+            panic!("expected assistant");
+        };
+        match &content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "caf\u{00e9}"),
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sse_overloaded_error_is_retryable() {
+        let sse = b"data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n";
+        let mut acc = StreamAccumulator::default();
+        let mut buf = Vec::new();
+        let mut data_lines = Vec::new();
+        let err = feed_sse(&mut acc, &mut buf, &mut data_lines, sse)
+            .expect_err("error event should surface");
+        assert!(err.retryable);
+    }
+
+    #[test]
+    fn sse_malformed_json_is_fatal() {
+        let sse = b"data: {not valid json}\n\n";
+        let mut acc = StreamAccumulator::default();
+        let mut buf = Vec::new();
+        let mut data_lines = Vec::new();
+        let err = feed_sse(&mut acc, &mut buf, &mut data_lines, sse)
+            .expect_err("malformed data should fail");
+        assert!(!err.retryable);
     }
 }
