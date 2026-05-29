@@ -72,13 +72,13 @@ cherub/
 │   │       └── loader.rs     # load_from_config(): read config, spawn servers, discover tools, credential_env
 │   ├── providers/
 │   │   ├── mod.rs            # Provider trait, Message/UserContent/ContentBlock types (serde + Clone)
-│   │   ├── anthropic.rs      # Anthropic API provider (non-streaming)
+│   │   ├── anthropic.rs      # Anthropic API provider (SSE streaming, reassembled internally; idle-timeout)
 │   │   ├── config.rs         # ProvidersConfig + ProviderDef + SubAgentDef + instantiate_provider/instantiate_named_provider (M13b/c)
 │   │   ├── failover.rs       # FailoverProvider + CircuitState: ordered failover with circuit breaker (M13c)
 │   │   ├── openai.rs         # OpenAI-compatible API provider (M13a: OpenAI, Ollama, vLLM, Groq, etc.)
 │   │   ├── openai_wire.rs    # Serde structs for OpenAI Chat Completions wire format (private)
 │   │   ├── pricing.rs        # ModelPricing struct + PricingTable + lookup_pricing() + compute_cost() (M12; DB-backed pricing)
-│   │   └── wire.rs           # Serde structs for Anthropic API JSON (private, supports images)
+│   │   └── wire.rs           # Serde structs for Anthropic API JSON (private; images, prompt caching, SSE stream parser + accumulator)
 │   ├── storage/              # Feature-gated: #[cfg(feature = "postgres")]
 │   │   ├── mod.rs            # SessionStore + MemoryStore + CredentialStore + AuditStore + CostStore + PricingStore traits, connect(), Pool type alias
 │   │   ├── embedding.rs      # EmbeddingProvider trait + OpenAiEmbeddingProvider (M6c)
@@ -125,6 +125,7 @@ cherub/
 │   ├── hooks_integration.rs  # Hook lifecycle + stashing integration tests (M15a/b, 8 tests)
 │   ├── output_events.rs    # Output event integration tests: recapitulation, progress, turn lifecycle (M14b/c, 7 tests)
 │   ├── parallel_tools.rs   # Parallel tool execution tests (M18c)
+│   ├── drain_approved_tasks.rs  # AgentLoop::drain_approved_tasks() tests via MockTaskStore, no DB (feature = "postgres")
 │   ├── browser_enforcement.rs  # Browser tool enforcement tests: BrowserStructured extraction, domain allowlist (feature = "browser")
 │   └── ui/
 │       ├── capability_token_private.rs      # Proves CapabilityToken can't be constructed outside enforcement
@@ -339,7 +340,7 @@ Best practices for the specific crates in use.
 - **`regex`** — Compile patterns at policy load time, not per-evaluation. Set `size_limit(1 << 20)` and `nest_limit(50)`. Use `unicode(false)` for command matching. Never use `fancy-regex` for policy patterns.
 - **`serde`** — Use `#[serde(deny_unknown_fields)]` on all policy/config structs. Validate semantics after deserialization (regex compilation, tier validity, no duplicate rules).
 - **`tracing`** — Use structured fields (`tracing::info!(tool = %name, decision = %result)`), not string interpolation. Every enforcement decision gets a span. Every tool execution gets a span.
-- **`reqwest`** — Always set `connect_timeout(10s)`, `read_timeout(30s)`, `timeout(120s)`. Use `reqwest-eventsource` for SSE streaming from LLM providers.
+- **`reqwest`** — Always set `connect_timeout(10s)`. For **non-streaming** request/response calls, also set `read_timeout`/`timeout`. For **streaming** LLM calls (the Anthropic provider streams), do NOT set a total `timeout` — it would kill long-but-healthy generations (e.g. extended thinking); instead consume `Response::bytes_stream()` with a per-chunk idle timeout (`tokio::time::timeout` around `stream.next()`) plus a generous absolute backstop. Parse SSE with a small in-house parser — do NOT add `reqwest-eventsource` (unmaintained, pins old reqwest).
 - **`tokio`** — Use `tokio::process::Command` with `.kill_on_drop(true)`. Wrap all child process execution in `tokio::time::timeout()`. Use `.arg()` arrays, never shell string concatenation (even though we're executing bash — the command string goes as a single arg to `bash -c`).
 - **`secrecy`** — Wrap all credential values in `SecretString`. The `Debug` impl auto-redacts. `expose_secret()` only at the eight documented call sites: DB URL, Anthropic API key, OpenAI API key, embedding key, credential broker, two crypto.rs master-key sites (hex validation + HKDF IKM), and MCP credential env injection. Not in general-purpose code.
 - **`toml`** — Enforce file size limit before parsing. Strongly typed deserialization into Rust structs with `#[serde(deny_unknown_fields)]`.

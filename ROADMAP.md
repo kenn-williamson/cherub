@@ -49,7 +49,7 @@ Everything else — connectors, credential brokering, audit logging, IPC plugins
 
 **Goal:** You can type a message in the terminal, the Anthropic API generates a response, and if the model proposes a bash command, the enforcement layer evaluates it before execution.
 
-- [x] Anthropic API provider: non-streaming `complete()` via reqwest (streaming deferred)
+- [x] Anthropic API provider: `complete()` via reqwest (originally non-streaming; later switched to wire-level SSE streaming for reliability — see ROADMAP_DEFERRED)
 - [x] System prompt defining the agent's tool-calling interface
 - [x] Agent loop: message → model → parse tool proposals → enforce → execute or reject → feed result back to model
 - [x] CLI interface: rustyline REPL with history
@@ -423,10 +423,7 @@ M14a-c are independent — can parallel with M12/M13
 M14d depends on M14c
 
 M15a (hook trait) ── M15b (output stashing, first hook consumer)
-M16a (complexity scorer) ── M16b (smart routing provider) ── depends on M13b (provider config)
-M17a (response cache) — independent, can parallel with M15/M16
-M18a-c are independent of each other
-M18b (streaming) should precede Web UI (Beyond M18)
+M18a (WASM versioning) and M18c (parallel tools) are independent of each other
 ```
 
 ---
@@ -513,62 +510,20 @@ Six interception points, matching the natural boundaries in `run_turn()`:
 
 ---
 
-## Milestone 16: Smart Routing
-
-**Goal:** Automatically route simple queries to cheaper/faster models, reserving the primary model for complex reasoning. Cost optimization without manual sub-agent delegation.
-
-Inspired by IronClaw's 13-dimension complexity scorer, but implemented as a decorator provider that routes through the enforcement layer (cherub-idiomatic).
-
-### M16a: Complexity Scorer
-- [ ] `ComplexityScore` struct with weighted dimensions (reasoning indicators, code markers, multi-step signals, domain keywords, token estimate)
-- [ ] `score(user_message) -> u32` pure function (0-100 scale)
-- [ ] 4 tiers: Flash (0-15), Standard (16-40), Pro (41-65), Frontier (66+)
-- [ ] Pattern overrides for deterministic fast-path (e.g., greetings → Flash)
-- [ ] Configurable weights via TOML
-
-### M16b: Smart Routing Provider
-- [ ] `SmartRoutingProvider` implementing `Provider` — wraps two child providers (cheap + primary)
-- [ ] Routes based on complexity score: Flash/Standard → cheap, Pro/Frontier → primary
-- [ ] Structured tracing: which model was selected and why
-- [ ] Falls back to primary on cheap-model error
-- [ ] Cost tracking attributes usage to correct model
-
----
-
-## Milestone 17: Response Caching
-
-**Goal:** Cache non-tool-calling LLM responses to avoid redundant API calls. Pure cost/latency optimization.
-
-### M17a: In-Memory LLM Cache
-- [ ] SHA-256 key derived from (model_name, messages, tool_definitions)
-- [ ] TTL-based expiry (default 1 hour, configurable)
-- [ ] LRU eviction (default max 1000 entries)
-- [ ] Tool-calling responses never cached (side effects)
-- [ ] `CachedProvider` decorator wrapping any `Box<dyn Provider>`
-- [ ] Stats logging (hit rate, cache size) via tracing
-- [ ] Configurable in providers TOML: `cache = { ttl_secs = 3600, max_entries = 1000 }`
-
----
-
 ## Milestone 18: Extended Tooling
 
-**Goal:** Close remaining tooling gaps vs. competitors.
+**Goal:** Close remaining tooling gaps.
 
 ### M18a: WASM Extension Versioning
-- [ ] `version` field in WASM tool manifest (semver from Cargo.toml)
-- [ ] WIT compatibility validation before loading — reject version mismatches
+- [ ] `version` field in WASM tool manifest (semver string)
+- [ ] Version compatibility validation before loading — reject mismatches with structured error
 - [ ] Structured error on version mismatch with expected vs. actual
 
-### M18b: Streaming Responses
-- [ ] SSE streaming for CLI (text appears incrementally)
-- [ ] Provider trait extended with optional `complete_streaming()` method
-- [ ] Anthropic SSE parser over `reqwest::Response::bytes_stream()`
-- [ ] OpenAI SSE streaming support
-
 ### M18c: Parallel Tool Execution
-- [ ] When model returns multiple `tool_use` blocks, execute independent tools concurrently
-- [ ] `tokio::JoinSet` for parallel execution with individual timeouts
-- [ ] Sequential fallback for tools with declared dependencies
+*(Tests already written in `tests/parallel_tools.rs` — implementation pending.)*
+- [ ] 4-phase pipeline: enforce (sequential) → approve (sequential) → execute (parallel) → session push (ordered)
+- [ ] `tokio::task::JoinSet` for parallel execution with individual timeouts
+- [ ] Results collected in original `tool_use` order before session push
 
 ---
 

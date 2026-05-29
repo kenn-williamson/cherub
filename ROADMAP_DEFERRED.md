@@ -1,18 +1,50 @@
-# Deferred Items from Milestone 2
+# Deferred Items
 
-Items discovered or explicitly deferred during M2 implementation that are **not already tracked** in ROADMAP.md milestones (M3–M7 and Beyond MVP).
+Items explicitly deferred from active milestones. Each entry notes *why* it was deferred, so future-us can judge whether the original reason still holds.
 
-## Streaming Responses
+---
 
-M2 uses non-streaming API (`"stream": false`). Add SSE streaming for CLI UX so text appears incrementally. Write a minimal SSE parser (~50 lines) over `reqwest::Response::bytes_stream()` — avoid `reqwest-eventsource` (unmaintained, pins old reqwest).
+## M16 — Smart Routing (deferred indefinitely)
 
-## Extended Thinking Support
+Originally: automatically route simple queries to cheaper/faster models via a complexity scorer (0–100) and a `SmartRoutingProvider` decorator.
 
-Anthropic `thinking` content blocks are ignored. Add when needed for complex reasoning tasks.
+**Why deferred:** M13d sub-agents are the correct pattern — the frontier model reasons first, then delegates bounded subtasks to cheaper models as tool calls. Smart routing inverts this: a cheap routing decision precedes the frontier model's reasoning, which introduces anchoring risk (the weak model's framing influences the frontier model's output). The complexity-scorer approach is also a maintenance burden with configurable-weights TOML that adds complexity without a clear win. If cheap-model delegation is needed, wire it as a sub-agent tool.
 
-## Parallel Tool Execution
+---
 
-When the model returns multiple `tool_use` blocks, they're executed sequentially. Consider parallel execution for independent commands.
+## M17 — Response Caching (deferred indefinitely)
+
+Originally: in-memory LRU/TTL cache for non-tool-calling LLM responses, keyed by SHA-256 of (model, messages, tool_definitions).
+
+**Why deferred:** Most agent turns involve tool calls, which can't be cached. Anthropic prompt caching already handles API-level repetition at a lower level. The SHA-256 key includes tool definitions, so any tool registration change invalidates the entire cache. The complexity cost (TTL management, LRU eviction, cache invalidation) doesn't pay off for agentic workloads. Revisit only if a chatbot-style use case (repeated identical non-tool queries) emerges.
+
+---
+
+## M18b — *User-facing* SSE Streaming (deferred indefinitely)
+
+Originally: SSE streaming for CLI so text appears incrementally; `complete_streaming()` on the `Provider` trait; Anthropic + OpenAI SSE parsers.
+
+**Why deferred:** Messaging connectors (Telegram, Discord) never benefit from streaming — messages are batched per-turn anyway. There is no web UI and no heavy CLI focus. The *incremental-display* complexity (surfacing partial tokens, backpressure) isn't justified. Revisit only when a web UI is built.
+
+**Update — wire-level streaming shipped:** The Anthropic provider now uses `stream: true` on the wire and consumes the SSE internally (a self-contained parser over `reqwest::Response::bytes_stream()` — no `reqwest-eventsource`), reassembling a complete `Message`. This was done for *reliability*, not UX: a per-chunk idle timeout replaces the total request timeout, so long-but-healthy generations (e.g. extended thinking) no longer fail. The `Provider` trait is unchanged (still returns a complete `Message`). So the SSE parser already exists; only the user-facing incremental display + the `complete_streaming()` trait method + OpenAI's parser remain deferred.
+
+---
+
+## Items Deferred from Milestone 2
+
+Items discovered or explicitly deferred during M2 implementation.
+
+## Streaming Responses (M2-era) — partially resolved
+
+M2 used the non-streaming API (`"stream": false`). The wire-level half of this is now **done**: the Anthropic provider streams (`stream: true`) and parses SSE with a self-contained parser over `reqwest::Response::bytes_stream()` (no `reqwest-eventsource`, as advised here). What remains is the *CLI UX* part — text appearing incrementally — which is deferred (see M18b above).
+
+## Extended Thinking Support — implemented
+
+No longer deferred. Anthropic extended thinking is configurable per provider
+(`thinking_budget` in providers config → `AnthropicProvider::with_thinking_budget`),
+`thinking`/`redacted_thinking` blocks are parsed (both the streaming and
+non-streaming paths) and handled in `runtime/prompt.rs`. Kept here as a record;
+remove once confirmed stable.
 
 ## `expose_secret()` Migration
 
