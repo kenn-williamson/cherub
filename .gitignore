@@ -1,2 +1,6 @@
 /target
 .env
+# Runtime stash for truncated tool output (regenerated at runtime)
+.cherub-stash/
+# Local Claude Code tooling and machine-local settings
+.claude/
