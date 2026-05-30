@@ -6,10 +6,8 @@ use teloxide::prelude::*;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::enforcement::policy::Policy;
 use crate::providers::UserContent;
 use crate::providers::anthropic::AnthropicProvider;
-use crate::providers::config::ProvidersConfig;
 use crate::providers::openai::OpenAiProvider;
 
 use super::approval::{ApprovalMessage, TelegramApprovalGate};
@@ -38,30 +36,23 @@ pub enum InboundMessage {
 /// Configuration for creating new per-chat agent sessions.
 pub struct SessionConfig {
     pub bot: Bot,
-    pub policy: Policy,
-    pub model: String,
+    /// Max output tokens — kept for the `/model` hot-swap (rebuilds the provider).
     pub max_tokens: u32,
+    /// API key — kept for the `/model` hot-swap.
     pub api_key: Option<secrecy::SecretString>,
-    /// Provider backend: "anthropic" or "openai".
+    /// Provider backend ("anthropic"/"openai") — kept for the `/model` hot-swap.
     pub provider_type: String,
-    /// Custom base URL for OpenAI-compatible endpoints.
+    /// Custom base URL for OpenAI-compatible endpoints — for the `/model` hot-swap.
     pub base_url: Option<String>,
-    /// Optional providers config (overrides provider_type/api_key/base_url).
-    pub providers_config: Option<ProvidersConfig>,
-    /// PostgreSQL connection pool for session persistence, memory, and/or task queue.
-    /// Present when `sessions`, `memory`, or `postgres` feature is enabled.
-    #[cfg(any(feature = "sessions", feature = "memory", feature = "postgres"))]
-    pub db_pool: Option<crate::storage::Pool>,
-    /// Shared, build-once tool registry + memory store. The expensive tool
-    /// backends (MCP processes, Docker runtime, WASM modules) live here and are
-    /// shared across every chat — never spawned per chat.
+    /// Shared, build-once services: provider, tool registry, memory store, and
+    /// the DB-backed audit/cost/pricing stores. The expensive backends (MCP
+    /// processes, Docker runtime, WASM modules) live here and are shared across
+    /// every chat — never spawned per chat.
     pub shared: Arc<crate::app::SharedAgentServices>,
-    /// Extended thinking budget in tokens (Anthropic-only, M14a).
+    /// Extended thinking budget in tokens — for the `/model` hot-swap (Anthropic).
     pub thinking_budget: Option<u32>,
     /// Verbose output: send events immediately instead of batching per turn (M14d).
     pub verbose: bool,
-    /// Custom system prompt (overrides default coding-assistant prompt).
-    pub system_prompt_override: Option<String>,
     /// Task queue store for async approval (autonomous turns).
     /// When set, commit-tier actions during autonomous turns are queued instead of blocking.
     #[cfg(feature = "postgres")]
@@ -131,23 +122,13 @@ pub async fn session_manager(
 
                     let chat_config = SessionConfig {
                         bot: config.bot.clone(),
-                        policy: config.policy.clone(),
-                        model: config.model.clone(),
                         max_tokens: config.max_tokens,
                         api_key: config.api_key.clone(),
                         provider_type: config.provider_type.clone(),
                         base_url: config.base_url.clone(),
-                        providers_config: config.providers_config.clone(),
-                        #[cfg(any(
-                            feature = "sessions",
-                            feature = "memory",
-                            feature = "postgres"
-                        ))]
-                        db_pool: config.db_pool.clone(),
                         shared: Arc::clone(&config.shared),
                         thinking_budget: config.thinking_budget,
                         verbose: config.verbose,
-                        system_prompt_override: config.system_prompt_override.clone(),
                         #[cfg(feature = "postgres")]
                         task_store: config.task_store.clone(),
                     };
@@ -205,23 +186,13 @@ pub async fn session_manager(
                             chat_cancel_flags.insert(chat_id, Arc::clone(&cancel_flag));
                             let chat_config = SessionConfig {
                                 bot: config.bot.clone(),
-                                policy: config.policy.clone(),
-                                model: config.model.clone(),
                                 max_tokens: config.max_tokens,
                                 api_key: config.api_key.clone(),
                                 provider_type: config.provider_type.clone(),
                                 base_url: config.base_url.clone(),
-                                providers_config: config.providers_config.clone(),
-                                #[cfg(any(
-                                    feature = "sessions",
-                                    feature = "memory",
-                                    feature = "postgres"
-                                ))]
-                                db_pool: config.db_pool.clone(),
                                 shared: Arc::clone(&config.shared),
                                 thinking_budget: config.thinking_budget,
                                 verbose: config.verbose,
-                                system_prompt_override: config.system_prompt_override.clone(),
                                 #[cfg(feature = "postgres")]
                                 task_store: config.task_store.clone(),
                             };
