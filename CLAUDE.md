@@ -15,7 +15,7 @@ cherub/
 ├── src/
 │   ├── main.rs              # Entry point, CLI interface
 │   ├── lib.rs               # Library entry point
-│   ├── app.rs               # App-assembly layer: AgentConfig + build_registry() (shared tool wiring for CLI + Telegram)
+│   ├── app.rs               # App-assembly layer: AgentConfig/ProviderSpec + build_registry() + SharedAgentServices (build-once shared provider+registry for CLI + Telegram)
 │   ├── error.rs             # Error types
 │   ├── retry.rs             # Retry logic with exponential backoff for transient API errors
 │   ├── bin/
