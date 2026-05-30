@@ -7,6 +7,7 @@
 
 use std::collections::VecDeque;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::Mutex;
 
 use serde_json::json;
@@ -425,8 +426,8 @@ async fn no_compaction_when_below_threshold() {
     let policy = Policy::from_str(POLICY).unwrap();
     let mut agent = AgentLoop::new(
         policy,
-        Box::new(provider),
-        ToolRegistry::new(),
+        Arc::new(provider),
+        Arc::new(ToolRegistry::new()),
         "test".to_owned(),
         AutoApprove,
         NullSink,
@@ -461,8 +462,8 @@ async fn compaction_triggers_with_high_usage() {
     let policy = Policy::from_str(POLICY).unwrap();
     let mut agent = AgentLoop::new(
         policy,
-        Box::new(provider),
-        ToolRegistry::new(),
+        Arc::new(provider),
+        Arc::new(ToolRegistry::new()),
         "test".to_owned(),
         AutoApprove,
         NullSink,
@@ -746,8 +747,8 @@ patterns = ["^store:instructions/", "^store:identity/"]
         let registry = ToolRegistry::with_memory(Arc::clone(&store) as Arc<dyn MemoryStore>);
         let mut agent = AgentLoop::new(
             policy,
-            Box::new(provider),
-            registry,
+            Arc::new(provider),
+            Arc::new(registry),
             "test".to_owned(),
             AutoApprove,
             NullSink,
@@ -817,8 +818,8 @@ patterns = ["^store:instructions/", "^store:identity/"]
         let registry = ToolRegistry::with_memory(Arc::clone(&store) as Arc<dyn MemoryStore>);
         let mut agent = AgentLoop::new(
             policy,
-            Box::new(provider),
-            registry,
+            Arc::new(provider),
+            Arc::new(registry),
             "test".to_owned(),
             AutoApprove,
             NullSink,
@@ -904,8 +905,8 @@ patterns = ["^store:instructions/", "^store:identity/"]
         let registry = ToolRegistry::with_memory(Arc::clone(&store) as Arc<dyn MemoryStore>);
         let mut agent = AgentLoop::new(
             policy,
-            Box::new(provider),
-            registry,
+            Arc::new(provider),
+            Arc::new(registry),
             "test".to_owned(),
             AutoApprove,
             NullSink,

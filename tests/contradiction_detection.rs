@@ -273,8 +273,8 @@ async fn full_flow_contradiction_then_confirmed() {
 
     let mut agent = AgentLoop::new(
         policy,
-        Box::new(provider),
-        registry,
+        Arc::new(provider),
+        Arc::new(registry),
         "test".to_owned(),
         AutoApprove,
         NullSink,
@@ -346,8 +346,8 @@ async fn store_no_conflict_succeeds_immediately() {
 
     let mut agent = AgentLoop::new(
         policy,
-        Box::new(provider),
-        registry,
+        Arc::new(provider),
+        Arc::new(registry),
         "test".to_owned(),
         AutoApprove,
         NullSink,

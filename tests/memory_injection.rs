@@ -247,8 +247,8 @@ async fn relevant_memories_injected_into_system_prompt() {
     let registry = ToolRegistry::with_memory(Arc::clone(&store) as Arc<dyn MemoryStore>);
     let mut agent = AgentLoop::new(
         policy,
-        Box::new(provider),
-        registry,
+        Arc::new(provider),
+        Arc::new(registry),
         "base system prompt".to_owned(),
         AutoApprove,
         NullSink,
@@ -290,8 +290,8 @@ async fn no_matching_memories_no_injection() {
     let registry = ToolRegistry::with_memory(Arc::clone(&store) as Arc<dyn MemoryStore>);
     let mut agent = AgentLoop::new(
         policy,
-        Box::new(provider),
-        registry,
+        Arc::new(provider),
+        Arc::new(registry),
         "base system prompt".to_owned(),
         AutoApprove,
         NullSink,
@@ -321,8 +321,8 @@ async fn no_store_no_injection() {
     // No with_memory_injection() call — agent has no store.
     let mut agent = AgentLoop::new(
         policy,
-        Box::new(provider),
-        registry,
+        Arc::new(provider),
+        Arc::new(registry),
         "base system prompt".to_owned(),
         AutoApprove,
         NullSink,
@@ -350,8 +350,8 @@ async fn short_query_skips_injection() {
     let registry = ToolRegistry::with_memory(Arc::clone(&store) as Arc<dyn MemoryStore>);
     let mut agent = AgentLoop::new(
         policy,
-        Box::new(provider),
-        registry,
+        Arc::new(provider),
+        Arc::new(registry),
         "base system prompt".to_owned(),
         AutoApprove,
         NullSink,
@@ -396,8 +396,8 @@ async fn injection_consistent_across_iterations() {
     let registry = ToolRegistry::with_memory(Arc::clone(&store) as Arc<dyn MemoryStore>);
     let mut agent = AgentLoop::new(
         policy,
-        Box::new(provider),
-        registry,
+        Arc::new(provider),
+        Arc::new(registry),
         "base system prompt".to_owned(),
         AutoApprove,
         NullSink,
@@ -439,8 +439,8 @@ async fn inferred_memory_has_confidence_label() {
     let registry = ToolRegistry::with_memory(Arc::clone(&store) as Arc<dyn MemoryStore>);
     let mut agent = AgentLoop::new(
         policy,
-        Box::new(provider),
-        registry,
+        Arc::new(provider),
+        Arc::new(registry),
         "base system prompt".to_owned(),
         AutoApprove,
         NullSink,
@@ -492,8 +492,8 @@ async fn agent_cannot_suppress_injection() {
     let registry = ToolRegistry::with_memory(Arc::clone(&store) as Arc<dyn MemoryStore>);
     let mut agent = AgentLoop::new(
         policy,
-        Box::new(provider),
-        registry,
+        Arc::new(provider),
+        Arc::new(registry),
         "base system prompt".to_owned(),
         AutoApprove,
         NullSink,

@@ -1343,8 +1343,8 @@ async fn run_agent(
     let output = StdoutSink;
     let mut agent = AgentLoop::new(
         policy,
-        provider,
-        registry,
+        std::sync::Arc::from(provider),
+        std::sync::Arc::new(registry),
         system_prompt,
         approval_gate,
         output,

@@ -11,6 +11,7 @@
 
 use std::collections::VecDeque;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::Mutex;
 
 use serde_json::json;
@@ -209,8 +210,8 @@ fn make_agent(responses: Vec<Message>) -> AgentLoop<AlwaysDenyGate, NullSink> {
     let registry = ToolRegistry::new();
     AgentLoop::new(
         policy,
-        Box::new(provider),
-        registry,
+        Arc::new(provider),
+        Arc::new(registry),
         "test".to_owned(),
         AlwaysDenyGate,
         NullSink,

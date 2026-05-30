@@ -178,8 +178,8 @@ fn make_agent(responses: Vec<Message>) -> AgentLoop<MockApprovalGate, NullSink> 
     let registry = ToolRegistry::new();
     AgentLoop::new(
         policy,
-        Box::new(provider),
-        registry,
+        Arc::new(provider),
+        Arc::new(registry),
         "test prompt".to_owned(),
         MockApprovalGate,
         NullSink,
@@ -196,8 +196,8 @@ fn make_agent_with_sink(
     let registry = ToolRegistry::new();
     AgentLoop::new(
         policy,
-        Box::new(provider),
-        registry,
+        Arc::new(provider),
+        Arc::new(registry),
         "test prompt".to_owned(),
         MockApprovalGate,
         sink,
@@ -214,8 +214,8 @@ fn make_capturing_agent(
     let registry = ToolRegistry::new();
     AgentLoop::new(
         policy,
-        Box::new(provider),
-        registry,
+        Arc::new(provider),
+        Arc::new(registry),
         "test prompt".to_owned(),
         MockApprovalGate,
         NullSink,
