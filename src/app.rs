@@ -9,17 +9,12 @@
 //! from their own config source and call [`build_registry`], so the full tool
 //! surface is wired in exactly one place — no per-transport drift.
 
-// `PathBuf`/`Arc` are used only inside feature-gated tool wiring; gate the
-// imports to match so a no-feature build stays warning-clean.
+use std::sync::Arc;
+
+// `PathBuf` appears only in feature-gated tool-source fields; gate the import to
+// match so a no-feature build stays warning-clean.
 #[cfg(any(feature = "wasm", feature = "container", feature = "mcp"))]
 use std::path::PathBuf;
-#[cfg(any(
-    feature = "memory",
-    feature = "credentials",
-    feature = "wasm",
-    feature = "container"
-))]
-use std::sync::Arc;
 
 use crate::enforcement::policy::Policy;
 use crate::error::CherubError;
@@ -333,6 +328,39 @@ pub async fn build_registry(
     Ok((registry, guards))
 }
 
+/// The transport-agnostic core, built **once** at startup and shared (by `Arc`)
+/// across many agent loops. The Telegram bot builds one and hands
+/// `Arc<SharedAgentServices>` to every per-chat session, so the expensive tool
+/// backends (MCP processes, Docker runtime, WASM modules) are spawned a single
+/// time — never per chat.
+pub struct SharedAgentServices {
+    /// The shared tool registry. Immutable after construction; every turn-path
+    /// access is `&self`, so it is safe to share read-only across loops.
+    pub registry: Arc<ToolRegistry>,
+    /// Shared memory store, exposed so each loop can enable proactive injection
+    /// with the same handle that backs the memory tool.
+    #[cfg(feature = "memory")]
+    pub memory_store: Option<Arc<dyn MemoryStore>>,
+    /// IPC temp dirs held alive for the whole process (no `Drop` today).
+    #[allow(dead_code)]
+    guards: ResourceGuards,
+}
+
+impl SharedAgentServices {
+    /// Build the shared core from `cfg`. Runs [`build_registry`] exactly once.
+    pub async fn build(cfg: AgentConfig) -> Result<Self, CherubError> {
+        #[cfg(feature = "memory")]
+        let memory_store = cfg.memory_store.clone();
+        let (registry, guards) = build_registry(&cfg).await?;
+        Ok(Self {
+            registry: Arc::new(registry),
+            #[cfg(feature = "memory")]
+            memory_store,
+            guards,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,5 +423,21 @@ mod tests {
             with_bash,
             "skip_builtin_bash should drop exactly the in-process bash tool"
         );
+    }
+
+    #[tokio::test]
+    async fn shared_services_builds_and_shares_registry() {
+        let shared = SharedAgentServices::build(base_config())
+            .await
+            .expect("build shared services");
+        assert!(
+            !shared.registry.definitions().is_empty(),
+            "shared registry should expose the built-in tools"
+        );
+        // Two cheap clones point at the same registry — one set of backends,
+        // shared across loops (Telegram's per-chat sessions rely on this).
+        let a = Arc::clone(&shared.registry);
+        let b = Arc::clone(&shared.registry);
+        assert!(Arc::ptr_eq(&a, &b), "clones must share one registry");
     }
 }

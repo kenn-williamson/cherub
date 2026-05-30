@@ -118,50 +118,95 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Build embedding provider if OPENAI_API_KEY is set (M6c hybrid search).
+    // Build the shared memory store (DB pool + optional embedder for hybrid
+    // search). Built once here; the same handle backs the memory tool and
+    // proactive injection across all chats.
     #[cfg(feature = "memory")]
-    let embedder: Option<std::sync::Arc<dyn cherub::storage::embedding::EmbeddingProvider>> = {
-        match std::env::var("OPENAI_API_KEY") {
+    let memory_store: Option<std::sync::Arc<dyn cherub::storage::MemoryStore>> = if let Some(
+        ref pool,
+    ) = db_pool
+    {
+        use cherub::storage::pg_memory_store::PgMemoryStore;
+        let store: std::sync::Arc<dyn cherub::storage::MemoryStore> = match std::env::var(
+            "OPENAI_API_KEY",
+        ) {
             Ok(key_raw) if !key_raw.is_empty() => {
                 use cherub::storage::embedding::OpenAiEmbeddingProvider;
                 match OpenAiEmbeddingProvider::new(secrecy::SecretString::from(key_raw)) {
                     Ok(e) => {
                         info!("embedding provider configured (hybrid search enabled)");
-                        Some(std::sync::Arc::new(e))
+                        std::sync::Arc::new(PgMemoryStore::with_embedder(
+                            pool.clone(),
+                            std::sync::Arc::new(e),
+                        ))
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "failed to create embedding provider, using FTS-only search");
-                        None
+                        std::sync::Arc::new(PgMemoryStore::new(pool.clone()))
                     }
                 }
             }
             _ => {
                 info!("OPENAI_API_KEY not set, using FTS-only memory search");
-                None
+                std::sync::Arc::new(PgMemoryStore::new(pool.clone()))
             }
+        };
+        Some(store)
+    } else {
+        None
+    };
+
+    // Credential broker + HTTP tool (mirrors the CLI): enabled when
+    // CHERUB_MASTER_KEY + a DB pool are present.
+    #[cfg(feature = "credentials")]
+    let credential_broker: Option<
+        std::sync::Arc<cherub::tools::credential_broker::CredentialBroker>,
+    > = {
+        use cherub::storage::pg_credential_store::PgCredentialStore;
+        use cherub::tools::credential_broker::CredentialBroker;
+        match (std::env::var("CHERUB_MASTER_KEY"), &db_pool) {
+            (Ok(key_raw), Some(pool)) if !key_raw.is_empty() => {
+                match PgCredentialStore::new(pool.clone(), secrecy::SecretString::from(key_raw)) {
+                    Ok(store) => {
+                        let cred_store: std::sync::Arc<dyn cherub::storage::CredentialStore> =
+                            std::sync::Arc::new(store);
+                        Some(std::sync::Arc::new(CredentialBroker::new(cred_store)))
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "credential store init failed, HTTP tool disabled");
+                        None
+                    }
+                }
+            }
+            _ => None,
         }
     };
 
-    // Check for sandbox bash (container-sandboxed bash replacement).
+    // Tool sources read from env — gives the bot the same tool surface as the
+    // CLI (WASM, container plugins, sandbox bash, browser, MCP). build_registry
+    // constructs the backends (and validates Docker) once at startup.
+    #[cfg(feature = "wasm")]
+    let wasm_dir = std::env::var("CHERUB_WASM_TOOLS_DIR")
+        .ok()
+        .map(std::path::PathBuf::from);
     #[cfg(feature = "container")]
-    let sandbox_bash_runtime: Option<
-        std::sync::Arc<dyn cherub::tools::container::ContainerRuntime>,
-    > = {
-        use cherub::tools::container::BollardRuntime;
-        if std::env::var("CHERUB_SANDBOX_BASH").is_ok() {
-            let runtime = BollardRuntime::new()
-                .context("CHERUB_SANDBOX_BASH requires Docker — failed to connect")?;
-            let rt: std::sync::Arc<dyn cherub::tools::container::ContainerRuntime> =
-                std::sync::Arc::new(runtime);
-            if !rt.is_available().await {
-                bail!("CHERUB_SANDBOX_BASH requires Docker but the daemon is not reachable");
-            }
-            info!("sandbox bash enabled — bash commands will run in isolated containers");
-            Some(rt)
-        } else {
-            None
-        }
-    };
+    let container_tools_dir = std::env::var("CHERUB_CONTAINER_TOOLS_DIR")
+        .ok()
+        .map(std::path::PathBuf::from);
+    #[cfg(feature = "container")]
+    let enable_sandbox_bash = std::env::var("CHERUB_SANDBOX_BASH").is_ok();
+    #[cfg(feature = "browser")]
+    let enable_browser = std::env::var("CHERUB_BROWSER").is_ok();
+    #[cfg(feature = "mcp")]
+    let mcp_config = std::env::var("CHERUB_MCP_CONFIG")
+        .ok()
+        .map(std::path::PathBuf::from);
+
+    // In-process bash is replaced when sandbox bash is requested.
+    #[cfg(feature = "container")]
+    let skip_builtin_bash = enable_sandbox_bash;
+    #[cfg(not(feature = "container"))]
+    let skip_builtin_bash = false;
 
     // Load providers config if CHERUB_PROVIDERS_CONFIG is set.
     let providers_config = match std::env::var("CHERUB_PROVIDERS_CONFIG") {
@@ -213,15 +258,42 @@ async fn main() -> Result<()> {
             .map(teloxide::types::ChatId);
 
     // Custom system prompt file (overrides default).
-    let system_prompt_override: Option<String> = std::env::var("CHERUB_SYSTEM_PROMPT_FILE")
-        .ok()
-        .map(|path| {
+    let system_prompt_override: Option<String> =
+        std::env::var("CHERUB_SYSTEM_PROMPT_FILE").ok().map(|path| {
             std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("failed to read system prompt file '{path}': {e}"))
         });
     if system_prompt_override.is_some() {
         info!("custom system prompt loaded from CHERUB_SYSTEM_PROMPT_FILE");
     }
+
+    // Build the shared, build-once tool registry (same wiring as the CLI) so the
+    // bot exposes the full tool surface and spawns expensive backends only once.
+    let agent_config = cherub::app::AgentConfig {
+        policy: policy.clone(),
+        skip_builtin_bash,
+        user_id: "telegram".to_owned(),
+        providers_config: providers_config.clone(),
+        #[cfg(feature = "memory")]
+        memory_store,
+        #[cfg(feature = "credentials")]
+        credential_broker,
+        #[cfg(feature = "wasm")]
+        wasm_dir,
+        #[cfg(feature = "container")]
+        container_tools_dir,
+        #[cfg(feature = "container")]
+        enable_sandbox_bash,
+        #[cfg(feature = "browser")]
+        enable_browser,
+        #[cfg(feature = "mcp")]
+        mcp_config,
+    };
+    let shared = std::sync::Arc::new(
+        cherub::app::SharedAgentServices::build(agent_config)
+            .await
+            .context("failed to build shared agent services")?,
+    );
 
     // Session config
     let config = SessionConfig {
@@ -235,10 +307,7 @@ async fn main() -> Result<()> {
         providers_config,
         #[cfg(any(feature = "sessions", feature = "memory", feature = "postgres"))]
         db_pool,
-        #[cfg(feature = "memory")]
-        embedder,
-        #[cfg(feature = "container")]
-        sandbox_bash_runtime,
+        shared,
         thinking_budget,
         verbose,
         system_prompt_override,
@@ -260,9 +329,7 @@ async fn main() -> Result<()> {
         && let Ok(schedule_path) = std::env::var("CHERUB_SCHEDULE_CONFIG")
     {
         use cherub::runtime::schedule::{ScheduleConfig, parse_entries, schedule_runner};
-        match ScheduleConfig::load(&schedule_path)
-            .and_then(|c| parse_entries(&c.schedules))
-        {
+        match ScheduleConfig::load(&schedule_path).and_then(|c| parse_entries(&c.schedules)) {
             Ok(parsed) => {
                 let (sched_tx, sched_rx) = tokio::sync::mpsc::channel(16);
                 tokio::spawn(schedule_runner(parsed, sched_tx));
@@ -305,7 +372,10 @@ async fn main() -> Result<()> {
     // Register bot commands with Telegram so they appear in the menu.
     use teloxide::types::BotCommand;
     let commands = vec![
-        BotCommand::new("clear", "Start a new session (preserves memories and files)"),
+        BotCommand::new(
+            "clear",
+            "Start a new session (preserves memories and files)",
+        ),
         BotCommand::new("stop", "Cancel the current operation"),
         BotCommand::new("model", "Switch model (sonnet/haiku/opus or any model ID)"),
     ];

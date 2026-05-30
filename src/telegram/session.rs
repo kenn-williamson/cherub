@@ -13,7 +13,6 @@ use crate::providers::config::ProvidersConfig;
 use crate::providers::openai::OpenAiProvider;
 use crate::runtime::AgentLoop;
 use crate::runtime::prompt::build_system_prompt;
-use crate::tools::ToolRegistry;
 
 use super::approval::{ApprovalMessage, TelegramApprovalGate};
 use super::output::TelegramSink;
@@ -55,14 +54,10 @@ pub struct SessionConfig {
     /// Present when `sessions`, `memory`, or `postgres` feature is enabled.
     #[cfg(any(feature = "sessions", feature = "memory", feature = "postgres"))]
     pub db_pool: Option<crate::storage::Pool>,
-    /// Embedding provider for hybrid memory search (M6c).
-    /// `None` = FTS-only search.
-    #[cfg(feature = "memory")]
-    pub embedder: Option<Arc<dyn crate::storage::embedding::EmbeddingProvider>>,
-    /// Container runtime for sandbox bash. When `Some`, in-process bash is
-    /// replaced by a container-sandboxed equivalent.
-    #[cfg(feature = "container")]
-    pub sandbox_bash_runtime: Option<Arc<dyn crate::tools::container::ContainerRuntime>>,
+    /// Shared, build-once tool registry + memory store. The expensive tool
+    /// backends (MCP processes, Docker runtime, WASM modules) live here and are
+    /// shared across every chat — never spawned per chat.
+    pub shared: Arc<crate::app::SharedAgentServices>,
     /// Extended thinking budget in tokens (Anthropic-only, M14a).
     pub thinking_budget: Option<u32>,
     /// Verbose output: send events immediately instead of batching per turn (M14d).
@@ -151,10 +146,7 @@ pub async fn session_manager(
                             feature = "postgres"
                         ))]
                         db_pool: config.db_pool.clone(),
-                        #[cfg(feature = "memory")]
-                        embedder: config.embedder.clone(),
-                        #[cfg(feature = "container")]
-                        sandbox_bash_runtime: config.sandbox_bash_runtime.clone(),
+                        shared: Arc::clone(&config.shared),
                         thinking_budget: config.thinking_budget,
                         verbose: config.verbose,
                         system_prompt_override: config.system_prompt_override.clone(),
@@ -228,10 +220,7 @@ pub async fn session_manager(
                                     feature = "postgres"
                                 ))]
                                 db_pool: config.db_pool.clone(),
-                                #[cfg(feature = "memory")]
-                                embedder: config.embedder.clone(),
-                                #[cfg(feature = "container")]
-                                sandbox_bash_runtime: config.sandbox_bash_runtime.clone(),
+                                shared: Arc::clone(&config.shared),
                                 thinking_budget: config.thinking_budget,
                                 verbose: config.verbose,
                                 system_prompt_override: config.system_prompt_override.clone(),
@@ -330,103 +319,12 @@ async fn chat_session(
     // Derive user identity from the Telegram chat ID (unique per chat channel).
     let user_id = chat_id.to_string();
 
-    // Should we replace in-process bash with container-sandboxed bash?
-    #[cfg(feature = "container")]
-    let skip_builtin_bash = config.sandbox_bash_runtime.is_some();
-    #[cfg(not(feature = "container"))]
-    let skip_builtin_bash = false;
-
-    // Build ToolRegistry — attach memory store if available.
-    // The store is Arc so it can be shared between the tool registry and injection.
+    // The tool registry (and memory store) are built once at startup and shared
+    // across every chat via `config.shared` — the expensive backends (MCP,
+    // Docker, WASM) are never spawned per chat. Keep the store handle so this
+    // loop can also drive proactive memory injection (M6d).
     #[cfg(feature = "memory")]
-    let (registry, memory_store_for_injection) = {
-        if let Some(ref pool) = config.db_pool {
-            use crate::storage::MemoryStore;
-            use crate::storage::pg_memory_store::PgMemoryStore;
-
-            let store: Arc<dyn MemoryStore> = match config.embedder.clone() {
-                Some(embedder) => Arc::new(PgMemoryStore::with_embedder(pool.clone(), embedder)),
-                None => Arc::new(PgMemoryStore::new(pool.clone())),
-            };
-            let registry = if skip_builtin_bash {
-                ToolRegistry::with_memory_no_bash(Arc::clone(&store))
-            } else {
-                ToolRegistry::with_memory(Arc::clone(&store))
-            };
-            (registry, Some(store))
-        } else if skip_builtin_bash {
-            (ToolRegistry::new_without_bash(), None)
-        } else {
-            (ToolRegistry::new(), None)
-        }
-    };
-    #[cfg(not(feature = "memory"))]
-    let registry = if skip_builtin_bash {
-        ToolRegistry::new_without_bash()
-    } else {
-        ToolRegistry::new()
-    };
-
-    // Add container-sandboxed bash if runtime is available.
-    #[cfg(feature = "container")]
-    let (registry, _sandbox_bash_ipc_dir) = {
-        if let Some(ref rt) = config.sandbox_bash_runtime {
-            let workspace = std::env::current_dir().unwrap_or_else(|_| ".".into());
-            let (bash_tool, ipc_dir) =
-                crate::tools::container_bash::build(Arc::clone(rt), workspace);
-            let dev_env =
-                crate::tools::dev_environment::DevEnvironmentTool::new(Arc::clone(&bash_tool));
-            let registry = registry
-                .with_container(vec![bash_tool])
-                .with_dev_environment(dev_env);
-            info!(chat_id = %chat_id, "sandbox bash enabled for chat session");
-            (registry, Some(ipc_dir))
-        } else {
-            (registry, None)
-        }
-    };
-
-    // Wire sub-agent tools from providers config (M13d).
-    let registry = if let Some(ref providers_config) = config.providers_config {
-        use crate::providers::config::instantiate_named_provider;
-        use crate::tools::sub_agent::SubAgentTool;
-
-        let mut sub_agents: Vec<SubAgentTool> = Vec::new();
-        for (agent_name, agent_def) in &providers_config.agents {
-            match instantiate_named_provider(providers_config, &agent_def.provider, &mut Vec::new())
-            {
-                Ok(agent_provider) => {
-                    let sub_registry = ToolRegistry::for_sub_agent(&agent_def.tools);
-                    sub_agents.push(SubAgentTool {
-                        name: agent_name.clone(),
-                        description: agent_def.description.clone(),
-                        provider: agent_provider,
-                        system_prompt: agent_def.system_prompt.clone(),
-                        max_turns: agent_def.max_turns,
-                        timeout: std::time::Duration::from_secs(agent_def.timeout_secs),
-                        registry: sub_registry,
-                        policy: config.policy.clone(),
-                    });
-                    info!(chat_id = %chat_id, agent = %agent_name, "sub-agent tool registered");
-                }
-                Err(e) => {
-                    warn!(
-                        chat_id = %chat_id,
-                        agent = %agent_name,
-                        error = %e,
-                        "failed to create sub-agent provider, skipping"
-                    );
-                }
-            }
-        }
-        if sub_agents.is_empty() {
-            registry
-        } else {
-            registry.with_sub_agents(sub_agents)
-        }
-    } else {
-        registry
-    };
+    let memory_store_for_injection = config.shared.memory_store.clone();
 
     let cwd = std::env::var("CHERUB_WORKSPACE").unwrap_or_else(|_| {
         std::env::current_dir()
@@ -464,7 +362,7 @@ async fn chat_session(
     let mut agent = AgentLoop::new(
         config.policy,
         Arc::from(provider),
-        Arc::new(registry),
+        Arc::clone(&config.shared.registry),
         system_prompt,
         approval_gate,
         output,
