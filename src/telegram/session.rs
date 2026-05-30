@@ -11,8 +11,6 @@ use crate::providers::UserContent;
 use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::config::ProvidersConfig;
 use crate::providers::openai::OpenAiProvider;
-use crate::runtime::AgentLoop;
-use crate::runtime::prompt::build_system_prompt;
 
 use super::approval::{ApprovalMessage, TelegramApprovalGate};
 use super::output::TelegramSink;
@@ -258,26 +256,10 @@ async fn chat_session(
     // Derive user identity from the Telegram chat ID (unique per chat channel).
     let user_id = chat_id.to_string();
 
-    // The tool registry (and memory store) are built once at startup and shared
-    // across every chat via `config.shared` — the expensive backends (MCP,
-    // Docker, WASM) are never spawned per chat. Keep the store handle so this
-    // loop can also drive proactive memory injection (M6d).
-    #[cfg(feature = "memory")]
-    let memory_store_for_injection = config.shared.memory_store.clone();
-
-    let cwd = std::env::var("CHERUB_WORKSPACE").unwrap_or_else(|_| {
-        std::env::current_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| ".".to_owned())
-    });
-    let system_prompt = config
-        .system_prompt_override
-        .unwrap_or_else(|| build_system_prompt(&cwd));
-
     let output = TelegramSink::new(config.bot.clone(), chat_id, config.verbose);
 
-    // Shared cell filled in after with_persistence() so queued tasks record the
-    // correct session_id for audit provenance.
+    // Cell shared with the approval gate; filled after build() so queued tasks
+    // record the resolved session_id for audit provenance.
     #[cfg(feature = "postgres")]
     let session_id_cell: Arc<std::sync::Mutex<Option<uuid::Uuid>>> =
         Arc::new(std::sync::Mutex::new(None));
@@ -298,92 +280,23 @@ async fn chat_session(
     #[cfg(not(feature = "postgres"))]
     let approval_gate = TelegramApprovalGate::new(config.bot.clone(), chat_id, approval_tx);
 
-    let mut agent = AgentLoop::new(
-        config.policy,
-        Arc::clone(&config.shared.provider),
-        Arc::clone(&config.shared.registry),
-        system_prompt,
-        approval_gate,
-        output,
-        &user_id,
-    );
-    agent.with_cancel_flag(cancel_flag);
-
-    // Attach output stashing hook (M15b).
-    agent.with_hook(Box::new(crate::runtime::hooks::OutputStashingHook::new(
-        std::path::Path::new(&cwd),
-    )));
-
-    // Attach proactive memory injection if store is available (M6d).
-    #[cfg(feature = "memory")]
-    if let Some(store) = memory_store_for_injection {
-        agent.with_memory_injection(store);
-        info!(chat_id = %chat_id, "proactive memory injection enabled");
-    }
-
-    // Attach audit log + cost tracking + pricing table if a pool is available (M10, M12).
+    // Per-session agent — provider/registry/stores come from the shared services
+    // (built once at startup); this layers on the per-chat cancel flag, task
+    // store, and persistence slot, then runs the shared `with_*` chain.
+    let builder = crate::app::AgentBuilder::new(&config.shared, user_id.clone())
+        .cancel_flag(cancel_flag)
+        .persistence(crate::app::PersistenceId::Telegram(chat_id.0));
     #[cfg(feature = "postgres")]
-    if let Some(ref pool) = config.db_pool {
-        use crate::storage::PricingStore;
-        use crate::storage::pg_audit_store::PgAuditStore;
-        use crate::storage::pg_cost_store::PgCostStore;
-        use crate::storage::pg_pricing_store::PgPricingStore;
+    let builder = match &config.task_store {
+        Some(store) => builder.task_store(std::sync::Arc::clone(store)),
+        None => builder,
+    };
+    let mut agent = builder.build(approval_gate, output).await;
 
-        let audit_store: Arc<dyn crate::storage::AuditStore> =
-            Arc::new(PgAuditStore::new(pool.clone()));
-        agent.with_audit_log(audit_store);
-
-        let cost_store: Arc<dyn crate::storage::CostStore> =
-            Arc::new(PgCostStore::new(pool.clone()));
-        agent.with_cost_tracking(cost_store);
-
-        let pricing_store = PgPricingStore::new(pool.clone());
-        let pricing_table = pricing_store
-            .list()
-            .await
-            .map(|entries| {
-                entries
-                    .into_iter()
-                    .map(|e| (e.model_pattern.clone(), e.to_model_pricing()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        agent.with_pricing_table(pricing_table);
-    }
-
-    // Attach task queue store for async approval.
+    // Record the resolved session_id so queued tasks attribute to the right one.
     #[cfg(feature = "postgres")]
-    if let Some(ref store) = config.task_store {
-        agent.with_task_store(std::sync::Arc::clone(store));
-        info!(chat_id = %chat_id, "task queue store attached (async approval enabled)");
-    }
-
-    // Attach session persistence per chat if a pool is available.
-    #[cfg(feature = "sessions")]
-    if let Some(pool) = config.db_pool {
-        use crate::storage::pg_session_store::PgSessionStore;
-        let store = Box::new(PgSessionStore::new(pool));
-        let connector_id = chat_id.to_string();
-        match agent
-            .with_persistence(store, "telegram", &connector_id)
-            .await
-        {
-            Ok(()) => {
-                let sid = agent.session_id();
-                let msg_count = agent.session_messages().len();
-                info!(
-                    chat_id = %chat_id,
-                    session_id = %sid,
-                    message_count = msg_count,
-                    "session persistence attached"
-                );
-                // Fill in the shared cell so queued tasks record the correct session_id.
-                *session_id_cell.lock().expect("session_id_cell poisoned") = Some(sid);
-            }
-            Err(e) => {
-                warn!(chat_id = %chat_id, error = %e, "session persistence unavailable, running ephemeral");
-            }
-        }
+    {
+        *session_id_cell.lock().expect("session_id_cell poisoned") = Some(agent.session_id());
     }
 
     while let Some(msg) = rx.recv().await {

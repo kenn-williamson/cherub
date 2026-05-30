@@ -8,7 +8,6 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use cherub::enforcement::policy::Policy;
-use cherub::runtime::AgentLoop;
 use cherub::runtime::approval::CliApprovalGate;
 use cherub::runtime::output::StdoutSink;
 use cherub::runtime::prompt::build_system_prompt;
@@ -1096,16 +1095,33 @@ async fn run_agent(
         }
     };
 
-    // Assemble the shared services (provider + tool registry) in one place,
+    // Resolve the system prompt (CLI override file, else the shared default).
+    let system_prompt = std::env::var("CHERUB_SYSTEM_PROMPT_FILE")
+        .ok()
+        .and_then(|path| {
+            std::fs::read_to_string(&path)
+                .map_err(|e| {
+                    tracing::warn!(path = %path, error = %e, "failed to read system prompt file, using default");
+                    e
+                })
+                .ok()
+        })
+        .unwrap_or_else(|| build_system_prompt(&cwd));
+
+    // Assemble the shared services (provider + tool registry + stores) once,
     // identical to the path the Telegram bot uses — no per-transport drift.
     let agent_config = cherub::app::AgentConfig {
         provider: provider_spec,
         policy: policy.clone(),
+        system_prompt,
+        cwd,
         skip_builtin_bash,
         user_id: user_id.clone(),
         providers_config: loaded_providers_config,
+        #[cfg(feature = "postgres")]
+        db_pool,
         #[cfg(feature = "memory")]
-        memory_store: memory_store_for_injection.clone(),
+        memory_store: memory_store_for_injection,
         #[cfg(feature = "credentials")]
         credential_broker,
         #[cfg(feature = "wasm")]
@@ -1119,115 +1135,28 @@ async fn run_agent(
         #[cfg(feature = "mcp")]
         mcp_config,
     };
+    // Remember whether persistence will be attempted (the pool moves into shared).
+    #[cfg(feature = "sessions")]
+    let has_db = agent_config.db_pool.is_some();
     let shared = cherub::app::SharedAgentServices::build(agent_config).await?;
 
-    let system_prompt = std::env::var("CHERUB_SYSTEM_PROMPT_FILE")
-        .ok()
-        .and_then(|path| {
-            std::fs::read_to_string(&path)
-                .map_err(|e| {
-                    tracing::warn!(path = %path, error = %e, "failed to read system prompt file, using default");
-                    e
-                })
-                .ok()
-        })
-        .unwrap_or_else(|| build_system_prompt(&cwd));
+    let mut agent = cherub::app::AgentBuilder::new(&shared, &user_id)
+        .persistence(cherub::app::PersistenceId::Cli)
+        .show_thinking(show_thinking)
+        .build(CliApprovalGate::new(), StdoutSink)
+        .await;
 
-    let approval_gate = CliApprovalGate::new();
-    let output = StdoutSink;
-    let mut agent = AgentLoop::new(
-        policy,
-        shared.provider.clone(),
-        shared.registry.clone(),
-        system_prompt,
-        approval_gate,
-        output,
-        &user_id,
-    );
-    agent.with_show_thinking(show_thinking);
-
-    // Attach output stashing hook (M15b).
-    agent.with_hook(Box::new(cherub::runtime::hooks::OutputStashingHook::new(
-        std::path::Path::new(&cwd),
-    )));
-
-    // Attach proactive memory injection if store is available (M6d).
-    #[cfg(feature = "memory")]
-    if let Some(store) = memory_store_for_injection {
-        agent.with_memory_injection(store);
-        info!("proactive memory injection enabled");
-    }
-
-    // Attach audit log if DB is available (M10).
-    #[cfg(feature = "postgres")]
-    {
-        use cherub::storage::pg_audit_store::PgAuditStore;
-        use std::sync::Arc;
-
-        if let Some(ref pool) = db_pool {
-            let audit_store: Arc<dyn cherub::storage::AuditStore> =
-                Arc::new(PgAuditStore::new(pool.clone()));
-            agent.with_audit_log(audit_store);
-            info!("audit log enabled");
-        }
-    }
-
-    // Attach cost tracking + pricing table if DB is available (M12).
-    #[cfg(feature = "postgres")]
-    {
-        use cherub::storage::PricingStore;
-        use cherub::storage::pg_cost_store::PgCostStore;
-        use cherub::storage::pg_pricing_store::PgPricingStore;
-        use std::sync::Arc;
-
-        if let Some(ref pool) = db_pool {
-            let cost_store: Arc<dyn cherub::storage::CostStore> =
-                Arc::new(PgCostStore::new(pool.clone()));
-            agent.with_cost_tracking(cost_store);
-
-            let pricing_store = PgPricingStore::new(pool.clone());
-            let pricing_table: cherub::providers::pricing::PricingTable = pricing_store
-                .list()
-                .await
-                .map(|entries| {
-                    entries
-                        .into_iter()
-                        .map(|e| (e.model_pattern.clone(), e.to_model_pricing()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let count = pricing_table.len();
-            agent.with_pricing_table(pricing_table);
-
-            if count > 0 {
-                info!(entries = count, "pricing table loaded");
-            }
-            info!("cost tracking enabled");
-        }
-    }
-
-    // Attach session persistence if available.
+    // Session banner (only when persistence was actually attempted).
     #[cfg(feature = "sessions")]
-    {
-        if let Some(pool) = db_pool {
-            use cherub::storage::pg_session_store::PgSessionStore;
-            let store = Box::new(PgSessionStore::new(pool));
-            match agent.with_persistence(store, "cli", "default").await {
-                Ok(()) => {
-                    let msg_count = agent.session_messages().len();
-                    if msg_count > 0 {
-                        println!(
-                            "Resumed session {} ({msg_count} messages).",
-                            agent.session_id()
-                        );
-                    } else {
-                        println!("New session {}.", agent.session_id());
-                    }
-                }
-                Err(e) => {
-                    eprintln!("[warn] session persistence unavailable: {e}");
-                }
-            }
+    if has_db {
+        let msg_count = agent.session_messages().len();
+        if msg_count > 0 {
+            println!(
+                "Resumed session {} ({msg_count} messages).",
+                agent.session_id()
+            );
+        } else {
+            println!("New session {}.", agent.session_id());
         }
     }
 
