@@ -8,8 +8,6 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use cherub::enforcement::policy::Policy;
-use cherub::providers::anthropic::AnthropicProvider;
-use cherub::providers::openai::OpenAiProvider;
 use cherub::runtime::AgentLoop;
 use cherub::runtime::approval::CliApprovalGate;
 use cherub::runtime::output::StdoutSink;
@@ -965,46 +963,38 @@ async fn run_agent(
         None
     };
 
-    let provider: Box<dyn cherub::providers::Provider> =
-        if let Some(ref config) = loaded_providers_config {
-            use cherub::providers::config::instantiate_named_provider;
-            instantiate_named_provider(config, "default", &mut Vec::new())
-                .map_err(|e| anyhow::anyhow!("failed to create default provider: {e}"))?
-        } else {
-            match provider_type.as_str() {
-                "openai" => {
-                    // OPENAI_API_KEY is optional for local providers (Ollama, etc.).
-                    let api_key = std::env::var("OPENAI_API_KEY").ok().and_then(|k| {
-                        if k.is_empty() {
-                            None
-                        } else {
-                            Some(SecretString::from(k))
-                        }
-                    });
-                    let mut p = OpenAiProvider::new(api_key, &model, DEFAULT_MAX_TOKENS)
-                        .map_err(|e| anyhow::anyhow!("failed to create OpenAI provider: {e}"))?;
-                    if let Some(url) = base_url {
-                        p = p.with_base_url(url);
-                    }
-                    Box::new(p)
-                }
-                "anthropic" => {
-                    let api_key_raw = std::env::var("ANTHROPIC_API_KEY")
-                        .context("ANTHROPIC_API_KEY environment variable not set")?;
-                    if api_key_raw.is_empty() {
-                        bail!("ANTHROPIC_API_KEY is empty");
-                    }
-                    let api_key = SecretString::from(api_key_raw);
-                    let mut p = AnthropicProvider::new(api_key, &model, DEFAULT_MAX_TOKENS)
-                        .map_err(|e| anyhow::anyhow!("failed to create Anthropic provider: {e}"))?;
-                    if let Some(budget) = thinking_budget {
-                        p = p.with_thinking_budget(budget);
-                    }
-                    Box::new(p)
-                }
-                other => bail!("unknown provider '{other}'. Available: anthropic, openai"),
+    // Provider spec — from config file (failover) or raw flags. Actual provider
+    // construction is deferred to SharedAgentServices::build.
+    let provider_spec = if let Some(ref config) = loaded_providers_config {
+        cherub::app::ProviderSpec::Named(config.clone())
+    } else {
+        let api_key = match provider_type.as_str() {
+            "openai" => {
+                // OPENAI_API_KEY is optional for local providers (Ollama, etc.).
+                std::env::var("OPENAI_API_KEY")
+                    .ok()
+                    .filter(|k| !k.is_empty())
+                    .map(SecretString::from)
             }
+            "anthropic" => {
+                let api_key_raw = std::env::var("ANTHROPIC_API_KEY")
+                    .context("ANTHROPIC_API_KEY environment variable not set")?;
+                if api_key_raw.is_empty() {
+                    bail!("ANTHROPIC_API_KEY is empty");
+                }
+                Some(SecretString::from(api_key_raw))
+            }
+            other => bail!("unknown provider '{other}'. Available: anthropic, openai"),
         };
+        cherub::app::ProviderSpec::Flags {
+            provider_type: provider_type.clone(),
+            model: model.clone(),
+            api_key,
+            base_url,
+            thinking_budget,
+            max_tokens: DEFAULT_MAX_TOKENS,
+        }
+    };
 
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
@@ -1106,9 +1096,10 @@ async fn run_agent(
         }
     };
 
-    // Assemble the full tool registry in one shared place (app::build_registry),
+    // Assemble the shared services (provider + tool registry) in one place,
     // identical to the path the Telegram bot uses — no per-transport drift.
     let agent_config = cherub::app::AgentConfig {
+        provider: provider_spec,
         policy: policy.clone(),
         skip_builtin_bash,
         user_id: user_id.clone(),
@@ -1128,7 +1119,7 @@ async fn run_agent(
         #[cfg(feature = "mcp")]
         mcp_config,
     };
-    let (registry, _resource_guards) = cherub::app::build_registry(&agent_config).await?;
+    let shared = cherub::app::SharedAgentServices::build(agent_config).await?;
 
     let system_prompt = std::env::var("CHERUB_SYSTEM_PROMPT_FILE")
         .ok()
@@ -1146,8 +1137,8 @@ async fn run_agent(
     let output = StdoutSink;
     let mut agent = AgentLoop::new(
         policy,
-        std::sync::Arc::from(provider),
-        std::sync::Arc::new(registry),
+        shared.provider.clone(),
+        shared.registry.clone(),
         system_prompt,
         approval_gate,
         output,

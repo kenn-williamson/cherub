@@ -250,71 +250,10 @@ async fn chat_session(
     approval_tx: mpsc::Sender<ApprovalMessage>,
     cancel_flag: Arc<AtomicBool>,
 ) {
-    // Keep clones for model-switch later — initial provider construction moves these.
+    // Saved for the /model hot-swap path below. The provider itself is built
+    // once at startup and shared via `config.shared.provider`.
     let saved_api_key = config.api_key.clone();
     let saved_base_url = config.base_url.clone();
-
-    let provider: Box<dyn crate::providers::Provider> = if let Some(ref providers_config) =
-        config.providers_config
-    {
-        // Use config file — instantiate the "default" provider (supports failover).
-        if !providers_config.providers.contains_key("default") {
-            warn!(chat_id = %chat_id, "providers config missing [providers.default]");
-            return;
-        }
-        match crate::providers::config::instantiate_named_provider(
-            providers_config,
-            "default",
-            &mut Vec::new(),
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                warn!(chat_id = %chat_id, error = %e, "failed to create provider from config");
-                return;
-            }
-        }
-    } else {
-        match config.provider_type.as_str() {
-            "openai" => {
-                match OpenAiProvider::new(config.api_key, &config.model, config.max_tokens) {
-                    Ok(mut p) => {
-                        if let Some(url) = config.base_url {
-                            p = p.with_base_url(url);
-                        }
-                        Box::new(p)
-                    }
-                    Err(e) => {
-                        warn!(chat_id = %chat_id, error = %e, "failed to create OpenAI provider");
-                        return;
-                    }
-                }
-            }
-            _ => {
-                // Default to Anthropic. api_key is required for Anthropic.
-                let api_key = match config.api_key {
-                    Some(k) => k,
-                    None => {
-                        warn!(chat_id = %chat_id, "ANTHROPIC_API_KEY required for anthropic provider");
-                        return;
-                    }
-                };
-                match AnthropicProvider::new(api_key, &config.model, config.max_tokens) {
-                    Ok(p) => {
-                        let p = if let Some(budget) = config.thinking_budget {
-                            p.with_thinking_budget(budget)
-                        } else {
-                            p
-                        };
-                        Box::new(p)
-                    }
-                    Err(e) => {
-                        warn!(chat_id = %chat_id, error = %e, "failed to create Anthropic provider");
-                        return;
-                    }
-                }
-            }
-        }
-    };
 
     // Derive user identity from the Telegram chat ID (unique per chat channel).
     let user_id = chat_id.to_string();
@@ -361,7 +300,7 @@ async fn chat_session(
 
     let mut agent = AgentLoop::new(
         config.policy,
-        Arc::from(provider),
+        Arc::clone(&config.shared.provider),
         Arc::clone(&config.shared.registry),
         system_prompt,
         approval_gate,

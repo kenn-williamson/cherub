@@ -267,9 +267,26 @@ async fn main() -> Result<()> {
         info!("custom system prompt loaded from CHERUB_SYSTEM_PROMPT_FILE");
     }
 
-    // Build the shared, build-once tool registry (same wiring as the CLI) so the
-    // bot exposes the full tool surface and spawns expensive backends only once.
+    // Provider spec — from config file (failover) or the bot's provider env;
+    // construction is deferred to SharedAgentServices::build.
+    let provider_spec = if let Some(ref config) = providers_config {
+        cherub::app::ProviderSpec::Named(config.clone())
+    } else {
+        cherub::app::ProviderSpec::Flags {
+            provider_type: provider_type.clone(),
+            model: model.clone(),
+            api_key: api_key.clone(),
+            base_url: base_url.clone(),
+            thinking_budget,
+            max_tokens: DEFAULT_MAX_TOKENS,
+        }
+    };
+
+    // Build the shared, build-once services (provider + tool registry), same
+    // wiring as the CLI, so the bot exposes the full tool surface and spawns
+    // expensive backends only once.
     let agent_config = cherub::app::AgentConfig {
+        provider: provider_spec,
         policy: policy.clone(),
         skip_builtin_bash,
         user_id: "telegram".to_owned(),

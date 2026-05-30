@@ -18,6 +18,7 @@ use std::path::PathBuf;
 
 use crate::enforcement::policy::Policy;
 use crate::error::CherubError;
+use crate::providers::Provider;
 use crate::providers::config::ProvidersConfig;
 use crate::tools::ToolRegistry;
 
@@ -31,7 +32,73 @@ use crate::tools::credential_broker::CredentialBroker;
 /// `SessionConfig`). It carries already-resolved shared handles (memory store,
 /// credential broker) plus the source specs (dirs, configs, flags) that
 /// [`build_registry`] turns into live backends. It performs no I/O itself.
+/// How to construct the LLM provider — the two mutually-exclusive paths each
+/// transport offers. The flag path is **not** routed through
+/// `instantiate_provider`: it carries an already-resolved API key, whereas the
+/// named path resolves a key from an env-var *name* in the providers config.
+pub enum ProviderSpec {
+    /// Instantiate the `"default"` provider from a providers config (supports failover).
+    Named(ProvidersConfig),
+    /// Construct directly from already-resolved flags/env.
+    Flags {
+        /// `"anthropic"` or `"openai"`.
+        provider_type: String,
+        model: String,
+        /// Required for Anthropic; optional for OpenAI-compatible (local) endpoints.
+        api_key: Option<secrecy::SecretString>,
+        base_url: Option<String>,
+        thinking_budget: Option<u32>,
+        max_tokens: u32,
+    },
+}
+
+/// Construct a provider from its spec. Mirrors the original inline construction
+/// in each transport; the flag path stays off `instantiate_provider` by design.
+fn build_provider(spec: &ProviderSpec) -> Result<Box<dyn Provider>, CherubError> {
+    match spec {
+        ProviderSpec::Named(config) => {
+            crate::providers::config::instantiate_named_provider(config, "default", &mut Vec::new())
+        }
+        ProviderSpec::Flags {
+            provider_type,
+            model,
+            api_key,
+            base_url,
+            thinking_budget,
+            max_tokens,
+        } => match provider_type.as_str() {
+            "openai" => {
+                let mut p = crate::providers::openai::OpenAiProvider::new(
+                    api_key.clone(),
+                    model,
+                    *max_tokens,
+                )?;
+                if let Some(url) = base_url {
+                    p = p.with_base_url(url.clone());
+                }
+                Ok(Box::new(p))
+            }
+            "anthropic" => {
+                let key = api_key.clone().ok_or_else(|| {
+                    CherubError::Provider("anthropic provider requires an API key".to_owned())
+                })?;
+                let mut p =
+                    crate::providers::anthropic::AnthropicProvider::new(key, model, *max_tokens)?;
+                if let Some(budget) = thinking_budget {
+                    p = p.with_thinking_budget(*budget);
+                }
+                Ok(Box::new(p))
+            }
+            other => Err(CherubError::Provider(format!(
+                "unknown provider '{other}'. Available: anthropic, openai"
+            ))),
+        },
+    }
+}
+
 pub struct AgentConfig {
+    /// How to construct the LLM provider.
+    pub provider: ProviderSpec,
     /// Policy — cloned into each sub-agent's bounded inner loop.
     pub policy: Policy,
     /// When true, the in-process bash tool is omitted (sandbox bash replaces it).
@@ -337,6 +404,9 @@ pub struct SharedAgentServices {
     /// The shared tool registry. Immutable after construction; every turn-path
     /// access is `&self`, so it is safe to share read-only across loops.
     pub registry: Arc<ToolRegistry>,
+    /// The shared provider. Cloned into each loop; `Provider::send` is `&self`,
+    /// so sharing also makes `FailoverProvider`'s circuit breaker global.
+    pub provider: Arc<dyn Provider>,
     /// Shared memory store, exposed so each loop can enable proactive injection
     /// with the same handle that backs the memory tool.
     #[cfg(feature = "memory")]
@@ -349,11 +419,13 @@ pub struct SharedAgentServices {
 impl SharedAgentServices {
     /// Build the shared core from `cfg`. Runs [`build_registry`] exactly once.
     pub async fn build(cfg: AgentConfig) -> Result<Self, CherubError> {
+        let provider: Arc<dyn Provider> = Arc::from(build_provider(&cfg.provider)?);
         #[cfg(feature = "memory")]
         let memory_store = cfg.memory_store.clone();
         let (registry, guards) = build_registry(&cfg).await?;
         Ok(Self {
             registry: Arc::new(registry),
+            provider,
             #[cfg(feature = "memory")]
             memory_store,
             guards,
@@ -370,6 +442,15 @@ mod tests {
         let policy = Policy::load(std::path::Path::new("config/default_policy.toml"))
             .expect("default policy loads");
         AgentConfig {
+            // Keyless OpenAI spec — constructs without any network or API key.
+            provider: ProviderSpec::Flags {
+                provider_type: "openai".to_owned(),
+                model: "test-model".to_owned(),
+                api_key: None,
+                base_url: None,
+                thinking_budget: None,
+                max_tokens: 1024,
+            },
             policy,
             skip_builtin_bash: false,
             user_id: "test".to_owned(),
