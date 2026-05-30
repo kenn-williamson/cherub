@@ -717,6 +717,40 @@ mod tests {
         );
     }
 
+    fn sorted_tool_names(registry: &ToolRegistry) -> Vec<String> {
+        let mut names: Vec<String> = registry.definitions().into_iter().map(|d| d.name).collect();
+        names.sort();
+        names
+    }
+
+    /// The tool set must depend only on the tool *config* — never on which
+    /// transport assembled it. Two configs that differ solely in transport
+    /// identity (user_id, system prompt, cwd) must yield an identical tool set.
+    /// Guards against reintroducing transport-specific tool wiring (the bug that
+    /// left the Telegram bot missing five tool categories).
+    #[tokio::test]
+    async fn tool_set_is_transport_independent() {
+        let mut cli = base_config();
+        cli.user_id = "cli".to_owned();
+        cli.system_prompt = "CLI prompt".to_owned();
+        cli.cwd = "/home/cli".to_owned();
+
+        let mut telegram = base_config();
+        telegram.user_id = "telegram-123".to_owned();
+        telegram.system_prompt = "Telegram prompt".to_owned();
+        telegram.cwd = "/tmp/telegram".to_owned();
+
+        let cli_tools = sorted_tool_names(&build_registry(&cli).await.expect("build cli").0);
+        let telegram_tools =
+            sorted_tool_names(&build_registry(&telegram).await.expect("build telegram").0);
+
+        assert!(!cli_tools.is_empty(), "expected built-in tools");
+        assert_eq!(
+            cli_tools, telegram_tools,
+            "tool set must not depend on transport identity"
+        );
+    }
+
     #[tokio::test]
     async fn shared_services_builds_and_shares_registry() {
         let shared = SharedAgentServices::build(base_config())

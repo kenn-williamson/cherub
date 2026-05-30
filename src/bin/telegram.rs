@@ -327,22 +327,17 @@ async fn main() -> Result<()> {
             .context("failed to build shared agent services")?,
     );
 
-    // Session config
+    // Session config — per-chat UI + the fields the /model hot-swap rebuilds a
+    // provider from. Everything else lives in the shared services.
     let config = SessionConfig {
         bot: bot.clone(),
-        policy,
-        model,
         max_tokens: DEFAULT_MAX_TOKENS,
         api_key,
         provider_type,
         base_url,
-        providers_config,
-        #[cfg(any(feature = "sessions", feature = "memory", feature = "postgres"))]
-        db_pool,
         shared,
         thinking_budget,
         verbose,
-        system_prompt_override,
         #[cfg(feature = "postgres")]
         task_store,
     };
