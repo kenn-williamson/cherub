@@ -14,7 +14,6 @@ use cherub::runtime::AgentLoop;
 use cherub::runtime::approval::CliApprovalGate;
 use cherub::runtime::output::StdoutSink;
 use cherub::runtime::prompt::build_system_prompt;
-use cherub::tools::ToolRegistry;
 
 const DEFAULT_POLICY_PATH: &str = "config/default_policy.toml";
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
@@ -1041,9 +1040,11 @@ async fn run_agent(
     #[cfg(not(feature = "container"))]
     let skip_builtin_bash = false;
 
-    // Build ToolRegistry — attach memory store if available.
+    // Build the shared memory store (if a DB pool is available). The registry is
+    // assembled by `app::build_registry`; here we only resolve the store +
+    // embedder so the same handle can also drive proactive injection (M6d).
     #[cfg(feature = "memory")]
-    let (registry, memory_store_for_injection) = {
+    let memory_store_for_injection: Option<std::sync::Arc<dyn cherub::storage::MemoryStore>> =
         if let Some(ref pool) = db_pool {
             use cherub::storage::pg_memory_store::PgMemoryStore;
             use std::sync::Arc;
@@ -1071,29 +1072,16 @@ async fn run_agent(
                     Arc::new(PgMemoryStore::new(pool.clone()))
                 }
             };
-
-            let registry = if skip_builtin_bash {
-                ToolRegistry::with_memory_no_bash(Arc::clone(&store))
-            } else {
-                ToolRegistry::with_memory(Arc::clone(&store))
-            };
-            (registry, Some(store))
-        } else if skip_builtin_bash {
-            (ToolRegistry::new_without_bash(), None)
+            Some(store)
         } else {
-            (ToolRegistry::new(), None)
-        }
-    };
-    #[cfg(not(feature = "memory"))]
-    let registry = if skip_builtin_bash {
-        ToolRegistry::new_without_bash()
-    } else {
-        ToolRegistry::new()
-    };
+            None
+        };
 
-    // Attach credential broker + HTTP tool if credentials feature is active.
+    // Build the shared credential broker (if master key + DB are present).
     #[cfg(feature = "credentials")]
-    let registry = {
+    let credential_broker: Option<
+        std::sync::Arc<cherub::tools::credential_broker::CredentialBroker>,
+    > = {
         use cherub::storage::pg_credential_store::PgCredentialStore;
         use cherub::tools::credential_broker::CredentialBroker;
         use std::sync::Arc;
@@ -1103,229 +1091,44 @@ async fn run_agent(
                 match PgCredentialStore::new(pool.clone(), SecretString::from(key_raw)) {
                     Ok(store) => {
                         let cred_store: Arc<dyn cherub::storage::CredentialStore> = Arc::new(store);
-                        let broker = Arc::new(CredentialBroker::new(cred_store));
-                        info!("credential broker configured (HTTP tool enabled)");
-                        registry.with_credentials(broker)
+                        Some(Arc::new(CredentialBroker::new(cred_store)))
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "credential store init failed, HTTP tool disabled");
-                        registry
+                        None
                     }
                 }
             }
             _ => {
                 info!("CHERUB_MASTER_KEY not set or DB unavailable, HTTP tool disabled");
-                registry
+                None
             }
         }
     };
 
-    // Load WASM tools if a directory was specified (M8).
-    #[cfg(feature = "wasm")]
-    let registry = {
-        use cherub::tools::wasm::{WasmToolRuntime, load_from_dir};
-        use std::sync::Arc;
-
-        if let Some(ref dir) = wasm_tools_dir {
-            match WasmToolRuntime::new() {
-                Ok(runtime) => {
-                    let rt = Arc::new(runtime);
-                    let result = load_from_dir(
-                        dir,
-                        rt,
-                        None,
-                        #[cfg(feature = "credentials")]
-                        None, // broker wiring deferred to M8c full integration
-                    )
-                    .await;
-                    for err in &result.errors {
-                        eprintln!("[warn] WASM tool load error: {err}");
-                    }
-                    if !result.tools.is_empty() {
-                        info!(
-                            count = result.tools.len(),
-                            dir = %dir.display(),
-                            "WASM tools loaded"
-                        );
-                        registry.with_wasm(result.tools)
-                    } else {
-                        registry
-                    }
-                }
-                Err(e) => {
-                    eprintln!("[warn] WASM runtime init failed: {e}");
-                    registry
-                }
-            }
-        } else {
-            registry
-        }
+    // Assemble the full tool registry in one shared place (app::build_registry),
+    // identical to the path the Telegram bot uses — no per-transport drift.
+    let agent_config = cherub::app::AgentConfig {
+        policy: policy.clone(),
+        skip_builtin_bash,
+        user_id: user_id.clone(),
+        providers_config: loaded_providers_config,
+        #[cfg(feature = "memory")]
+        memory_store: memory_store_for_injection.clone(),
+        #[cfg(feature = "credentials")]
+        credential_broker,
+        #[cfg(feature = "wasm")]
+        wasm_dir: wasm_tools_dir,
+        #[cfg(feature = "container")]
+        container_tools_dir,
+        #[cfg(feature = "container")]
+        enable_sandbox_bash: sandbox_bash,
+        #[cfg(feature = "browser")]
+        enable_browser: browser,
+        #[cfg(feature = "mcp")]
+        mcp_config,
     };
-
-    // Load container tools if a directory was specified (M9).
-    #[cfg(feature = "container")]
-    let registry = {
-        use cherub::tools::container::{BollardRuntime, load_from_dir};
-        use std::sync::Arc;
-
-        if let Some(ref dir) = container_tools_dir {
-            match BollardRuntime::new() {
-                Ok(runtime) => {
-                    let rt: Arc<dyn cherub::tools::container::ContainerRuntime> = Arc::new(runtime);
-                    let result = load_from_dir(
-                        dir,
-                        rt,
-                        #[cfg(feature = "credentials")]
-                        None, // broker wiring deferred to M9c full integration
-                    )
-                    .await;
-                    for err in &result.errors {
-                        eprintln!("[warn] container tool load error: {err}");
-                    }
-                    if !result.tools.is_empty() {
-                        info!(
-                            count = result.tools.len(),
-                            dir = %dir.display(),
-                            "container tools loaded"
-                        );
-                        registry.with_container(result.tools)
-                    } else {
-                        registry
-                    }
-                }
-                Err(e) => {
-                    eprintln!("[warn] container runtime init failed (Docker unavailable?): {e}");
-                    registry
-                }
-            }
-        } else {
-            registry
-        }
-    };
-
-    // Replace in-process bash with container-sandboxed bash if requested.
-    #[cfg(feature = "container")]
-    let (registry, _sandbox_bash_ipc_dir) = {
-        if sandbox_bash {
-            use cherub::tools::container::BollardRuntime;
-            use cherub::tools::dev_environment::DevEnvironmentTool;
-            use std::sync::Arc;
-
-            let runtime = BollardRuntime::new()
-                .context("--sandbox-bash requires Docker — failed to connect")?;
-            let rt: Arc<dyn cherub::tools::container::ContainerRuntime> = Arc::new(runtime);
-            if !rt.is_available().await {
-                bail!("--sandbox-bash requires Docker but the daemon is not reachable");
-            }
-
-            let workspace = std::env::current_dir()
-                .context("--sandbox-bash: failed to determine current directory")?;
-            let (bash_tool, ipc_dir) =
-                cherub::tools::container_bash::build(Arc::clone(&rt), workspace);
-
-            let dev_env = DevEnvironmentTool::new(Arc::clone(&bash_tool));
-            let registry = registry
-                .with_container(vec![bash_tool])
-                .with_dev_environment(dev_env);
-            info!("sandbox bash enabled — bash commands run in isolated container");
-            (registry, Some(ipc_dir))
-        } else {
-            (registry, None)
-        }
-    };
-
-    // Add Playwright browser tool if requested.
-    #[cfg(feature = "browser")]
-    let (registry, _browser_ipc_dir) = {
-        if browser {
-            use cherub::tools::container::BollardRuntime;
-            use std::sync::Arc;
-
-            let runtime =
-                BollardRuntime::new().context("--browser requires Docker — failed to connect")?;
-            let rt: Arc<dyn cherub::tools::container::ContainerRuntime> = Arc::new(runtime);
-            if !rt.is_available().await {
-                bail!("--browser requires Docker but the daemon is not reachable");
-            }
-
-            let (browser_tool, ipc_dir) = cherub::tools::container_browser::build(Arc::clone(&rt));
-            let registry = registry.with_container(vec![browser_tool]);
-            info!("browser tool enabled — Playwright runs in isolated container");
-            (registry, Some(ipc_dir))
-        } else {
-            (registry, None)
-        }
-    };
-
-    // Load MCP servers if a config file was specified (M11).
-    #[cfg(feature = "mcp")]
-    let registry = {
-        if let Some(ref config_path) = mcp_config {
-            let result = cherub::tools::mcp::loader::load_from_config(
-                config_path,
-                #[cfg(feature = "credentials")]
-                None, // TODO: wire credential store for MCP credential_env
-                #[cfg(feature = "credentials")]
-                &user_id,
-            )
-            .await;
-            for err in &result.errors {
-                eprintln!("[warn] MCP: {err}");
-            }
-            if !result.tools.is_empty() {
-                info!(
-                    count = result.tools.len(),
-                    config = %config_path.display(),
-                    "MCP tools loaded"
-                );
-                registry.with_mcp(result.tools)
-            } else {
-                registry
-            }
-        } else {
-            registry
-        }
-    };
-
-    // Wire sub-agent tools from providers config (M13d).
-    let registry = if let Some(ref config) = loaded_providers_config {
-        use cherub::providers::config::instantiate_named_provider;
-        use cherub::tools::sub_agent::SubAgentTool;
-
-        let mut sub_agents: Vec<SubAgentTool> = Vec::new();
-        for (agent_name, agent_def) in &config.agents {
-            match instantiate_named_provider(config, &agent_def.provider, &mut Vec::new()) {
-                Ok(agent_provider) => {
-                    let sub_registry = ToolRegistry::for_sub_agent(&agent_def.tools);
-                    sub_agents.push(SubAgentTool {
-                        name: agent_name.clone(),
-                        description: agent_def.description.clone(),
-                        provider: agent_provider,
-                        system_prompt: agent_def.system_prompt.clone(),
-                        max_turns: agent_def.max_turns,
-                        timeout: std::time::Duration::from_secs(agent_def.timeout_secs),
-                        registry: sub_registry,
-                        policy: policy.clone(),
-                    });
-                    info!(agent = %agent_name, "sub-agent tool registered");
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        agent = %agent_name,
-                        error = %e,
-                        "failed to create sub-agent provider, skipping"
-                    );
-                }
-            }
-        }
-        if sub_agents.is_empty() {
-            registry
-        } else {
-            registry.with_sub_agents(sub_agents)
-        }
-    } else {
-        registry
-    };
+    let (registry, _resource_guards) = cherub::app::build_registry(&agent_config).await?;
 
     let system_prompt = std::env::var("CHERUB_SYSTEM_PROMPT_FILE")
         .ok()
