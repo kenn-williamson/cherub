@@ -10,6 +10,7 @@
 //! surface is wired in exactly one place — no per-transport drift.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 // `PathBuf` appears only in feature-gated tool-source fields; gate the import to
 // match so a no-feature build stays warning-clean.
@@ -20,6 +21,9 @@ use crate::enforcement::policy::Policy;
 use crate::error::CherubError;
 use crate::providers::Provider;
 use crate::providers::config::ProvidersConfig;
+use crate::runtime::AgentLoop;
+use crate::runtime::approval::ApprovalGate;
+use crate::runtime::output::OutputSink;
 use crate::tools::ToolRegistry;
 
 #[cfg(feature = "memory")]
@@ -27,11 +31,6 @@ use crate::storage::MemoryStore;
 #[cfg(feature = "credentials")]
 use crate::tools::credential_broker::CredentialBroker;
 
-/// Transport-agnostic description of *what* to assemble. Each binary produces
-/// one from its own config source (CLI: clap flags + env; Telegram: env +
-/// `SessionConfig`). It carries already-resolved shared handles (memory store,
-/// credential broker) plus the source specs (dirs, configs, flags) that
-/// [`build_registry`] turns into live backends. It performs no I/O itself.
 /// How to construct the LLM provider — the two mutually-exclusive paths each
 /// transport offers. The flag path is **not** routed through
 /// `instantiate_provider`: it carries an already-resolved API key, whereas the
@@ -96,17 +95,29 @@ fn build_provider(spec: &ProviderSpec) -> Result<Box<dyn Provider>, CherubError>
     }
 }
 
+/// Transport-agnostic description of *what* to assemble. Each binary produces
+/// one from its own config source (CLI: clap flags + env; Telegram: env +
+/// `SessionConfig`). It carries already-resolved shared handles plus the source
+/// specs that [`SharedAgentServices::build`] turns into live backends/services.
 pub struct AgentConfig {
     /// How to construct the LLM provider.
     pub provider: ProviderSpec,
-    /// Policy — cloned into each sub-agent's bounded inner loop.
+    /// Policy — cloned into each sub-agent's inner loop and into each agent loop.
     pub policy: Policy,
+    /// Resolved system prompt (the transport applies its own override-or-default).
+    pub system_prompt: String,
+    /// Workspace directory — drives the output-stashing hook.
+    pub cwd: String,
     /// When true, the in-process bash tool is omitted (sandbox bash replaces it).
     pub skip_builtin_bash: bool,
     /// Process-level identity used for MCP `credential_env` wiring.
     pub user_id: String,
     /// Providers config — drives sub-agent tool instantiation when present.
     pub providers_config: Option<ProvidersConfig>,
+    /// DB pool — backs the audit/cost/pricing stores and session persistence,
+    /// all built once in `SharedAgentServices::build`.
+    #[cfg(feature = "postgres")]
+    pub db_pool: Option<crate::storage::Pool>,
 
     /// Shared memory store (already built by the transport from pool + embedder).
     #[cfg(feature = "memory")]
@@ -407,10 +418,28 @@ pub struct SharedAgentServices {
     /// The shared provider. Cloned into each loop; `Provider::send` is `&self`,
     /// so sharing also makes `FailoverProvider`'s circuit breaker global.
     pub provider: Arc<dyn Provider>,
+    /// Policy, cloned into each loop.
+    pub policy: Policy,
+    /// Resolved system prompt, cloned into each loop.
+    pub system_prompt: String,
+    /// Workspace directory for the per-loop output-stashing hook.
+    pub cwd: String,
     /// Shared memory store, exposed so each loop can enable proactive injection
     /// with the same handle that backs the memory tool.
     #[cfg(feature = "memory")]
     pub memory_store: Option<Arc<dyn MemoryStore>>,
+    /// Audit log store (built once from the pool).
+    #[cfg(feature = "postgres")]
+    pub audit_store: Option<Arc<dyn crate::storage::AuditStore>>,
+    /// Cost tracking store (built once from the pool).
+    #[cfg(feature = "postgres")]
+    pub cost_store: Option<Arc<dyn crate::storage::CostStore>>,
+    /// Model pricing table, loaded once from the DB.
+    #[cfg(feature = "postgres")]
+    pub pricing_table: crate::providers::pricing::PricingTable,
+    /// DB pool — used per session to build the session-persistence store.
+    #[cfg(feature = "postgres")]
+    pub db_pool: Option<crate::storage::Pool>,
     /// IPC temp dirs held alive for the whole process (no `Drop` today).
     #[allow(dead_code)]
     guards: ResourceGuards,
@@ -422,14 +451,192 @@ impl SharedAgentServices {
         let provider: Arc<dyn Provider> = Arc::from(build_provider(&cfg.provider)?);
         #[cfg(feature = "memory")]
         let memory_store = cfg.memory_store.clone();
+
+        // Build the DB-backed stores once (audit/cost are cheap handles; the
+        // pricing table is a single query).
+        #[cfg(feature = "postgres")]
+        let (audit_store, cost_store, pricing_table) = if let Some(pool) = &cfg.db_pool {
+            use crate::storage::PricingStore;
+            let audit: Arc<dyn crate::storage::AuditStore> = Arc::new(
+                crate::storage::pg_audit_store::PgAuditStore::new(pool.clone()),
+            );
+            let cost: Arc<dyn crate::storage::CostStore> = Arc::new(
+                crate::storage::pg_cost_store::PgCostStore::new(pool.clone()),
+            );
+            let pricing_table: crate::providers::pricing::PricingTable =
+                crate::storage::pg_pricing_store::PgPricingStore::new(pool.clone())
+                    .list()
+                    .await
+                    .map(|entries| {
+                        entries
+                            .into_iter()
+                            .map(|e| (e.model_pattern.clone(), e.to_model_pricing()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            if !pricing_table.is_empty() {
+                tracing::info!(entries = pricing_table.len(), "pricing table loaded");
+            }
+            (Some(audit), Some(cost), pricing_table)
+        } else {
+            (
+                None,
+                None,
+                crate::providers::pricing::PricingTable::default(),
+            )
+        };
+
         let (registry, guards) = build_registry(&cfg).await?;
         Ok(Self {
             registry: Arc::new(registry),
             provider,
+            policy: cfg.policy,
+            system_prompt: cfg.system_prompt,
+            cwd: cfg.cwd,
             #[cfg(feature = "memory")]
             memory_store,
+            #[cfg(feature = "postgres")]
+            audit_store,
+            #[cfg(feature = "postgres")]
+            cost_store,
+            #[cfg(feature = "postgres")]
+            pricing_table,
+            #[cfg(feature = "postgres")]
+            db_pool: cfg.db_pool,
             guards,
         })
+    }
+}
+
+/// Which persistence slot a session uses — maps to the `(connector, id)` pair
+/// the session store keys on.
+pub enum PersistenceId {
+    Cli,
+    Telegram(i64),
+}
+
+impl PersistenceId {
+    #[allow(dead_code)] // only read under `feature = "sessions"`
+    fn parts(&self) -> (&'static str, String) {
+        match self {
+            PersistenceId::Cli => ("cli", "default".to_owned()),
+            PersistenceId::Telegram(chat_id) => ("telegram", chat_id.to_string()),
+        }
+    }
+}
+
+/// Per-session assembler. Borrows the build-once [`SharedAgentServices`], layers
+/// on the per-session state (persistence slot, cancel flag, task store, ...),
+/// then `build(gate, sink)` produces a ready `AgentLoop` — running the full
+/// `with_*` service chain in exactly one place, shared by every transport.
+pub struct AgentBuilder<'a> {
+    shared: &'a SharedAgentServices,
+    user_id: String,
+    /// Only read under `feature = "sessions"`.
+    #[allow(dead_code)]
+    persistence: Option<PersistenceId>,
+    cancel_flag: Option<Arc<AtomicBool>>,
+    #[cfg(feature = "postgres")]
+    task_store: Option<Arc<dyn crate::storage::TaskStore>>,
+    show_thinking: bool,
+}
+
+impl<'a> AgentBuilder<'a> {
+    pub fn new(shared: &'a SharedAgentServices, user_id: impl Into<String>) -> Self {
+        Self {
+            shared,
+            user_id: user_id.into(),
+            persistence: None,
+            cancel_flag: None,
+            #[cfg(feature = "postgres")]
+            task_store: None,
+            show_thinking: false,
+        }
+    }
+
+    /// Set the session-persistence slot (CLI or per-chat Telegram).
+    pub fn persistence(mut self, id: PersistenceId) -> Self {
+        self.persistence = Some(id);
+        self
+    }
+
+    /// Shared cancellation flag (Telegram /stop).
+    pub fn cancel_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.cancel_flag = Some(flag);
+        self
+    }
+
+    /// Async-approval task store (Telegram autonomous turns). Note the gate also
+    /// needs its own copy — wire that transport-side.
+    #[cfg(feature = "postgres")]
+    pub fn task_store(mut self, store: Arc<dyn crate::storage::TaskStore>) -> Self {
+        self.task_store = Some(store);
+        self
+    }
+
+    /// Emit thinking blocks to the output sink.
+    pub fn show_thinking(mut self, show: bool) -> Self {
+        self.show_thinking = show;
+        self
+    }
+
+    /// Build the agent: `AgentLoop::new` + the full per-session service chain.
+    /// Session persistence is best-effort — a failure logs and runs ephemeral.
+    pub async fn build<A: ApprovalGate, O: OutputSink>(
+        self,
+        gate: A,
+        output: O,
+    ) -> AgentLoop<A, O> {
+        let s = self.shared;
+        let mut agent = AgentLoop::new(
+            s.policy.clone(),
+            Arc::clone(&s.provider),
+            Arc::clone(&s.registry),
+            s.system_prompt.clone(),
+            gate,
+            output,
+            &self.user_id,
+        );
+        if self.show_thinking {
+            agent.with_show_thinking(true);
+        }
+        if let Some(flag) = self.cancel_flag {
+            agent.with_cancel_flag(flag);
+        }
+        agent.with_hook(Box::new(crate::runtime::hooks::OutputStashingHook::new(
+            std::path::Path::new(&s.cwd),
+        )));
+        #[cfg(feature = "memory")]
+        if let Some(store) = &s.memory_store {
+            agent.with_memory_injection(Arc::clone(store));
+        }
+        #[cfg(feature = "postgres")]
+        {
+            if let Some(store) = &s.audit_store {
+                agent.with_audit_log(Arc::clone(store));
+            }
+            if let Some(store) = &s.cost_store {
+                agent.with_cost_tracking(Arc::clone(store));
+            }
+            agent.with_pricing_table(s.pricing_table.clone());
+        }
+        #[cfg(feature = "postgres")]
+        if let Some(store) = self.task_store {
+            agent.with_task_store(store);
+        }
+        #[cfg(feature = "sessions")]
+        if let Some(pid) = &self.persistence {
+            if let Some(pool) = &s.db_pool {
+                let store = Box::new(crate::storage::pg_session_store::PgSessionStore::new(
+                    pool.clone(),
+                ));
+                let (connector, id) = pid.parts();
+                if let Err(e) = agent.with_persistence(store, connector, &id).await {
+                    tracing::warn!(error = %e, "session persistence unavailable, running ephemeral");
+                }
+            }
+        }
+        agent
     }
 }
 
@@ -452,9 +659,13 @@ mod tests {
                 max_tokens: 1024,
             },
             policy,
+            system_prompt: "test prompt".to_owned(),
+            cwd: ".".to_owned(),
             skip_builtin_bash: false,
             user_id: "test".to_owned(),
             providers_config: None,
+            #[cfg(feature = "postgres")]
+            db_pool: None,
             #[cfg(feature = "memory")]
             memory_store: None,
             #[cfg(feature = "credentials")]

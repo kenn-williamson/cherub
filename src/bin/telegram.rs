@@ -8,6 +8,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use cherub::enforcement::policy::Policy;
+use cherub::runtime::prompt::build_system_prompt;
 use cherub::telegram::approval::{self, ApprovalMessage};
 use cherub::telegram::connector;
 use cherub::telegram::session::{SessionCommand, SessionConfig};
@@ -267,6 +268,16 @@ async fn main() -> Result<()> {
         info!("custom system prompt loaded from CHERUB_SYSTEM_PROMPT_FILE");
     }
 
+    // Resolve the system prompt + workspace once for the shared services.
+    let cwd = std::env::var("CHERUB_WORKSPACE").unwrap_or_else(|_| {
+        std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| ".".to_owned())
+    });
+    let system_prompt = system_prompt_override
+        .clone()
+        .unwrap_or_else(|| build_system_prompt(&cwd));
+
     // Provider spec — from config file (failover) or the bot's provider env;
     // construction is deferred to SharedAgentServices::build.
     let provider_spec = if let Some(ref config) = providers_config {
@@ -288,9 +299,13 @@ async fn main() -> Result<()> {
     let agent_config = cherub::app::AgentConfig {
         provider: provider_spec,
         policy: policy.clone(),
+        system_prompt,
+        cwd,
         skip_builtin_bash,
         user_id: "telegram".to_owned(),
         providers_config: providers_config.clone(),
+        #[cfg(feature = "postgres")]
+        db_pool: db_pool.clone(),
         #[cfg(feature = "memory")]
         memory_store,
         #[cfg(feature = "credentials")]
