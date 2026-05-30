@@ -9,6 +9,7 @@
 //! (Set ANTHROPIC_API_KEY in .env or environment)
 
 use std::str::FromStr;
+use std::sync::Arc;
 
 use secrecy::SecretString;
 
@@ -75,8 +76,8 @@ fn make_agent() -> AgentLoop<DenyAllGate, NullSink> {
 
     AgentLoop::new(
         policy,
-        Box::new(provider),
-        registry,
+        Arc::new(provider),
+        Arc::new(registry),
         system_prompt,
         approval_gate,
         NullSink,

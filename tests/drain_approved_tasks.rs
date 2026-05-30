@@ -248,11 +248,14 @@ fn approved_bash_task(command: &str) -> Task {
 }
 
 /// Build an `AgentLoop` pre-wired with the given `MockTaskStore` and `RecordingSink`.
-fn make_agent(store: Arc<MockTaskStore>, sink: RecordingSink) -> AgentLoop<DenyGate, RecordingSink> {
+fn make_agent(
+    store: Arc<MockTaskStore>,
+    sink: RecordingSink,
+) -> AgentLoop<DenyGate, RecordingSink> {
     let mut agent = AgentLoop::new(
         default_policy(),
-        Box::new(MockProvider::new()),
-        ToolRegistry::new(),
+        Arc::new(MockProvider::new()),
+        Arc::new(ToolRegistry::new()),
         "test".to_owned(),
         DenyGate,
         sink,
@@ -343,7 +346,10 @@ async fn drain_policy_changed_marks_failed() {
 
     let executed = agent.drain_approved_tasks().await;
 
-    assert_eq!(executed, 0, "policy-changed task should not count as executed");
+    assert_eq!(
+        executed, 0,
+        "policy-changed task should not count as executed"
+    );
     assert_eq!(store.statuses()[0].1, "failed");
 
     let err = store.error_for(task_id).unwrap_or_default();
@@ -370,8 +376,7 @@ async fn drain_mixed_success_and_policy_changed() {
 
     assert_eq!(executed, 1);
 
-    let statuses: std::collections::HashMap<Uuid, String> =
-        store.statuses().into_iter().collect();
+    let statuses: std::collections::HashMap<Uuid, String> = store.statuses().into_iter().collect();
     assert_eq!(statuses[&exec_id], "done");
     assert_eq!(statuses[&policy_id], "failed");
 

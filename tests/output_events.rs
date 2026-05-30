@@ -171,8 +171,8 @@ fn make_agent(
     let registry = ToolRegistry::new();
     AgentLoop::new(
         policy,
-        Box::new(provider),
-        registry,
+        Arc::new(provider),
+        Arc::new(registry),
         "test prompt".to_owned(),
         MockApprovalGate,
         RecordingSink::new(events),

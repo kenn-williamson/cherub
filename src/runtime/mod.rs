@@ -79,13 +79,14 @@ fn extract_user_text(content: &[UserContent]) -> String {
 }
 
 /// The agent loop. Owns session state and orchestrates model <-> tool interaction.
-/// Generic over approval gate and output sink for testability. Provider is
-/// `Box<dyn Provider>` — object-safe via `async_trait` (M13-prep).
+/// Generic over approval gate and output sink for testability. Provider and
+/// registry are `Arc`-shared — object-safe via `async_trait`; one set of
+/// backends is built once and shared read-only across many loops.
 pub struct AgentLoop<A: ApprovalGate, O: OutputSink> {
     session: Session,
     policy: Policy,
-    provider: Box<dyn Provider>,
-    registry: ToolRegistry,
+    provider: Arc<dyn Provider>,
+    registry: Arc<ToolRegistry>,
     system_prompt: String,
     tool_definitions: Vec<ToolDefinition>,
     approval_gate: A,
@@ -134,8 +135,8 @@ pub struct AgentLoop<A: ApprovalGate, O: OutputSink> {
 impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
     pub fn new(
         policy: Policy,
-        provider: Box<dyn Provider>,
-        registry: ToolRegistry,
+        provider: Arc<dyn Provider>,
+        registry: Arc<ToolRegistry>,
         system_prompt: String,
         approval_gate: A,
         output: O,
@@ -219,7 +220,9 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
     /// Conversation history is preserved — only the backend changes.
     pub fn swap_provider(&mut self, provider: Box<dyn Provider>) {
         info!(model = %provider.model_name(), "provider swapped");
-        self.provider = provider;
+        // The field is `Arc<dyn Provider>` (shared across loops); a per-loop
+        // `/model` switch re-points only this loop's Arc, never the shared one.
+        self.provider = Arc::from(provider);
     }
 
     /// The current model name.

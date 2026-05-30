@@ -5,6 +5,7 @@
 
 use std::collections::VecDeque;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -262,8 +263,8 @@ async fn basic_delegation() {
 
     let mut agent = AgentLoop::new(
         policy,
-        Box::new(orchestrator),
-        registry,
+        Arc::new(orchestrator),
+        Arc::new(registry),
         "Test system".to_owned(),
         AlwaysDenyGate,
         NullSink,

@@ -463,8 +463,8 @@ async fn chat_session(
 
     let mut agent = AgentLoop::new(
         config.policy,
-        provider,
-        registry,
+        Arc::from(provider),
+        Arc::new(registry),
         system_prompt,
         approval_gate,
         output,

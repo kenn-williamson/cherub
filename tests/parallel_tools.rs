@@ -4,6 +4,7 @@
 //! they execute concurrently via the 4-phase pipeline. No API key required.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -139,12 +140,12 @@ patterns = ["^sleep ", "^echo "]
 
 fn make_agent<A: ApprovalGate>(responses: Vec<Message>, gate: A) -> AgentLoop<A, NullSink> {
     let policy = default_policy();
-    let provider = Box::new(MockProvider::new(responses));
+    let provider = Arc::new(MockProvider::new(responses));
     let registry = ToolRegistry::new();
     AgentLoop::new(
         policy,
         provider,
-        registry,
+        Arc::new(registry),
         "test".to_owned(),
         gate,
         NullSink,
@@ -157,12 +158,12 @@ fn make_agent_with_policy<A: ApprovalGate>(
     responses: Vec<Message>,
     gate: A,
 ) -> AgentLoop<A, NullSink> {
-    let provider = Box::new(MockProvider::new(responses));
+    let provider = Arc::new(MockProvider::new(responses));
     let registry = ToolRegistry::new();
     AgentLoop::new(
         policy,
         provider,
-        registry,
+        Arc::new(registry),
         "test".to_owned(),
         gate,
         NullSink,
