@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use rustyline::DefaultEditor;
@@ -13,6 +13,11 @@ use cherub::runtime::output::StdoutSink;
 use cherub::runtime::prompt::build_system_prompt;
 
 const DEFAULT_POLICY_PATH: &str = "config/default_policy.toml";
+/// The default policy, embedded at compile time. Lets an installed binary
+/// (`cargo install cherub`) start with no config file on disk: when the user
+/// passes no `--policy` and `config/default_policy.toml` is absent, this is the
+/// fallback. The file ships in the published crate, so it compiles either way.
+const EMBEDDED_DEFAULT_POLICY: &str = include_str!("../config/default_policy.toml");
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
@@ -941,11 +946,29 @@ async fn run_agent(
 ) -> Result<()> {
     let user_id = std::env::var("USER").unwrap_or_else(|_| "local".to_owned());
 
-    // Load policy.
-    let policy = Policy::load(&policy_path).map_err(|e| {
-        anyhow::anyhow!("failed to load policy from {}: {e}", policy_path.display())
-    })?;
-    info!(policy = %policy_path.display(), "policy loaded");
+    // Load policy. If a file exists at the path, use it. If not — and the user
+    // didn't point at a specific file (still the default path) — fall back to the
+    // policy embedded at compile time, so an installed binary run outside a
+    // checkout still starts (deny-by-default, never policy-free). An explicitly
+    // requested `--policy` file that's missing remains a hard error.
+    let policy = if policy_path.exists() {
+        let p = Policy::load(&policy_path).map_err(|e| {
+            anyhow::anyhow!("failed to load policy from {}: {e}", policy_path.display())
+        })?;
+        info!(policy = %policy_path.display(), "policy loaded");
+        p
+    } else if policy_path == Path::new(DEFAULT_POLICY_PATH) {
+        let p = EMBEDDED_DEFAULT_POLICY
+            .parse::<Policy>()
+            .map_err(|e| anyhow::anyhow!("embedded default policy failed to parse: {e}"))?;
+        info!("no policy file found; using embedded default policy");
+        p
+    } else {
+        bail!(
+            "failed to load policy from {}: no such file",
+            policy_path.display()
+        );
+    };
 
     // Create provider — from config file if --providers is set, otherwise from CLI flags.
     // Keep the parsed config around for sub-agent wiring (M13d).
