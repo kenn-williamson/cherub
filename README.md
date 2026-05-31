@@ -77,13 +77,33 @@ Result returned to model
 - **Cost tracking** — Per-call token usage and cost with budget enforcement
 - **Credential vault** — AES-256-GCM encrypted credentials, never exposed to the agent
 
+## Install
+
+```bash
+# Install the `cherub` binary from crates.io
+cargo install cherub
+```
+
+This puts `cherub` on your `PATH`. The default build is the CLI with in-process bash, a single provider, and ephemeral sessions. To enable optional capabilities, install with the matching features (see [Feature Flags](#feature-flags)):
+
+```bash
+# e.g. session persistence + memory + the Telegram bot
+cargo install cherub --features telegram,sessions,memory
+```
+
+The installed binary runs out of the box: when no `--policy` is given and no `config/default_policy.toml` is present, it falls back to a default policy embedded at compile time (still deny-by-default — destructive bash commands require approval).
+
+> **Docker-based sandboxing needs a source checkout.** The `--sandbox-bash`, `--browser`, and container-tool features build their images from Dockerfiles under `tools/container/`, which a `cargo install` does not place on your disk. To use them, clone the repo (see below). Everything else — the providers, file/bash/HTTP/memory tools, MCP, sessions, and the Telegram bot — works from an installed binary.
+
+Prefer building from source? Clone the repo and use `cargo run` instead — the examples below use `cargo run`, but with an installed binary you can substitute `cherub` (and `cherub-telegram` for the bot).
+
 ## Quick Start
 
 ```bash
-# Build
-cargo build
+# Installed binary (ephemeral sessions, Anthropic provider)
+ANTHROPIC_API_KEY=sk-... cherub
 
-# Run (ephemeral sessions, Anthropic provider)
+# Or from a source checkout
 ANTHROPIC_API_KEY=sk-... cargo run
 ```
 
@@ -157,6 +177,41 @@ cargo run -- --policy path/to/policy.toml
 | `telegram` | Telegram bot connector | — |
 
 Default build (no features): CLI with in-process bash, single provider, ephemeral sessions.
+
+### Environment Variables
+
+The **CLI** is configured mostly through flags (`--provider`, `--model`, `--policy`, …); it reads only a few values from the environment. The **Telegram bot takes no flags** — it is configured entirely through environment variables.
+
+Common to both binaries:
+
+| Variable | Purpose | Required when |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | Anthropic provider auth | Using the Anthropic provider (the default) |
+| `OPENAI_API_KEY` | OpenAI provider auth; also embeddings for hybrid memory search | Using the OpenAI provider, or `memory` with vector search |
+| `DATABASE_URL` | PostgreSQL connection string | Any of `postgres`/`sessions`/`memory`/`credentials` |
+| `CHERUB_MASTER_KEY` | Hex key for the encrypted credential vault | The `credentials` feature |
+| `CHERUB_SYSTEM_PROMPT_FILE` | Path to a file whose contents replace the default system prompt | Optional |
+| `RUST_LOG` | `tracing` filter, e.g. `cherub=info` | Optional |
+
+Telegram bot only (`cherub-telegram`):
+
+| Variable | Purpose |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather (**required**) |
+| `TELEGRAM_ALLOWED_CHATS` | Comma-separated allowed chat IDs, or `*` for open access (**required**) |
+| `CHERUB_PROVIDER` | `anthropic` (default) or `openai` |
+| `CHERUB_MODEL` | Model name override |
+| `CHERUB_BASE_URL` | OpenAI-compatible base URL (Ollama, vLLM, …) |
+| `CHERUB_THINKING_BUDGET` | Extended-thinking token budget (Anthropic) |
+| `CHERUB_POLICY` | Policy file path (else the embedded default) |
+| `CHERUB_WORKSPACE` | Directory the file/bash tools operate in (default: current dir) |
+| `CHERUB_PROVIDERS_CONFIG` | Providers config file (failover + sub-agents) |
+| `CHERUB_SANDBOX_BASH` | `1` to run bash in a Docker sandbox (needs a source checkout) |
+| `CHERUB_BROWSER` | `1` to enable the Playwright browser tool (needs a source checkout) |
+| `CHERUB_WASM_TOOLS_DIR` / `CHERUB_CONTAINER_TOOLS_DIR` | Plugin tool directories |
+| `CHERUB_MCP_CONFIG` | MCP servers config file |
+| `CHERUB_SCHEDULE_CONFIG` / `CHERUB_SCHEDULE_CHAT_ID` | Scheduler config + target chat (feature = `schedule`) |
+| `CHERUB_TELEGRAM_VERBOSE` | `1` for verbose tool/turn output in chat |
 
 ### Provider Configuration
 
