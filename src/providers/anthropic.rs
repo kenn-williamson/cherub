@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn request_body_structure() {
         let messages = vec![Message::user_text("hello")];
-        let tools = vec![ToolDefinition {
+        let tools = [ToolDefinition {
             name: "bash".to_owned(),
             description: "Execute bash commands".to_owned(),
             input_schema: json!({

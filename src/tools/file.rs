@@ -337,7 +337,7 @@ impl FileTool {
         }
 
         // Sort by mtime, newest first.
-        valid_entries.sort_by(|a, b| b.1.cmp(&a.1));
+        valid_entries.sort_by_key(|e| std::cmp::Reverse(e.1));
 
         let total = valid_entries.len();
         let truncated = total > GLOB_MAX_ENTRIES;

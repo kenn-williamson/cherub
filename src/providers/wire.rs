@@ -1020,9 +1020,7 @@ mod tests {
     #[test]
     fn error_message_does_not_contain_secrets() {
         // Verify that our error format doesn't accidentally include API key patterns.
-        let error_msg = format!(
-            "API error 401 Unauthorized: {{\"type\":\"error\",\"error\":{{\"type\":\"authentication_error\",\"message\":\"invalid x-api-key\"}}}}"
-        );
+        let error_msg = "API error 401 Unauthorized: {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid x-api-key\"}}".to_string();
         assert!(!error_msg.contains("sk-ant-"));
         assert!(!error_msg.contains("sk-"));
     }

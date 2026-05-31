@@ -4,7 +4,7 @@
 //! based on the structured match_source and the configured patterns.
 //!
 //! Does not require a database or filesystem operations — uses the mock provider
-//! + in-memory enforcement. The tool will error on execute (missing file) but
+//! and in-memory enforcement. The tool will error on execute (missing file) but
 //! the enforcement decision is what we're testing.
 
 use std::collections::VecDeque;

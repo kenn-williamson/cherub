@@ -94,15 +94,14 @@ impl TelegramSink {
         if let Some(msg_id) = msg_id {
             // Try to edit the status message into the response.
             // If the text is too long or edit fails, delete status and send fresh.
-            if text.len() <= MAX_MESSAGE_LEN {
-                if self
+            if text.len() <= MAX_MESSAGE_LEN
+                && self
                     .bot
                     .edit_message_text(self.chat_id, msg_id, text)
                     .await
                     .is_ok()
-                {
-                    return;
-                }
+            {
+                return;
             }
             let _ = self.bot.delete_message(self.chat_id, msg_id).await;
         }

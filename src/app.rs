@@ -625,15 +625,15 @@ impl<'a> AgentBuilder<'a> {
             agent.with_task_store(store);
         }
         #[cfg(feature = "sessions")]
-        if let Some(pid) = &self.persistence {
-            if let Some(pool) = &s.db_pool {
-                let store = Box::new(crate::storage::pg_session_store::PgSessionStore::new(
-                    pool.clone(),
-                ));
-                let (connector, id) = pid.parts();
-                if let Err(e) = agent.with_persistence(store, connector, &id).await {
-                    tracing::warn!(error = %e, "session persistence unavailable, running ephemeral");
-                }
+        if let Some(pid) = &self.persistence
+            && let Some(pool) = &s.db_pool
+        {
+            let store = Box::new(crate::storage::pg_session_store::PgSessionStore::new(
+                pool.clone(),
+            ));
+            let (connector, id) = pid.parts();
+            if let Err(e) = agent.with_persistence(store, connector, &id).await {
+                tracing::warn!(error = %e, "session persistence unavailable, running ephemeral");
             }
         }
         agent

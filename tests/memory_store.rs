@@ -433,7 +433,7 @@ async fn update_re_embeds_content() {
     let rows = sqlx::query(
         "SELECT id, embedding IS NOT NULL AS has_embedding FROM memories WHERE id = ANY($1)",
     )
-    .bind(&vec![orig_id, new_id])
+    .bind(vec![orig_id, new_id])
     .fetch_all(&tc.pool)
     .await
     .expect("query");

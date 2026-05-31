@@ -586,6 +586,19 @@ impl ToolRegistry {
     }
 }
 
+/// Extension point for tool implementations. Not used for known variants —
+/// enum dispatch via `ToolImpl` is preferred. Reserved for future external plugins.
+pub trait Tool: Send + Sync {
+    fn name(&self) -> &str;
+
+    fn execute(
+        &self,
+        action: &str,
+        params: &serde_json::Value,
+        token: CapabilityToken,
+    ) -> Result<ToolResult, CherubError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -613,17 +626,4 @@ mod tests {
         assert!(enriched.get("__mcp_server").is_none());
         assert!(enriched.get("__mcp_tool").is_none());
     }
-}
-
-/// Extension point for tool implementations. Not used for known variants —
-/// enum dispatch via `ToolImpl` is preferred. Reserved for future external plugins.
-pub trait Tool: Send + Sync {
-    fn name(&self) -> &str;
-
-    fn execute(
-        &self,
-        action: &str,
-        params: &serde_json::Value,
-        token: CapabilityToken,
-    ) -> Result<ToolResult, CherubError>;
 }

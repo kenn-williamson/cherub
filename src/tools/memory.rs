@@ -428,14 +428,9 @@ mod tests {
             let memories = self.memories.lock().unwrap();
             let results = memories
                 .iter()
-                .filter(|m| {
-                    filter
-                        .user_id
-                        .as_deref()
-                        .map_or(true, |uid| m.user_id == uid)
-                })
-                .filter(|m| filter.scope.map_or(true, |s| m.scope == s))
-                .filter(|m| filter.category.map_or(true, |c| m.category == c))
+                .filter(|m| filter.user_id.as_deref().is_none_or(|uid| m.user_id == uid))
+                .filter(|m| filter.scope.is_none_or(|s| m.scope == s))
+                .filter(|m| filter.category.is_none_or(|c| m.category == c))
                 .cloned()
                 .collect();
             Ok(results)
@@ -456,8 +451,8 @@ mod tests {
                 .collect();
             let results = memories
                 .iter()
-                .filter(|m| user_id.map_or(true, |uid| m.user_id == uid))
-                .filter(|m| scope.map_or(true, |s| m.scope == s))
+                .filter(|m| user_id.is_none_or(|uid| m.user_id == uid))
+                .filter(|m| scope.is_none_or(|s| m.scope == s))
                 .filter(|m| {
                     let content_lower = m.content.to_lowercase();
                     query_words.iter().any(|w| content_lower.contains(*w))

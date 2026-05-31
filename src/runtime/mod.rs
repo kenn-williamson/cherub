@@ -7,7 +7,6 @@ pub mod schedule;
 pub mod session;
 pub mod tokens;
 
-use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -456,10 +455,10 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
         if let Ok(entries) = std::fs::read_dir(&stash_dir) {
             let mut removed = 0u32;
             for entry in entries.flatten() {
-                if entry.path().extension().and_then(|e| e.to_str()) == Some("txt") {
-                    if std::fs::remove_file(entry.path()).is_ok() {
-                        removed += 1;
-                    }
+                if entry.path().extension().and_then(|e| e.to_str()) == Some("txt")
+                    && std::fs::remove_file(entry.path()).is_ok()
+                {
+                    removed += 1;
                 }
             }
             if removed > 0 {
@@ -1674,38 +1673,6 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
         }
 
         Ok(())
-    }
-
-    /// Execute a tool future with periodic progress updates (M14c).
-    async fn execute_with_progress(
-        &self,
-        tool_name: &str,
-        display_str: &str,
-        fut: impl Future<Output = Result<crate::tools::ToolResult, CherubError>>,
-    ) -> Result<crate::tools::ToolResult, CherubError> {
-        self.output
-            .emit(OutputEvent::Progress {
-                tool: tool_name,
-                status: display_str,
-            })
-            .await;
-        let mut interval = tokio::time::interval(Duration::from_secs(5));
-        interval.tick().await; // skip immediate tick
-        tokio::pin!(fut);
-        let mut elapsed = 0u64;
-        loop {
-            tokio::select! {
-                result = &mut fut => {
-                    self.output.emit(OutputEvent::ProgressClear).await;
-                    return result;
-                }
-                _ = interval.tick() => {
-                    elapsed += 5;
-                    let status = format!("{display_str} ({elapsed}s)");
-                    self.output.emit(OutputEvent::Progress { tool: tool_name, status: &status }).await;
-                }
-            }
-        }
     }
 }
 

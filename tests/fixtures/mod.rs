@@ -138,13 +138,17 @@ impl TestContainer {
 /// Produces 1536-dimensional vectors from a simple hash of the input text.
 /// Two strings with identical content produce identical vectors; distinct strings
 /// produce distinct (but not semantically meaningful) vectors.
+// Shared across integration-test binaries; not every binary that includes this
+// fixtures module constructs it, so silence per-binary dead-code warnings.
 #[cfg(feature = "memory")]
+#[allow(dead_code)]
 pub struct MockEmbeddingProvider {
     /// When `true`, `embed()` always returns an error.
     pub fail: bool,
 }
 
 #[cfg(feature = "memory")]
+#[allow(dead_code)]
 impl MockEmbeddingProvider {
     pub fn new() -> Self {
         Self { fail: false }

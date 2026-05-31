@@ -68,7 +68,8 @@ pub async fn handle_message(
                 .await;
             return Ok(());
         }
-        let model_cmd = text.strip_prefix("/model")
+        let model_cmd = text
+            .strip_prefix("/model")
             .or_else(|| text.strip_prefix("!model"))
             .or_else(|| text.strip_prefix("model "));
         if let Some(model_cmd) = model_cmd {

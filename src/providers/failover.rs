@@ -221,11 +221,15 @@ impl Provider for FailoverProvider {
 mod tests {
     use super::*;
 
+    /// The shape of a `Provider::complete` outcome — a message plus optional
+    /// usage, or an error. Aliased to keep the mock's fields/signatures legible.
+    type CompleteResult = Result<(Message, Option<ApiUsage>), CherubError>;
+
     /// A mock provider that returns a configurable result.
     struct MockProvider {
         name: String,
         max_tokens: u32,
-        result: Mutex<Vec<Result<(Message, Option<ApiUsage>), CherubError>>>,
+        result: Mutex<Vec<CompleteResult>>,
     }
 
     impl MockProvider {
@@ -237,11 +241,7 @@ mod tests {
             }
         }
 
-        fn with_results(
-            name: &str,
-            max_tokens: u32,
-            results: Vec<Result<(Message, Option<ApiUsage>), CherubError>>,
-        ) -> Self {
+        fn with_results(name: &str, max_tokens: u32, results: Vec<CompleteResult>) -> Self {
             // Results are stored in reverse so we can pop from the end.
             let mut reversed = results;
             reversed.reverse();
@@ -260,7 +260,7 @@ mod tests {
             _system: &str,
             _messages: &[Message],
             _tools: &[ToolDefinition],
-        ) -> Result<(Message, Option<ApiUsage>), CherubError> {
+        ) -> CompleteResult {
             let mut results = self.result.lock().unwrap();
             if let Some(result) = results.pop() {
                 result
@@ -287,7 +287,7 @@ mod tests {
         }
     }
 
-    fn ok_result(name: &str) -> Result<(Message, Option<ApiUsage>), CherubError> {
+    fn ok_result(name: &str) -> CompleteResult {
         Ok((
             Message::Assistant {
                 content: vec![super::super::ContentBlock::Text {
@@ -299,7 +299,7 @@ mod tests {
         ))
     }
 
-    fn provider_err(msg: &str) -> Result<(Message, Option<ApiUsage>), CherubError> {
+    fn provider_err(msg: &str) -> CompleteResult {
         Err(CherubError::Provider(msg.to_owned()))
     }
 

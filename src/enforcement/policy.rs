@@ -502,7 +502,7 @@ fn compile_tool(name: String, config: ToolConfig) -> Result<CompiledTool, Cherub
         .collect::<Result<Vec<_>, _>>()?;
 
     // Sort: highest privilege first (Commit > Act > Observe) so first match wins.
-    actions.sort_by(|a, b| b.tier.cmp(&a.tier));
+    actions.sort_by_key(|a| std::cmp::Reverse(a.tier));
 
     Ok(CompiledTool {
         name,
