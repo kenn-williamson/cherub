@@ -1,4 +1,4 @@
-/// Format the memory injection section appended to the system prompt before each turn.
+/// Format the memory injection section appended to the user message before each turn.
 ///
 /// Splits memories into **Verified** (Explicit/Confirmed) and **Inferred** subsections.
 /// Returns an empty string when `memories` is empty — callers skip appending in that case.

@@ -1,14 +1,15 @@
 //! Integration tests for M6d: Proactive Memory Injection.
 //!
 //! Verifies that:
-//! 1. The runtime injects relevant memories into the system prompt before each turn.
+//! 1. The runtime injects relevant memories into the *user message* before each turn,
+//!    leaving the system prompt byte-stable (so the prompt-cache prefix keeps hitting).
 //! 2. The agent cannot suppress injection — it's runtime-controlled context.
 //! 3. No injection occurs when no store is attached.
 //! 4. No injection occurs when the search returns no results.
 //! 5. No injection occurs for very short queries (< INJECTION_MIN_QUERY_LEN).
 //!
-//! Uses a mock provider that captures the system prompt it receives, and an
-//! in-memory `MemoryStore` that bypasses PostgreSQL entirely.
+//! Uses a mock provider that captures both the system prompt and the user-message
+//! text it receives, and an in-memory `MemoryStore` that bypasses PostgreSQL entirely.
 
 #![cfg(feature = "memory")]
 
@@ -21,7 +22,9 @@ use uuid::{NoContext, Timestamp, Uuid};
 
 use cherub::enforcement::policy::Policy;
 use cherub::error::CherubError;
-use cherub::providers::{ApiUsage, ContentBlock, Message, Provider, StopReason, ToolDefinition};
+use cherub::providers::{
+    ApiUsage, ContentBlock, Message, Provider, StopReason, ToolDefinition, UserContent,
+};
 use cherub::runtime::AgentLoop;
 use cherub::runtime::approval::{ApprovalGate, ApprovalResult, EscalationContext};
 use cherub::runtime::output::NullSink;
@@ -31,27 +34,59 @@ use cherub::storage::{
 };
 use cherub::tools::ToolRegistry;
 
-// ─── Mock Provider that captures system prompts ───────────────────────────────
+// ─── Mock Provider that captures system prompts + user-message text ────────────
 
-/// Records every system prompt it receives into a shared captures buffer.
+/// Shared capture buffers — tests hold a clone to inspect results after a turn.
+#[derive(Clone)]
+struct Captures {
+    /// The system prompt passed on each provider call.
+    systems: Arc<Mutex<Vec<String>>>,
+    /// The concatenated text of all user messages passed on each provider call.
+    user_texts: Arc<Mutex<Vec<String>>>,
+}
+
+/// Records the system prompt and user-message text it receives on each call.
 /// Drains canned responses from a queue.
 struct CapturingProvider {
     responses: Mutex<VecDeque<Message>>,
-    /// Shared captures — tests hold a clone of this Arc to inspect results.
-    captures: Arc<Mutex<Vec<String>>>,
+    captures: Captures,
 }
 
 impl CapturingProvider {
-    /// Returns `(provider, captures_handle)`. Pass `provider` to AgentLoop,
-    /// inspect `captures_handle` after the turn runs.
-    fn new(responses: Vec<Message>) -> (Self, Arc<Mutex<Vec<String>>>) {
-        let captures = Arc::new(Mutex::new(Vec::new()));
+    /// Returns `(provider, captures)`. Pass `provider` to AgentLoop, inspect
+    /// `captures` after the turn runs.
+    fn new(responses: Vec<Message>) -> (Self, Captures) {
+        let captures = Captures {
+            systems: Arc::new(Mutex::new(Vec::new())),
+            user_texts: Arc::new(Mutex::new(Vec::new())),
+        };
         let provider = Self {
             responses: Mutex::new(VecDeque::from(responses)),
-            captures: Arc::clone(&captures),
+            captures: captures.clone(),
         };
         (provider, captures)
     }
+}
+
+/// Flatten the text of every user message in a slice into one searchable string.
+fn user_text_of(messages: &[Message]) -> String {
+    messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::User { content } => Some(
+                content
+                    .iter()
+                    .filter_map(|c| match c {
+                        UserContent::Text(t) => Some(t.as_str()),
+                        UserContent::Image { .. } => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[async_trait]
@@ -59,10 +94,19 @@ impl Provider for CapturingProvider {
     async fn complete(
         &self,
         system: &str,
-        _messages: &[Message],
+        messages: &[Message],
         _tools: &[ToolDefinition],
     ) -> Result<(Message, Option<ApiUsage>), CherubError> {
-        self.captures.lock().unwrap().push(system.to_owned());
+        self.captures
+            .systems
+            .lock()
+            .unwrap()
+            .push(system.to_owned());
+        self.captures
+            .user_texts
+            .lock()
+            .unwrap()
+            .push(user_text_of(messages));
         let mut queue = self.responses.lock().unwrap();
         Ok((queue.pop_front().unwrap_or_else(end_turn), None))
     }
@@ -227,9 +271,10 @@ patterns = ["^ls "]
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
-/// When memories match the user message, they are injected into the system prompt.
+/// When memories match the user message, they are injected into the user message
+/// while the system prompt stays byte-stable (preserving the prompt-cache prefix).
 #[tokio::test]
-async fn relevant_memories_injected_into_system_prompt() {
+async fn relevant_memories_injected_into_user_message() {
     let store = InMemoryStore::new();
     store.add(make_memory_row(
         "User is allergic to peanuts",
@@ -253,20 +298,27 @@ async fn relevant_memories_injected_into_system_prompt() {
 
     agent.run_turn_text("I like peanut butter").await.unwrap();
 
-    let systems = captures.lock().unwrap().clone();
+    let systems = captures.systems.lock().unwrap().clone();
+    let user_texts = captures.user_texts.lock().unwrap().clone();
     assert_eq!(systems.len(), 1, "provider should be called once");
-    let system = &systems[0];
+    // System block stays static so the prompt-cache prefix keeps hitting.
+    assert_eq!(
+        systems[0], "base system prompt",
+        "system prompt must stay byte-stable (no injection appended)"
+    );
+    // Injection now rides the user message.
+    let user_text = &user_texts[0];
     assert!(
-        system.starts_with("base system prompt"),
-        "should start with base prompt"
+        user_text.contains("## Relevant memories"),
+        "should contain injection section in the user message: {user_text}"
     );
     assert!(
-        system.contains("## Relevant memories"),
-        "should contain injection section: {system}"
+        user_text.contains("User is allergic to peanuts"),
+        "should contain the injected memory: {user_text}"
     );
     assert!(
-        system.contains("User is allergic to peanuts"),
-        "should contain the injected memory: {system}"
+        user_text.contains("I like peanut butter"),
+        "should still contain the user's own message: {user_text}"
     );
 }
 
@@ -299,11 +351,17 @@ async fn no_matching_memories_no_injection() {
         .await
         .unwrap();
 
-    let systems = captures.lock().unwrap().clone();
+    let systems = captures.systems.lock().unwrap().clone();
+    let user_texts = captures.user_texts.lock().unwrap().clone();
     assert_eq!(systems.len(), 1);
     assert_eq!(
         systems[0], "base system prompt",
         "system prompt should be unchanged when no memories match"
+    );
+    assert!(
+        !user_texts[0].contains("## Relevant memories"),
+        "no injection block when no memories match: {}",
+        user_texts[0]
     );
 }
 
@@ -329,9 +387,11 @@ async fn no_store_no_injection() {
         .await
         .unwrap();
 
-    let systems = captures.lock().unwrap().clone();
+    let systems = captures.systems.lock().unwrap().clone();
+    let user_texts = captures.user_texts.lock().unwrap().clone();
     assert_eq!(systems.len(), 1);
     assert_eq!(systems[0], "base system prompt");
+    assert!(!user_texts[0].contains("## Relevant memories"));
 }
 
 /// Very short queries (< 3 chars) skip injection entirely.
@@ -357,16 +417,20 @@ async fn short_query_skips_injection() {
     // "hi" is only 2 chars — below INJECTION_MIN_QUERY_LEN (3).
     agent.run_turn_text("hi").await.unwrap();
 
-    let systems = captures.lock().unwrap().clone();
+    let systems = captures.systems.lock().unwrap().clone();
+    let user_texts = captures.user_texts.lock().unwrap().clone();
     assert_eq!(systems.len(), 1);
-    assert_eq!(
-        systems[0], "base system prompt",
-        "short query should not trigger injection"
+    assert_eq!(systems[0], "base system prompt");
+    assert!(
+        !user_texts[0].contains("## Relevant memories"),
+        "short query should not trigger injection: {}",
+        user_texts[0]
     );
 }
 
-/// Injection is computed once per turn and reused across all provider calls within
-/// the same turn (when tool calls trigger multiple iterations).
+/// Injection is computed once per turn and lives in the message history, so it's
+/// seen identically across all provider calls within the same turn (when tool calls
+/// trigger multiple iterations). The system prompt stays static throughout.
 #[tokio::test]
 async fn injection_consistent_across_iterations() {
     let store = InMemoryStore::new();
@@ -405,18 +469,24 @@ async fn injection_consistent_across_iterations() {
         .await
         .unwrap();
 
-    let systems = captures.lock().unwrap().clone();
-    // Provider is called twice (tool use + end turn), both with the same effective system.
+    let systems = captures.systems.lock().unwrap().clone();
+    let user_texts = captures.user_texts.lock().unwrap().clone();
+    // Provider is called twice (tool use + end turn).
     assert_eq!(systems.len(), 2, "provider should be called twice");
+    // System prompt is static across iterations — never carries injection.
+    assert_eq!(systems[0], "base system prompt");
+    assert_eq!(systems[1], "base system prompt");
+    // The injected memory lives in history, so it's identical in both calls.
     assert_eq!(
-        systems[0], systems[1],
-        "system prompt should be identical across iterations of the same turn"
+        user_texts[0], user_texts[1],
+        "user content (incl. injection) should be identical across iterations"
     );
     assert!(
-        systems[0].contains("## Relevant memories"),
-        "injection should be present in both calls"
+        user_texts[0].contains("## Relevant memories"),
+        "injection should be present in both calls: {}",
+        user_texts[0]
     );
-    assert!(systems[0].contains("User is left-handed"));
+    assert!(user_texts[0].contains("User is left-handed"));
 }
 
 /// Inferred memories appear in the Inferred subsection with confidence labels.
@@ -448,19 +518,24 @@ async fn inferred_memory_has_confidence_label() {
         .await
         .unwrap();
 
-    let systems = captures.lock().unwrap().clone();
-    let system = &systems[0];
+    let systems = captures.systems.lock().unwrap().clone();
+    let user_texts = captures.user_texts.lock().unwrap().clone();
+    assert_eq!(
+        systems[0], "base system prompt",
+        "system prompt stays static"
+    );
+    let user_text = &user_texts[0];
     assert!(
-        system.contains("### Inferred (lower confidence)"),
-        "inferred section should be present: {system}"
+        user_text.contains("### Inferred (lower confidence)"),
+        "inferred section should be present: {user_text}"
     );
     assert!(
-        system.contains("confidence: 0.65"),
-        "confidence label should be present: {system}"
+        user_text.contains("confidence: 0.65"),
+        "confidence label should be present: {user_text}"
     );
     assert!(
-        !system.contains("### Verified"),
-        "verified section should be absent when no verified memories: {system}"
+        !user_text.contains("### Verified"),
+        "verified section should be absent when no verified memories: {user_text}"
     );
 }
 
@@ -501,11 +576,12 @@ async fn agent_cannot_suppress_injection() {
         .await
         .unwrap();
 
-    let systems = captures.lock().unwrap().clone();
-    // Regardless of what the model outputs, the injection was in the system prompt.
+    let user_texts = captures.user_texts.lock().unwrap().clone();
+    // Regardless of what the model outputs, the injection was in the user message.
     assert!(
-        systems[0].contains("## Relevant memories"),
-        "injection must be present regardless of agent response"
+        user_texts[0].contains("## Relevant memories"),
+        "injection must be present regardless of agent response: {}",
+        user_texts[0]
     );
-    assert!(systems[0].contains("User's name is Alice"));
+    assert!(user_texts[0].contains("User's name is Alice"));
 }

@@ -146,7 +146,7 @@ Everything else — connectors, credential brokering, audit logging, IPC plugins
 
 ### Proactive Memory Injection (M6d complete)
 - [x] Before each turn, runtime embeds user message and queries relevant memories
-- [x] Top memories injected into system prompt with confidence labels
+- [x] Top memories injected into the user message with confidence labels (keeps the system prompt byte-stable so the prompt cache prefix stays valid)
 - [x] Agent cannot suppress injection — runtime controls context
 
 ### Session Persistence
