@@ -27,6 +27,7 @@ import os from "node:os";
 // (Dockerfile: mcr.microsoft.com/playwright:v1.51.0-noble) so no extra browser
 // download is needed.
 import { chromium } from "patchright";
+import { detectChallenge, CHALLENGE_PREFIX } from "./challenge.mjs";
 
 const SOCKET_PATH = process.env.CHERUB_IPC_SOCKET || "/ipc/tool.sock";
 const MAX_TEXT_LENGTH = 16 * 1024; // 16 KB text output limit
@@ -139,19 +140,38 @@ async function handleBrowse(params) {
   const title = await p.title();
   const text = await p.evaluate(() => document.body?.innerText || "");
   const currentUrl = p.url();
+  const challenge = await detectChallenge(p);
 
   // Take an automatic screenshot
   const screenshotBuf = await p.screenshot({ type: "png", fullPage: false });
   const screenshotBase64 = screenshotBuf.toString("base64");
+  const images = [{ media_type: "image/png", data: screenshotBase64 }];
 
-  const output = truncate(
-    `Page: ${title}\nURL: ${currentUrl}\n\n${text}`
-  );
+  // Full-page wall: the content is gated behind human verification. Abort the
+  // read with a terminal signal — solving it is off-limits, and retrying or
+  // waiting would just hang an autonomous loop.
+  if (challenge.wall) {
+    return {
+      output:
+        `${CHALLENGE_PREFIX} ${challenge.wall} at ${currentUrl}. This page is ` +
+        `gated by a human-verification challenge (CAPTCHA) and cannot be ` +
+        `accessed automatically. Do not retry — report this to the user or move on.`,
+      images,
+    };
+  }
 
-  return {
-    output,
-    images: [{ media_type: "image/png", data: screenshotBase64 }],
-  };
+  let output = truncate(`Page: ${title}\nURL: ${currentUrl}\n\n${text}`);
+
+  // Widget on an otherwise-usable page: the read succeeded, but warn that any
+  // form submission gated by this CAPTCHA cannot be completed automatically.
+  if (challenge.widget) {
+    output =
+      `Note: this page contains a ${challenge.widget} CAPTCHA — form ` +
+      `submission here requires human verification and cannot be completed ` +
+      `automatically.\n\n${output}`;
+  }
+
+  return { output, images };
 }
 
 async function handleClick(params) {
@@ -162,6 +182,19 @@ async function handleClick(params) {
   // Brief wait for any navigation/rendering triggered by the click
   await p.waitForTimeout(500);
   const url = p.url();
+
+  // A click (e.g. a form submit) can trigger a challenge wall. Surface it
+  // cleanly rather than letting subsequent actions spin against a gated page.
+  const challenge = await detectChallenge(p);
+  if (challenge.wall) {
+    return {
+      output:
+        `${CHALLENGE_PREFIX} ${challenge.wall} at ${url} after clicking ` +
+        `"${params.selector}". A human-verification challenge appeared and ` +
+        `cannot be solved automatically. Do not retry.`,
+    };
+  }
+
   return { output: `Clicked "${params.selector}" on ${url}` };
 }
 

@@ -8,8 +8,9 @@ WORKDIR /app
 COPY package.json /app/package.json
 RUN npm install --production
 
-# Copy IPC client
+# Copy IPC client + its modules
 COPY ipc_client.mjs /app/ipc_client.mjs
+COPY challenge.mjs /app/challenge.mjs
 
 # Create IPC socket directory
 RUN mkdir -p /ipc && chown pwuser:pwuser /ipc
