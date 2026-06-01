@@ -145,7 +145,7 @@ cherub/
 ├── tools/
 │   └── container/
 │       ├── sandbox-bash/     # Dockerfile + entrypoint for container-sandboxed bash (feature = "container")
-│       └── browser/          # Dockerfile + ipc_client.mjs for Playwright browser tool (feature = "browser")
+│       └── browser/          # Dockerfile + ipc_client.mjs + challenge.mjs (CAPTCHA/anti-bot detection) for Playwright browser tool (feature = "browser")
 ├── config/
 │   └── default_policy.toml   # Example policy file
 ├── DESIGN.md
