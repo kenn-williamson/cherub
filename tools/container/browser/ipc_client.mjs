@@ -18,10 +18,25 @@
  */
 
 import net from "node:net";
-import { chromium } from "playwright-core";
+import fs from "node:fs";
+import os from "node:os";
+// patchright is a drop-in Playwright fork that patches the automation tells
+// Cloudflare/DataDome fingerprint: the CDP `Runtime.enable` leak, the
+// `navigator.webdriver` flag, the console.enable leak, and shadow-DOM
+// injection. Pinned to the same minor as the base image's bundled Chromium
+// (Dockerfile: mcr.microsoft.com/playwright:v1.51.0-noble) so no extra browser
+// download is needed.
+import { chromium } from "patchright";
 
 const SOCKET_PATH = process.env.CHERUB_IPC_SOCKET || "/ipc/tool.sock";
 const MAX_TEXT_LENGTH = 16 * 1024; // 16 KB text output limit
+
+// Persistent profile directory. Keeping a single profile for the container's
+// lifetime lets a `cf_clearance` cookie (granted after a Cloudflare challenge
+// passes) survive across multiple browser actions in a session instead of
+// re-challenging on every call.
+const PROFILE_DIR =
+  process.env.CHERUB_BROWSER_PROFILE || `${os.tmpdir()}/cherub-browser-profile`;
 
 // ─── IPC Transport ──────────────────────────────────────────────────────────
 
@@ -66,22 +81,39 @@ class IpcTransport {
 
 // ─── Browser State ──────────────────────────────────────────────────────────
 
-let browser = null;
 let context = null;
 let page = null;
 
 async function ensureBrowser() {
-  if (!browser) {
-    browser = await chromium.launch({
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+  if (!context) {
+    fs.mkdirSync(PROFILE_DIR, { recursive: true });
+    // launchPersistentContext (not launch + newContext) is patchright's
+    // recommended entry point — a real on-disk profile looks far less
+    // synthetic than an ephemeral incognito context.
+    //
+    // headless:false runs a genuine headed Chromium; the container's CMD wraps
+    // node in `xvfb-run`, providing a virtual X display. Headed Chromium under
+    // Xvfb clears Cloudflare "Managed Challenge" interstitials that headless
+    // signatures trip. viewport:null makes the page viewport track the real
+    // window size (natural) instead of a fixed headless-style rectangle.
+    //
+    // No userAgent override: a spoofed UA that disagrees with the real platform
+    // is itself a tell. We let Chromium report its genuine (headed) UA, which
+    // patchright keeps internally consistent. --no-sandbox is required inside
+    // the container; it is a weak signal compared to the leaks patchright closes.
+    context = await chromium.launchPersistentContext(PROFILE_DIR, {
+      headless: false,
+      viewport: null,
+      // --window-size matches the Xvfb screen (Dockerfile: 1920x1080) so the
+      // window — and thus the viewport, with viewport:null — is a natural full
+      // size rather than Chromium's tiny default.
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--window-size=1920,1080",
+      ],
     });
-    context = await browser.newContext({
-      viewport: { width: 1280, height: 720 },
-      userAgent:
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    });
-    page = await context.newPage();
+    page = context.pages()[0] || (await context.newPage());
   }
   return page;
 }
@@ -297,8 +329,8 @@ async function main() {
         level: "info",
         message: "Shutting down browser",
       });
-      if (browser) {
-        await browser.close().catch(() => {});
+      if (context) {
+        await context.close().catch(() => {});
       }
       process.exit(0);
     }
