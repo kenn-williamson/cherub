@@ -816,12 +816,14 @@ The runtime — not the agent — decides what memories are relevant to the curr
 
 1. Embeds the current user message
 2. Queries the memory store for relevant memories (hybrid search)
-3. Injects top-ranked memories into the system prompt as context
+3. Appends top-ranked memories to the current user message as context
 4. The agent sees relevant history without having to search for it
+
+Injection rides the user message rather than the system prompt deliberately: the surfaced memory set changes every turn (it's keyed to the current query), so appending it to the system block would mutate the cached prefix and invalidate Anthropic's prompt cache for the entire conversation history on every turn. Riding the new turn's content keeps the system prompt byte-stable, so the cache prefix (tools + system + prior history) keeps hitting.
 
 This is important because it is **outside the agent's control**. The agent cannot choose to ignore its memories. The runtime injects them. If the user said "I'm allergic to peanuts" six months ago and the agent is now ordering groceries, that memory surfaces automatically.
 
-The injection is also subject to confidence weighting. Explicit memories (confidence 1.0) are injected with higher priority than inferred memories (confidence 0.5). The system prompt might include:
+The injection is also subject to confidence weighting. Explicit memories (confidence 1.0) are injected with higher priority than inferred memories (confidence 0.5). The injected block might include:
 
 ```
 ## Relevant memories (verified)

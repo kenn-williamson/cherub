@@ -107,3 +107,17 @@ Contradiction detection (M6) surfaces similar memories to the agent during write
 - Memory merge: combine two memories into one (with provenance from both)
 - `op_update()` contradiction check: currently deferred because it needs `get_by_id()` on `MemoryStore` to load scope/user_id from the existing memory
 - Admin CLI: `cherub memory list/search/reconcile` subcommands for operator use
+
+## Image / Screenshot Token Normalization
+
+Browser screenshots are the most token-expensive thing a turn can carry, and the runtime currently neither bounds nor accurately accounts for them. Anthropic bills images at roughly `(width × height) / 750` tokens — a 1920×1080 screenshot is ~2,765 tokens — but `tokens::estimate_tokens` counts a flat 1,000 per image (`runtime/tokens.rs`). Two problems compound:
+
+1. **Undercount → late compaction.** The estimator thinks a screenshot-heavy context is ~2.7× smaller than it is, so compaction fires late and the context runs bigger (and more expensive) than intended.
+2. **Unbounded persistence.** Each screenshot stays in message history for the rest of the session and is re-sent every turn (at the cache-read rate if the prefix is intact, full rate if not). A 10-screenshot browse session can carry ~27K tokens of images on every subsequent turn.
+
+Levers to weigh (this is why it's deferred — it needs design, not just a patch):
+- **Downscale before encoding** — cap the long edge (e.g. 1024–1280px) and/or switch PNG→JPEG in `tools/container/browser` before the image crosses IPC. Trades visual fidelity for tokens; needs a quality threshold the model can still read.
+- **Evict stale screenshots from history** — replace all-but-the-most-recent-N images with a text stub ("[screenshot from step 3 elided]"). Overlaps with the broader tool-result/context-editing lever; Anthropic's native context-editing may cover this.
+- **Accurate estimation** — compute the image token cost from actual dimensions instead of the flat 1,000, so compaction triggers on time.
+
+Open questions: where downscaling belongs (browser container vs. runtime ingest), whether eviction should be image-specific or part of a general tool-result eviction pass, and how to keep the most-decision-relevant screenshot when evicting. Pairs naturally with the prompt-cache work (`feat/prompt-cache-stability`) — both are about keeping the re-sent prefix cheap.

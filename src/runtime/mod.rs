@@ -52,7 +52,7 @@ const COMPACTION_MIN_MESSAGES: usize = 10;
 /// written to `.cherub-stash/{tool_use_id}.txt` for retrieval via file read.
 const TOOL_RESULT_MAX_BYTES: usize = 50 * 1024; // 50KB
 
-/// Maximum number of memories injected into the system prompt per turn.
+/// Maximum number of memories injected into the user message per turn.
 #[cfg(feature = "memory")]
 const INJECTION_MAX_MEMORIES: i64 = 5;
 
@@ -179,7 +179,8 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
     /// Attach a memory store for proactive injection.
     ///
     /// When attached, the runtime embeds the user message and queries for relevant
-    /// memories before each turn, injecting results into the system prompt. The agent
+    /// memories before each turn, appending results to the user message (the system
+    /// prompt stays static so the prompt cache prefix keeps hitting). The agent
     /// cannot suppress injection — context is controlled entirely by the runtime.
     ///
     /// Call this once after `new()` and before the first `run_turn()`.
@@ -519,17 +520,16 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
 
     /// Check whether the session exceeds the context window threshold and compact if so.
     ///
-    /// Called once per turn, after pushing the user message and building the effective
-    /// system prompt, but **before** the iteration loop. Mid-turn compaction would
-    /// break tool_use/tool_result pairing.
-    async fn maybe_compact(&mut self, effective_system: &str) -> Result<(), CherubError> {
+    /// Called once per turn, after pushing the user message but **before** the
+    /// iteration loop. Mid-turn compaction would break tool_use/tool_result pairing.
+    async fn maybe_compact(&mut self) -> Result<(), CherubError> {
         if self.session.messages.len() < COMPACTION_MIN_MESSAGES {
             return Ok(());
         }
 
         let input_tokens = self.last_usage.map(|u| u.input_tokens).unwrap_or_else(|| {
             tokens::estimate_tokens(
-                effective_system,
+                &self.system_prompt,
                 &self.session.messages,
                 &self.tool_definitions,
             )
@@ -549,13 +549,13 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
             "context window threshold exceeded, compacting"
         );
 
-        self.run_compaction(effective_system).await
+        self.run_compaction().await
     }
 
     /// Force compaction regardless of token estimates. Called when an API
     /// call fails with a timeout/connection error — strong signal the
     /// payload is too large.
-    async fn force_compact(&mut self, effective_system: &str) -> Result<(), CherubError> {
+    async fn force_compact(&mut self) -> Result<(), CherubError> {
         if self.session.messages.len() < COMPACTION_MIN_MESSAGES {
             return Ok(());
         }
@@ -563,10 +563,10 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
             message_count = self.session.messages.len(),
             "force-compacting after API failure"
         );
-        self.run_compaction(effective_system).await
+        self.run_compaction().await
     }
 
-    async fn run_compaction(&mut self, effective_system: &str) -> Result<(), CherubError> {
+    async fn run_compaction(&mut self) -> Result<(), CherubError> {
         let Some((old, recent)) = self
             .session
             .split_for_compaction(COMPACTION_PRESERVE_RECENT)
@@ -585,9 +585,9 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
         .await;
 
         #[cfg(feature = "memory")]
-        self.flush_to_memory(&old, effective_system).await;
+        self.flush_to_memory(&old).await;
 
-        let summary = self.summarize(&old, effective_system).await?;
+        let summary = self.summarize(&old).await?;
 
         let compaction_number = self.session.compaction_count + 1;
         let summary_user = Message::user_text(&format!(
@@ -627,11 +627,7 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
     ///
     /// Uses a summarization-only prompt (no tools, no enforcement) — this is a
     /// runtime operation, not an agent tool call.
-    async fn summarize(
-        &self,
-        messages: &[Message],
-        _effective_system: &str,
-    ) -> Result<String, CherubError> {
+    async fn summarize(&self, messages: &[Message]) -> Result<String, CherubError> {
         let conversation_text = prompt::serialize_messages_for_prompt(messages);
 
         let summarize_prompt = format!(
@@ -701,7 +697,7 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
     /// Non-fatal throughout: any failure at any step logs a warning and proceeds.
     /// Compaction must succeed regardless of memory flush outcomes.
     #[cfg(feature = "memory")]
-    async fn flush_to_memory(&self, messages: &[Message], effective_system: &str) {
+    async fn flush_to_memory(&self, messages: &[Message]) {
         let Some(ref store) = self.memory_store else {
             return;
         };
@@ -725,7 +721,7 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
         let extraction_messages = vec![Message::user_text(&extraction_prompt)];
         let result = self
             .provider
-            .complete(effective_system, &extraction_messages, &[])
+            .complete(&self.system_prompt, &extraction_messages, &[])
             .await;
 
         let (response, extraction_usage) = match result {
@@ -908,68 +904,62 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
         )
         .await;
 
-        // Extract text for injection query AFTER hooks have processed content.
+        // Surface relevant memories and append them as a dedicated block on the
+        // user message (M6d). Injection rides the *new* turn's content rather than
+        // the system prompt: the system block stays byte-stable, so the Anthropic
+        // prompt-cache prefix (tools + system + prior history) keeps hitting instead
+        // of being invalidated every turn. Done AFTER hooks have processed content
+        // and BEFORE the message is pushed. The agent cannot suppress injection —
+        // this is runtime-controlled context.
         #[cfg(feature = "memory")]
-        let user_query = extract_user_text(&content);
+        {
+            let user_query = extract_user_text(&content);
+            if user_query.len() >= INJECTION_MIN_QUERY_LEN
+                && let Some(ref store) = self.memory_store
+            {
+                match store
+                    .search(
+                        &user_query,
+                        None,
+                        Some(&self.session.user_id),
+                        INJECTION_MAX_MEMORIES,
+                    )
+                    .await
+                {
+                    Ok(memories) if !memories.is_empty() => {
+                        // Touch each injected memory (fire-and-forget, non-fatal).
+                        for m in &memories {
+                            let id = m.id;
+                            let store_clone = std::sync::Arc::clone(store);
+                            tokio::spawn(async move {
+                                let _ = store_clone.touch(id).await;
+                            });
+                        }
+                        let injection = prompt::format_memory_injection(&memories);
+                        info!(
+                            memory_count = memories.len(),
+                            "memory injection: surfaced relevant memories"
+                        );
+                        content.push(UserContent::Text(injection));
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            "memory injection search failed, proceeding without injection"
+                        );
+                    }
+                }
+            }
+        }
 
         self.session.push(Message::User { content });
         #[cfg(feature = "sessions")]
         self.session.persist_last().await;
 
-        // Build effective system prompt — may include injected memories (M6d).
-        // Computed once per turn, used for every provider.complete() call in this turn.
-        // The agent cannot suppress injection: this is runtime-controlled context.
-        #[cfg(feature = "memory")]
-        let effective_system: String = {
-            if user_query.len() >= INJECTION_MIN_QUERY_LEN {
-                if let Some(ref store) = self.memory_store {
-                    match store
-                        .search(
-                            &user_query,
-                            None,
-                            Some(&self.session.user_id),
-                            INJECTION_MAX_MEMORIES,
-                        )
-                        .await
-                    {
-                        Ok(memories) if !memories.is_empty() => {
-                            // Touch each injected memory (fire-and-forget, non-fatal).
-                            for m in &memories {
-                                let id = m.id;
-                                let store_clone = std::sync::Arc::clone(store);
-                                tokio::spawn(async move {
-                                    let _ = store_clone.touch(id).await;
-                                });
-                            }
-                            let injection = prompt::format_memory_injection(&memories);
-                            info!(
-                                memory_count = memories.len(),
-                                "memory injection: surfaced relevant memories"
-                            );
-                            format!("{}{}", self.system_prompt, injection)
-                        }
-                        Ok(_) => self.system_prompt.clone(),
-                        Err(e) => {
-                            warn!(
-                                error = %e,
-                                "memory injection search failed, proceeding without injection"
-                            );
-                            self.system_prompt.clone()
-                        }
-                    }
-                } else {
-                    self.system_prompt.clone()
-                }
-            } else {
-                self.system_prompt.clone()
-            }
-        };
-        #[cfg(not(feature = "memory"))]
-        let effective_system: String = self.system_prompt.clone();
-
         // Context compaction: summarize older messages if the context window is filling up.
         // Runs before the iteration loop — mid-turn compaction would break tool_use/tool_result.
-        self.maybe_compact(&effective_system).await?;
+        self.maybe_compact().await?;
 
         self.cancel_flag.store(false, Ordering::Relaxed);
 
@@ -985,7 +975,7 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
             if self.session.messages.len() >= COMPACTION_MIN_MESSAGES {
                 let input_tokens = self.last_usage.map(|u| u.input_tokens).unwrap_or_else(|| {
                     tokens::estimate_tokens(
-                        &effective_system,
+                        &self.system_prompt,
                         &self.session.messages,
                         &self.tool_definitions,
                     )
@@ -999,7 +989,7 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                         iteration,
                         "hard-stop: context window near capacity, compacting mid-turn"
                     );
-                    self.maybe_compact(&effective_system).await?;
+                    self.maybe_compact().await?;
                 }
             }
 
@@ -1007,7 +997,7 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
             hooks::dispatch_before_provider_call(
                 &self.hooks,
                 &hooks::ProviderCallContext {
-                    system_prompt: &effective_system,
+                    system_prompt: &self.system_prompt,
                     messages: &self.session.messages,
                     iteration,
                 },
@@ -1026,7 +1016,7 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
             let (assistant_msg, usage) = {
                 let output = &self.output;
                 let api_fut = self.provider.complete(
-                    &effective_system,
+                    &self.system_prompt,
                     &self.session.messages,
                     &self.tool_definitions,
                 );
@@ -1054,10 +1044,10 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
                         warn!(
                             "API call failed (likely payload too large), compacting and retrying"
                         );
-                        self.force_compact(&effective_system).await?;
+                        self.force_compact().await?;
                         self.provider
                             .complete(
-                                &effective_system,
+                                &self.system_prompt,
                                 &self.session.messages,
                                 &self.tool_definitions,
                             )
@@ -1069,6 +1059,24 @@ impl<A: ApprovalGate, O: OutputSink> AgentLoop<A, O> {
 
             if let Some(u) = usage {
                 self.last_usage = Some(u);
+                // Cache observability: the cached prefix (system + tools + prior
+                // history) should be read at ~10% cost. A low hit % on later
+                // iterations means the prefix is being invalidated — watch this
+                // ratio in production to catch cache regressions.
+                let cached_prefix = u.cache_read_tokens + u.cache_creation_tokens;
+                let prompt_total = u.input_tokens + cached_prefix;
+                let cache_hit_pct = (100 * u.cache_read_tokens)
+                    .checked_div(prompt_total)
+                    .unwrap_or(0);
+                info!(
+                    target: "cherub::cost",
+                    input_tokens = u.input_tokens,
+                    output_tokens = u.output_tokens,
+                    cache_read_tokens = u.cache_read_tokens,
+                    cache_creation_tokens = u.cache_creation_tokens,
+                    cache_hit_pct,
+                    "token usage"
+                );
                 #[cfg(feature = "postgres")]
                 self.record_cost(u, CallType::Inference).await;
             }
