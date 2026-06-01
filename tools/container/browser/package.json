@@ -3,6 +3,6 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "playwright-core": "1.51.0"
+    "patchright": "1.51.0"
   }
 }
