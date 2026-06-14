@@ -49,7 +49,11 @@ pub(crate) struct InjectionResult {
 ///
 /// One broker is shared across all HTTP tool instances via `Arc`.
 pub struct CredentialBroker {
-    store: Arc<dyn CredentialStore>,
+    /// The process's single credential store. Also reached directly (by
+    /// `app::build_registry`) to resolve MCP `credential_env` references —
+    /// the broker is the process-wide credentials handle, so MCP credential
+    /// injection goes through the same store the HTTP tool uses.
+    pub(crate) store: Arc<dyn CredentialStore>,
 }
 
 impl CredentialBroker {

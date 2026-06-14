@@ -152,6 +152,18 @@ pub struct ResourceGuards {
     pub ipc_dirs: Vec<PathBuf>,
 }
 
+/// The credential store MCP `credential_env` resolves through: the broker's
+/// store, which is the process-wide credentials handle. Returns `None` when no
+/// broker is configured (no master key / DB) — the loader then errors only if a
+/// server actually declares `credential_env`. Reaching the store through the
+/// broker keeps MCP credential injection and the HTTP tool on one vault.
+#[cfg(all(feature = "mcp", feature = "credentials"))]
+fn mcp_credential_store(cfg: &AgentConfig) -> Option<&dyn crate::storage::CredentialStore> {
+    cfg.credential_broker
+        .as_ref()
+        .map(|broker| broker.store.as_ref())
+}
+
 /// Assemble the full `ToolRegistry` from `cfg`. This is the single place that
 /// spawns MCP servers, connects to Docker, compiles WASM modules, and wires
 /// every tool. It runs once (inside `SharedAgentServices::build`) and the
@@ -341,7 +353,7 @@ pub async fn build_registry(
         let result = crate::tools::mcp::loader::load_from_config(
             config_path,
             #[cfg(feature = "credentials")]
-            None, // TODO: wire credential store for MCP credential_env
+            mcp_credential_store(cfg),
             #[cfg(feature = "credentials")]
             &cfg.user_id,
         )
@@ -749,6 +761,80 @@ mod tests {
             cli_tools, telegram_tools,
             "tool set must not depend on transport identity"
         );
+    }
+
+    /// MCP `credential_env` must resolve through the configured broker's store.
+    /// Before this wiring, `build_registry` passed `None` and any server with a
+    /// `credential_env` would fail with "requires credential store" even when a
+    /// vault was configured. These tests pin the extraction: `None` with no
+    /// broker, and the broker's own store when one is present.
+    #[cfg(all(feature = "mcp", feature = "credentials"))]
+    mod mcp_credential_wiring {
+        use super::*;
+        use crate::storage::{
+            Credential, CredentialRef, CredentialStore, DecryptedCredential, NewCredential,
+        };
+        use crate::tools::credential_broker::CredentialBroker;
+
+        /// Minimal store whose `get` records the lookup as a recognizable error,
+        /// proving which store the wiring reached. Every other method is unused.
+        struct SentinelStore;
+
+        #[async_trait::async_trait]
+        impl CredentialStore for SentinelStore {
+            async fn get(&self, _user_id: &str, name: &str) -> Result<Credential, CherubError> {
+                Err(CherubError::Credential(format!("sentinel:{name}")))
+            }
+            async fn store(&self, _c: NewCredential) -> Result<uuid::Uuid, CherubError> {
+                unimplemented!("unused by the wiring test")
+            }
+            async fn get_ref(&self, _u: &str, _n: &str) -> Result<CredentialRef, CherubError> {
+                unimplemented!("unused by the wiring test")
+            }
+            async fn list(&self, _u: &str) -> Result<Vec<CredentialRef>, CherubError> {
+                unimplemented!("unused by the wiring test")
+            }
+            async fn delete(&self, _u: &str, _n: &str) -> Result<(), CherubError> {
+                unimplemented!("unused by the wiring test")
+            }
+            async fn exists(&self, _u: &str, _n: &str) -> Result<bool, CherubError> {
+                unimplemented!("unused by the wiring test")
+            }
+            async fn decrypt(&self, _c: &Credential) -> Result<DecryptedCredential, CherubError> {
+                unimplemented!("unused by the wiring test")
+            }
+            async fn record_usage(&self, _u: &str, _n: &str) -> Result<(), CherubError> {
+                unimplemented!("unused by the wiring test")
+            }
+            async fn is_expired(&self, _u: &str, _n: &str) -> Result<bool, CherubError> {
+                unimplemented!("unused by the wiring test")
+            }
+        }
+
+        #[test]
+        fn no_broker_yields_no_store() {
+            let cfg = base_config();
+            assert!(
+                mcp_credential_store(&cfg).is_none(),
+                "without a broker, MCP credential_env has no store to resolve against"
+            );
+        }
+
+        #[tokio::test]
+        async fn broker_exposes_its_own_store() {
+            let mut cfg = base_config();
+            cfg.credential_broker = Some(Arc::new(CredentialBroker::new(Arc::new(SentinelStore))));
+
+            let store = mcp_credential_store(&cfg).expect("broker present → store wired");
+
+            // Reaching .get proves the store the loader receives is the broker's
+            // own SentinelStore, not some unrelated handle.
+            let err = store.get("u", "kairos-oauth").await.unwrap_err();
+            assert!(
+                err.to_string().contains("sentinel:kairos-oauth"),
+                "loader must resolve credential_env through the broker's store, got: {err}"
+            );
+        }
     }
 
     #[tokio::test]
